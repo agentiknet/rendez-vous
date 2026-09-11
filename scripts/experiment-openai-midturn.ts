@@ -299,11 +299,74 @@ async function runCancelExperiment(agentId: string): Promise<void> {
   console.log(`\n-- DELETE /agents/sessions/${sessionId} --\nstatus: ${del.status}\nbody: ${del.bodyText}`)
 }
 
+function parseStatus(raw: RawResponse): string | undefined {
+  const parsed: unknown = JSON.parse(raw.bodyText)
+  return isRecord(parsed) ? stringField(parsed, "status") : undefined
+}
+
+async function waitForIdle(sessionId: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const state = await getJson(`/agents/sessions/${sessionId}`)
+    if (parseStatus(state) === "idle") return
+    await sleep(300)
+  }
+  throw new Error(`session ${sessionId} did not reach idle within ${timeoutMs}ms`)
+}
+
+/** Experiment 1 tests input arriving during the FIRST turn, which OpenAI
+ *  rejects with the specific message "session initial input is still
+ *  pending" — worded around session creation, not turn-in-progress in
+ *  general. This experiment disambiguates: it lets turn 1 finish, starts a
+ *  SECOND turn via `events.create` (not session creation), and fires the
+ *  probe input mid-turn-2, to see whether the same rejection (and wording)
+ *  holds for an ordinary, non-initial turn. */
+async function runSecondTurnMidTurnExperiment(agentId: string): Promise<void> {
+  console.log("\n\n########## EXPERIMENT 3: second `message` input while a NON-initial turn is in progress ##########")
+  const sessionId = await createSession(agentId, "Reply with exactly the single word: ready")
+  await waitForIdle(sessionId, 30_000)
+  console.log(`\nsession ${sessionId} is idle after turn 1, starting turn 2`)
+
+  const t0 = Date.now()
+  const collectPromise = collectEvents(`/agents/sessions/${sessionId}/events`, t0, MAIN_TIMEOUT_MS)
+  await sleep(500)
+
+  const turn2 = await postJson(
+    `/agents/sessions/${sessionId}/events`,
+    messageEvent("Count slowly from 1 to 40, one number per line, no tools."),
+  )
+  console.log(`\n[+${Date.now() - t0}ms] turn-2 input (message)`)
+  console.log(`  status: ${turn2.status}`)
+  console.log(`  body: ${turn2.bodyText}`)
+
+  await sleep(SECOND_INPUT_DELAY_MS)
+
+  const probe = await postJson(
+    `/agents/sessions/${sessionId}/events`,
+    messageEvent("Third message: reply with the single word pong"),
+  )
+  console.log(`\n[+${Date.now() - t0}ms] PROBE input (message, sent mid-turn-2) — raw response verbatim:`)
+  console.log(`  status: ${probe.status}`)
+  console.log(`  body: ${probe.bodyText}`)
+
+  const events = await collectPromise
+  console.log(`\n-- ordered event stream (${events.length} events) --`)
+  for (const evt of events) console.log(describeEvent(evt))
+
+  const finalState = await getJson(`/agents/sessions/${sessionId}`)
+  console.log(`\n-- GET /agents/sessions/${sessionId} (final state) --`)
+  console.log(`status: ${finalState.status}\nbody: ${finalState.bodyText}`)
+
+  const del = await deleteResource(`/agents/sessions/${sessionId}`)
+  console.log(`\n-- DELETE /agents/sessions/${sessionId} --\nstatus: ${del.status}\nbody: ${del.bodyText}`)
+}
+
 async function main(): Promise<void> {
   const agentId = await createAgent()
   try {
     await runMidTurnMessageExperiment(agentId)
     await runCancelExperiment(agentId)
+    await runSecondTurnMidTurnExperiment(agentId)
   } finally {
     const del = await deleteResource(`/agents/${agentId}`)
     console.log(`\n-- DELETE /agents/${agentId} --\nstatus: ${del.status}\nbody: ${del.bodyText}`)

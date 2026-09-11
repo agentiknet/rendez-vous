@@ -12,6 +12,19 @@ import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
  *  depend on process.cwd(). */
 const ARTIFACT_SEED_DIR = fileURLToPath(new URL("../../apps/room-artifact", import.meta.url))
 
+/**
+ * `cwd` for a sandboxed spawn is forwarded verbatim into the BOX's own
+ * `agent_start` (`session-spawn.ts`'s `bootSandboxAgentSession` passes it
+ * straight to `host.start({ cwd, ... })`) — it must be a directory that
+ * exists INSIDE the e2b box, never a path on this host. `process.cwd()`
+ * (this host's repo checkout) does not exist in the box: the box's own
+ * agent-cli spawn fails with ENOENT ("cwd '<path>' does not exist"), which
+ * surfaces as `agent_start: the sandbox's own agent_start failed ... —
+ * agent-cli 'claude-code': failed to spawn ...`. `scripts/prove-sandbox.ts`
+ * gets this right with its own `BOX_CWD = "/home/user"` — match it here.
+ */
+const BOX_CWD = "/home/user"
+
 export interface BootedSession {
   sessionId: string
   sandboxId: string | undefined
@@ -112,7 +125,7 @@ export class E2bBooter implements SessionBooter {
 
   private async bootWithReuse(room: Room, label: string, reuseSandboxId: string | undefined): Promise<BootedSession> {
     const result = await bootRoomSession(this.client, {
-      cwd: process.cwd(),
+      cwd: BOX_CWD,
       label,
       adapter: env.agentAdapter,
       model: env.agentModel,
@@ -142,7 +155,7 @@ export class E2bBooter implements SessionBooter {
       return this.bootWithReuse(room, `rdv-${room.code}`, room.sandboxId)
     }
     const result = await resumeRoomSession(this.client, {
-      cwd: process.cwd(),
+      cwd: BOX_CWD,
       label: `rdv-${room.code}`,
       adapter: env.agentAdapter,
       model: env.agentModel,

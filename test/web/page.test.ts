@@ -92,13 +92,32 @@ test("renderRoomPage includes the join links and an inline QR svg for the web li
   assert.ok(html.includes(links.web))
   assert.ok(links.whatsapp !== undefined && html.includes(links.whatsapp))
   assert.ok(links.telegram !== undefined && html.includes(links.telegram))
-  assert.match(html, /class="invite-qr"[^>]*>\s*<svg/)
+  assert.match(html, /class="join-qr"[^>]*>\s*<svg/)
 })
 
-test("renderRoomPage omits whatsapp/telegram links when they are not configured", () => {
-  const html = renderRoomPage(fakeRoom(), fakeLinks({ whatsapp: undefined, telegram: undefined }))
+test("renderRoomPage renders one join button per configured surface, plus a stay-here button that never depends on config", () => {
+  const links = fakeLinks()
+  const html = renderRoomPage(fakeRoom(), links)
+  assert.match(html, /class="join-btn"[^>]*>Join on WhatsApp</)
+  assert.match(html, /class="join-btn"[^>]*>Join on Telegram</)
+  assert.match(html, /class="join-btn"[^>]*>Join by SMS</)
+  assert.match(html, /id="stay-here-button"[^>]*>Stay here</)
+  // `links.sms` contains a literal `&`, HTML-escaped to `&amp;` in the href —
+  // spot-check the un-ambiguous, non-escaped prefix instead of the full string.
+  assert.ok(links.sms !== undefined && html.includes('href="sms:+15550001111?&amp;body=join%20RDV-7F3K"'))
+})
+
+test("renderRoomPage omits whatsapp/telegram/sms join buttons when they are not configured", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks({ whatsapp: undefined, telegram: undefined, sms: undefined }))
   assert.ok(!html.includes("wa.me"))
   assert.ok(!html.includes("t.me"))
+  assert.ok(!html.includes("sms:"))
+  assert.match(html, /id="stay-here-button"[^>]*>Stay here</)
+})
+
+test("renderRoomPage shows the room code in a large, prominent element", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks())
+  assert.match(html, /class="join-code"[^>]*>Room <span class="code">RDV-7F3K<\/span>/)
 })
 
 test("renderRoomNotFoundPage mentions the code and a hint to create a room", () => {

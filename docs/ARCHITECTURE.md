@@ -574,42 +574,60 @@ costs a real adapter.
 Worth building only if (A) proves the point and we want the contrast on stage:
 same room, one brain local in our box, one brain hosted on theirs.
 
-**Auth in a box — resolved.** Codex stores its credential as a **file**,
-`~/.codex/auth.json`, not as an env var. On this host it is
-`auth_mode: "chatgpt"` (subscription), and the file carries both OAuth material
-(`id_token`, `access_token`, `refresh_token`, `account_id`) and an
-`OPENAI_API_KEY`. The adapter manifest declares only env sources:
-`OPENAI_API_KEY` and `CODEX_API_KEY`.
+**Auth in a box — resolved, and better than a shared API key.**
 
-agentproto's sandbox passes secrets as **env-var slugs** resolved through the
-broker (`env.passthrough` ∪ `env.auth.state.env`, `session-spawn.ts:3427-3448`)
-and never from `process.env`. It does **not** mount files:
-`CAPABILITIES_TODAY.mounts = false` (`sandbox-providers/registry.ts:35`).
+`codex login` exposes three non-interactive paths (`codex login --help`):
 
-| path | into a box? | how |
-| --- | --- | --- |
-| API key | **yes, today** | `env.passthrough: ["OPENAI_API_KEY"]` |
-| ChatGPT subscription | **no, not via passthrough** | file-shaped; would need auth.json written into the box |
+| flag | what it does |
+| --- | --- |
+| `--device-auth` | device-code flow: box prints a code + URL, human approves elsewhere |
+| `--with-access-token` | reads a ChatGPT access token from stdin |
+| `--with-api-key` | reads an API key from stdin |
 
-Note the asymmetry with claude-code, which agentproto models as the env var
-`CLAUDE_CODE_OAUTH_TOKEN` — so **Claude subscription flows into a box for
-free, Codex subscription does not.**
+Locally, `~/.codex/auth.json` is `auth_mode: "chatgpt"` and holds OAuth
+material (`id_token`, `access_token`, `refresh_token`, `account_id`) **and** an
+`OPENAI_API_KEY`. agentproto passes secrets into a box as **env-var slugs**
+resolved through the broker (`session-spawn.ts:3427-3448`), never from
+`process.env`, and mounts no files (`sandbox-providers/registry.ts:35`,
+`mounts: false`).
 
-**Decision: API key for Codex in the box.** Not just convenience. That
-`refresh_token` is long-lived and account-wide, and an ephemeral hackathon
-sandbox is precisely where it should not go. Pay the API rate.
+**Nothing is sent automatically.** A box gets a credential only if the spec
+declares it in `env.passthrough`. There is no implicit forwarding of your
+local login.
 
-**Which closes the fourth-presence-tier question, mostly negatively.** With an
-API key there is no account association, so a box-hosted Codex run will not
-appear in anyone's ChatGPT/Codex surface — API usage is not a ChatGPT
-conversation. With account auth it *might*, but that depends on server-side
-session sync we have not verified, and the box's own `~/.codex/sessions` lives
-in the box regardless.
+Ranked for our use:
 
-The version of the idea worth testing instead depends on nothing OpenAI has to
-give us: **lift the box's codex session file out and resume it on the member's
-own machine.** That is "open the room in my own Codex" via file rather than
-cloud. Cheap to try, fully in our control, still unverified.
+1. **`--device-auth` — the right default.** No secret of yours ever leaves your
+   machine. The box prints a code, the member approves it on their own phone or
+   laptop, and the box holds tokens *that member* authorised. It is also the
+   same gesture as joining the room: a short code on one screen, approved on
+   another.
+2. **`--with-access-token` + `env.passthrough: ["CODEX_ACCESS_TOKEN"]`.**
+   Subscription billing, env-shaped, and **only the access token travels — the
+   long-lived `refresh_token` stays home.** This is the automated room-boot
+   path.
+3. **`--with-api-key`.** Simplest, but bills API rates and drops the account
+   association.
+
+**Correction to an earlier draft**, which said subscription auth cannot reach a
+box and recommended an API key. `--with-access-token` makes it env-shaped, and
+`--device-auth` removes the need to ship anything at all. The API key is now
+third choice, not first.
+
+**This is what makes "bring your own agent" real.** Each member device-auths
+their **own** subscription into the room's box. Alice bills her Claude Max, Bob
+bills his ChatGPT. No shared keys, no pooled credential, and cost attribution
+per member falls out for free. That is a materially better story than "we have
+a key in an env file", and it is the same interaction the room already teaches
+people: scan, approve, you are in.
+
+**And it re-opens the fourth presence tier.** With device auth the box is
+authenticated as that member's actual account, so the auth precondition for
+"see it in your own Codex" is now cleanly satisfiable. Whether Codex syncs
+session history server-side is still unverified, and the box's own
+`~/.codex/sessions` still lives in the box. The session-file lift (copy the
+box's session out, resume locally) remains the variant that depends on nothing
+OpenAI has to give us. Test both; claim neither yet.
 
 **The experiment that decides how loud we are.** The Agents API docs do not
 specify what happens when input arrives mid-turn (§1.3). Two outcomes, both

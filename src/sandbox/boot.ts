@@ -27,6 +27,67 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+/** Best-effort cleanup for a KNOWN, already-existing sandboxId (a `reuse`
+ *  target) when the spawn that was supposed to reconnect to it fails. Never
+ *  throws — a cost-protection best-effort must never mask the real spawn
+ *  error it's reacting to. */
+export type OrphanSandboxKiller = (sandboxId: string) => Promise<void>
+
+const E2B_API_BASE = "https://api.e2b.dev"
+
+/**
+ * Last-resort cost protection (docs/UPSTREAM.md #3): a sandboxed reconnect
+ * that fails during the box's MCP-transport connect step is NOT paused by
+ * the daemon the way its sibling failure paths are — the box can be left
+ * running with no daemon-side session tracking it. The daemon exposes no
+ * HTTP route to act on a bare sandboxId with no live session (`POST
+ * /sessions/:id/kill` needs a session id we don't have here), so this calls
+ * e2b's own API directly. `E2B_API_KEY` is e2b's own credential, not one of
+ * this service's `RDV_*` knobs (src/env.ts) — read once, here only, never
+ * elsewhere, mirroring the "typed env module" discipline for a var that
+ * belongs to a different (third-party) namespace than the rest of `env.ts`.
+ */
+async function killE2bSandboxDirect(sandboxId: string): Promise<void> {
+  const apiKey = process.env.E2B_API_KEY
+  if (apiKey === undefined || apiKey.trim().length === 0) {
+    console.warn(
+      `sandbox ${sandboxId}: spawn failed against a known reuse target and E2B_API_KEY is unset — ` +
+        "cannot cost-protect it directly. Check `agentproto sandbox list` by hand.",
+    )
+    return
+  }
+  try {
+    const res = await fetch(`${E2B_API_BASE}/sandboxes/${sandboxId}`, {
+      method: "DELETE",
+      headers: { "X-API-Key": apiKey },
+    })
+    if (!res.ok && res.status !== 404) {
+      console.warn(`sandbox ${sandboxId}: e2b DELETE returned ${res.status} — may still be running.`)
+    }
+  } catch (err) {
+    console.warn(
+      `sandbox ${sandboxId}: best-effort e2b cleanup failed — ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+}
+
+/** Run `fn`; on failure, best-effort kill `sandboxId` (a box we already knew
+ *  about BEFORE this call, e.g. a `reuse` target) before rethrowing the
+ *  original error unchanged. No-op passthrough when `sandboxId` is
+ *  undefined — nothing to protect for a genuinely fresh boot. */
+async function protectKnownSandboxOnFailure<T>(
+  sandboxId: string | undefined,
+  killOrphanSandbox: OrphanSandboxKiller,
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn()
+  } catch (err) {
+    if (sandboxId !== undefined) await killOrphanSandbox(sandboxId)
+    throw err
+  }
+}
+
 /**
  * `sandbox_reconnect_failed` covers more than one failure inside
  * `createSandboxAgentSessionHost`: `provider.connect()`'s own
@@ -111,23 +172,31 @@ export interface BootRoomSessionOpts {
    *  before `appServe` installs it. Omit only when `appDir` is already
    *  populated some other way. */
   readonly seedFromDir?: string
+  /** Injectable for tests; defaults to the real e2b API call. See
+   *  `killE2bSandboxDirect`'s doc. */
+  readonly killOrphanSandbox?: OrphanSandboxKiller
 }
 
 export async function bootRoomSession(client: DaemonClient, opts: BootRoomSessionOpts): Promise<RoomSessionResult> {
-  const spawned = await client.spawnAgent({
-    adapter: opts.adapter,
-    model: opts.model,
-    cwd: opts.cwd,
-    label: opts.label,
-    prompt: opts.prompt,
-    sandbox: buildSandboxSpec({
-      port: opts.port,
-      appDir: opts.appDir,
-      seedFromDir: opts.seedFromDir,
-      reuse: opts.reuseSandboxId,
-    }),
-    appServe: { dir: opts.appDir, port: opts.port },
-  })
+  const spawned = await protectKnownSandboxOnFailure(
+    opts.reuseSandboxId,
+    opts.killOrphanSandbox ?? killE2bSandboxDirect,
+    () =>
+      client.spawnAgent({
+        adapter: opts.adapter,
+        model: opts.model,
+        cwd: opts.cwd,
+        label: opts.label,
+        prompt: opts.prompt,
+        sandbox: buildSandboxSpec({
+          port: opts.port,
+          appDir: opts.appDir,
+          seedFromDir: opts.seedFromDir,
+          reuse: opts.reuseSandboxId,
+        }),
+        appServe: { dir: opts.appDir, port: opts.port },
+      }),
+  )
   return {
     sessionId: spawned.id,
     sandboxId: spawned.sandboxId,
@@ -160,6 +229,9 @@ export interface ResumeRoomSessionOpts {
    *  reconnect too (harmless: `setupCommands` re-runs idempotently on every
    *  connect) and forwarded to the re-serve fallback below. */
   readonly seedFromDir?: string
+  /** Injectable for tests; defaults to the real e2b API call. Also forwarded
+   *  to the re-serve fallback's `bootRoomSession` call below. */
+  readonly killOrphanSandbox?: OrphanSandboxKiller
 }
 
 /**
@@ -170,23 +242,26 @@ export interface ResumeRoomSessionOpts {
  * that probe comes back dead.
  */
 export async function resumeRoomSession(client: DaemonClient, opts: ResumeRoomSessionOpts): Promise<RoomSessionResult> {
-  const reconnected = await spawnWithReconnectRetry(
-    client,
-    {
-      adapter: opts.adapter,
-      model: opts.model,
-      cwd: opts.cwd,
-      label: opts.label,
-      prompt: opts.prompt,
-      sandbox: buildSandboxSpec({
-        port: opts.port,
-        appDir: opts.appDir,
-        seedFromDir: opts.seedFromDir,
-        reuse: opts.sandboxId,
-      }),
-    },
-    opts.attempts ?? DEFAULT_RESUME_ATTEMPTS,
-    opts.retryDelayMs ?? DEFAULT_RESUME_RETRY_DELAY_MS,
+  const killOrphanSandbox = opts.killOrphanSandbox ?? killE2bSandboxDirect
+  const reconnected = await protectKnownSandboxOnFailure(opts.sandboxId, killOrphanSandbox, () =>
+    spawnWithReconnectRetry(
+      client,
+      {
+        adapter: opts.adapter,
+        model: opts.model,
+        cwd: opts.cwd,
+        label: opts.label,
+        prompt: opts.prompt,
+        sandbox: buildSandboxSpec({
+          port: opts.port,
+          appDir: opts.appDir,
+          seedFromDir: opts.seedFromDir,
+          reuse: opts.sandboxId,
+        }),
+      },
+      opts.attempts ?? DEFAULT_RESUME_ATTEMPTS,
+      opts.retryDelayMs ?? DEFAULT_RESUME_RETRY_DELAY_MS,
+    ),
   )
 
   const status = await probeArtifact(opts.artifactUrl)
@@ -209,6 +284,7 @@ export async function resumeRoomSession(client: DaemonClient, opts: ResumeRoomSe
     appDir: opts.appDir,
     port: opts.port,
     reuseSandboxId: opts.sandboxId,
+    killOrphanSandbox,
     ...(opts.seedFromDir !== undefined ? { seedFromDir: opts.seedFromDir } : {}),
   })
 }

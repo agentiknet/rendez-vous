@@ -94,11 +94,14 @@ curl -s -X POST "$RDV_AGENTPUSH_URL/tools/inbound_route_create" \
     "notify_secret": "'"$RDV_EMAIL_WEBHOOK_SECRET"'"
   }'
 ```
-**Check before relying on the mail route**: `/inbound/agentpush-mail` is the
-module in `src/channels/email/`, not yet confirmed wired into
-`src/service/http.ts` as of docs/AGENTPUSH.md §8.5 — if `curl -s
-$RDV_PUBLIC_URL/inbound/agentpush-mail` 404s, skip email on stage and stick
-to WhatsApp/Telegram + the laptop.
+`POST /inbound/agentpush-mail` is wired into `src/service/http.ts`
+(docs/AGENTPUSH.md §8.5): it calls `parseEmailInbound`, shares the same
+`MessageDedup` as the messenger webhook, and — when the subject carries a
+room code and the sender isn't yet a member of any room — joins that room
+before fanning the message in as a tier-2 turn. Sanity check on the day with
+`curl -s $RDV_PUBLIC_URL/inbound/agentpush-mail` (expect a 400 for an empty
+body, not a 404); a 404 means the tunnel or route is misconfigured, not that
+the route is missing.
 
 ## 6. Start the service
 

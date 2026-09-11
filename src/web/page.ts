@@ -235,6 +235,10 @@ function script(code: string, room: Room): string {
       if (e.key === "Enter") sendMessage();
     });
 
+    document.getElementById("stay-here-button").addEventListener("click", function () {
+      textInput.focus();
+    });
+
     renderRoster(INITIAL_ROOM.members);
     updateArtifact(INITIAL_ROOM.artifactUrl);
     connectStream();
@@ -242,11 +246,24 @@ function script(code: string, room: Room): string {
   `
 }
 
-function inviteLinksHtml(links: JoinLinks): string {
-  const items = [`<a href="${escapeHtml(links.web)}">${escapeHtml(links.web)}</a>`]
-  if (links.whatsapp !== undefined) items.push(`<a href="${escapeHtml(links.whatsapp)}">Join on WhatsApp</a>`)
-  if (links.telegram !== undefined) items.push(`<a href="${escapeHtml(links.telegram)}">Join on Telegram</a>`)
-  return items.join("")
+/** One button per configured surface, in the fidelity-ladder order
+ *  (architecture.md §2.1), plus "stay here" for someone already on this
+ *  page — each surface button is the same deep link `joinLinks` already
+ *  built with `join <code>` prefilled (docs/AGENTPUSH.md §9.5, architecture.md
+ *  §5.3), just rendered as a tappable choice instead of a plain link. */
+function joinButtonsHtml(links: JoinLinks): string {
+  const buttons: string[] = []
+  if (links.whatsapp !== undefined) {
+    buttons.push(`<a class="join-btn" href="${escapeHtml(links.whatsapp)}">Join on WhatsApp</a>`)
+  }
+  if (links.telegram !== undefined) {
+    buttons.push(`<a class="join-btn" href="${escapeHtml(links.telegram)}">Join on Telegram</a>`)
+  }
+  if (links.sms !== undefined) {
+    buttons.push(`<a class="join-btn" href="${escapeHtml(links.sms)}">Join by SMS</a>`)
+  }
+  buttons.push(`<button type="button" id="stay-here-button" class="join-btn join-btn-stay">Stay here</button>`)
+  return buttons.join("")
 }
 
 export function renderRoomPage(room: Room, links: JoinLinks): string {
@@ -262,14 +279,13 @@ export function renderRoomPage(room: Room, links: JoinLinks): string {
 </head>
 <body>
 <header>
-  <div>
-    <h1>Room <span class="code">${escapeHtml(code)}</span></h1>
-    <div id="roster">${rosterHtml(room)}</div>
+  <div class="join-code">Room <span class="code">${escapeHtml(code)}</span></div>
+  <div class="join-body">
+    <div class="join-qr" title="Scan to join ${escapeHtml(code)}">${qrSvg(links.web)}</div>
+    <a class="join-web-link" href="${escapeHtml(links.web)}">${escapeHtml(links.web)}</a>
+    <div class="join-buttons">${joinButtonsHtml(links)}</div>
   </div>
-  <div class="invite">
-    <div class="invite-links">${inviteLinksHtml(links)}</div>
-    <div class="invite-qr" title="Scan to join ${escapeHtml(code)}">${qrSvg(links.web)}</div>
-  </div>
+  <div id="roster">${rosterHtml(room)}</div>
 </header>
 <main>
   <section id="transcript-pane">
