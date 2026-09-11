@@ -47,22 +47,29 @@ export class MemoryTransport implements MediaTransport {
   }
 }
 
-/** Routes by `member.address.provider`: `whatsapp`/`telegram` go to `inner`
- *  (an `AgentpushTransport` in production), everything else (room-web,
- *  email, anything future) goes to `fallback`. `sendMedia` delegates to
- *  whichever side handled the `send`, falling back to a caption-only text
- *  send when that side doesn't support media. */
+/** Routes by `member.address.provider`: `whatsapp`/`telegram`/`sms` go to
+ *  `messenger` (an `AgentpushTransport` in production), `email` goes to
+ *  `email` when one is configured (an `EmailTransport` in production),
+ *  everything else (room-web, or `email` with no transport wired) goes to
+ *  `fallback`. `sendMedia` delegates to whichever side handled the `send`,
+ *  falling back to a caption-only text send when that side doesn't support
+ *  media. */
 export class CompositeTransport implements MediaTransport {
-  private readonly inner: Transport
+  private readonly messenger: Transport
   private readonly fallback: Transport
+  private readonly email: Transport | undefined
 
-  constructor(inner: Transport, fallback: Transport) {
-    this.inner = inner
+  constructor(messenger: Transport, fallback: Transport, email?: Transport) {
+    this.messenger = messenger
     this.fallback = fallback
+    this.email = email
   }
 
   private routeFor(member: Member): Transport {
-    return member.address.provider === "whatsapp" || member.address.provider === "telegram" ? this.inner : this.fallback
+    const provider = member.address.provider
+    if (provider === "whatsapp" || provider === "telegram" || provider === "sms") return this.messenger
+    if (provider === "email" && this.email !== undefined) return this.email
+    return this.fallback
   }
 
   async send(member: Member, message: OutboundMessage): Promise<void> {

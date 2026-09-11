@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
-import { MessageDedup, parseAgentpushWebhook } from "../channels/index.ts"
+import { MessageDedup, parseAgentpushWebhook, parseEmailInbound } from "../channels/index.ts"
 import type { TranscriptRecord } from "../daemon/records.ts"
 import { env } from "../env.ts"
 import { joinLinks } from "../links/index.ts"
@@ -114,7 +114,12 @@ function handleRoomPage(service: RoomService, res: ServerResponse, encodedCode: 
     res.end(renderRoomNotFoundPage(code))
     return
   }
-  const links = joinLinks(room.code, { publicUrl: env.publicUrl, whatsappNumber: env.whatsappNumber, telegramBot: env.telegramBot })
+  const links = joinLinks(room.code, {
+    publicUrl: env.publicUrl,
+    whatsappNumber: env.whatsappNumber,
+    telegramBot: env.telegramBot,
+    smsNumber: env.smsNumber,
+  })
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" })
   res.end(renderRoomPage(room, links))
 }
@@ -248,6 +253,67 @@ async function handleAgentpushWebhook(
   sendJson(res, 200, outcome)
 }
 
+/**
+ * `parseEmailInbound` verifies the signature and does the mail envelope's
+ * own shape checks (docs/AGENTPUSH.md §8.2); this adds the dedup check (the
+ * same `MessageDedup` instance the messenger webhook shares) and the
+ * subject-line join: when the subject carried a room code hint and this
+ * sender isn't yet a member of any room, an implicit `join <code>` runs
+ * first so the actual message lands as a turn in that room rather than
+ * bouncing as an unknown sender (docs/AGENTPUSH.md §8.5).
+ */
+async function handleAgentpushMailWebhook(
+  service: RoomService,
+  dedup: MessageDedup,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const rawBody = await readRawBodyText(req)
+  const result = parseEmailInbound({
+    rawBody,
+    headers: flattenHeaders(req.headers),
+    secret: env.emailWebhookSecret,
+  })
+
+  if (!result.ok) {
+    sendJson(res, result.status, { error: result.reason })
+    return
+  }
+  if ("ignored" in result) {
+    sendJson(res, 200, { ignored: result.ignored })
+    return
+  }
+
+  const envelope = result.envelope
+  if (dedup.seen(envelope.messageId)) {
+    sendJson(res, 200, { deduped: true })
+    return
+  }
+
+  const address = {
+    provider: envelope.provider,
+    source: envelope.roomCodeHint ?? "email",
+    contactRef: envelope.contactRef,
+  }
+
+  if (envelope.roomCodeHint !== undefined && !service.hasMemberAcrossRooms(envelope.provider, envelope.contactRef)) {
+    await service.handleInbound({
+      address,
+      displayName: envelope.displayName,
+      tier: "email",
+      text: `join ${envelope.roomCodeHint}`,
+    })
+  }
+
+  const outcome = await service.handleInbound({
+    address,
+    displayName: envelope.displayName,
+    tier: "email",
+    text: envelope.text,
+  })
+  sendJson(res, 200, outcome)
+}
+
 async function handle(service: RoomService, dedup: MessageDedup, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", "http://127.0.0.1")
 
@@ -263,6 +329,11 @@ async function handle(service: RoomService, dedup: MessageDedup, req: IncomingMe
 
   if (url.pathname === "/inbound/agentpush" && req.method === "POST") {
     await handleAgentpushWebhook(service, dedup, req, res)
+    return
+  }
+
+  if (url.pathname === "/inbound/agentpush-mail" && req.method === "POST") {
+    await handleAgentpushMailWebhook(service, dedup, req, res)
     return
   }
 

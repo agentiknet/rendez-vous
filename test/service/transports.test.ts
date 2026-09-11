@@ -27,24 +27,45 @@ test("hasSendMedia is true for a transport with a real sendMedia method, false o
   assert.equal(hasSendMedia(new PlainTransport()), false)
 })
 
-test("CompositeTransport.send routes whatsapp and telegram to the inner transport, everything else to the fallback", async () => {
-  const inner = new MemoryTransport()
+test("CompositeTransport.send routes whatsapp, telegram and sms to the messenger transport, everything else to the fallback, when no email transport is configured", async () => {
+  const messenger = new MemoryTransport()
   const fallback = new MemoryTransport()
-  const composite = new CompositeTransport(inner, fallback)
+  const composite = new CompositeTransport(messenger, fallback)
 
   const message: OutboundMessage = { text: "hi", artifactUrl: undefined }
   await composite.send(member("Alice", "whatsapp"), message)
   await composite.send(member("Bob", "telegram"), message)
+  await composite.send(member("Sam", "sms"), message)
   await composite.send(member("Chloe", "room-web"), message)
   await composite.send(member("Dana", "email"), message)
 
   assert.deepEqual(
-    inner.sends.map((s) => s.member.displayName),
-    ["Alice", "Bob"],
+    messenger.sends.map((s) => s.member.displayName),
+    ["Alice", "Bob", "Sam"],
   )
   assert.deepEqual(
     fallback.sends.map((s) => s.member.displayName),
     ["Chloe", "Dana"],
+  )
+})
+
+test("CompositeTransport.send routes email to the email transport when one is configured", async () => {
+  const messenger = new MemoryTransport()
+  const fallback = new MemoryTransport()
+  const email = new MemoryTransport()
+  const composite = new CompositeTransport(messenger, fallback, email)
+
+  const message: OutboundMessage = { text: "hi", artifactUrl: undefined }
+  await composite.send(member("Dana", "email"), message)
+  await composite.send(member("Chloe", "room-web"), message)
+
+  assert.deepEqual(
+    email.sends.map((s) => s.member.displayName),
+    ["Dana"],
+  )
+  assert.deepEqual(
+    fallback.sends.map((s) => s.member.displayName),
+    ["Chloe"],
   )
 })
 

@@ -574,12 +574,42 @@ costs a real adapter.
 Worth building only if (A) proves the point and we want the contrast on stage:
 same room, one brain local in our box, one brain hosted on theirs.
 
-**Open question, not yet a claim.** The codex adapter keeps a native session id
-(`adapterSessionId`, with `nativeTerminalResume`). If a Codex session created
-inside our box is visible in the member's own Codex surface, that is a **fourth
-presence tier**: the room shows up in the tool they already use, with no
-integration on our side. Plausible, unverified, and cheap to test. Do not put
-it on a slide until someone has actually seen it render.
+**Auth in a box — resolved.** Codex stores its credential as a **file**,
+`~/.codex/auth.json`, not as an env var. On this host it is
+`auth_mode: "chatgpt"` (subscription), and the file carries both OAuth material
+(`id_token`, `access_token`, `refresh_token`, `account_id`) and an
+`OPENAI_API_KEY`. The adapter manifest declares only env sources:
+`OPENAI_API_KEY` and `CODEX_API_KEY`.
+
+agentproto's sandbox passes secrets as **env-var slugs** resolved through the
+broker (`env.passthrough` ∪ `env.auth.state.env`, `session-spawn.ts:3427-3448`)
+and never from `process.env`. It does **not** mount files:
+`CAPABILITIES_TODAY.mounts = false` (`sandbox-providers/registry.ts:35`).
+
+| path | into a box? | how |
+| --- | --- | --- |
+| API key | **yes, today** | `env.passthrough: ["OPENAI_API_KEY"]` |
+| ChatGPT subscription | **no, not via passthrough** | file-shaped; would need auth.json written into the box |
+
+Note the asymmetry with claude-code, which agentproto models as the env var
+`CLAUDE_CODE_OAUTH_TOKEN` — so **Claude subscription flows into a box for
+free, Codex subscription does not.**
+
+**Decision: API key for Codex in the box.** Not just convenience. That
+`refresh_token` is long-lived and account-wide, and an ephemeral hackathon
+sandbox is precisely where it should not go. Pay the API rate.
+
+**Which closes the fourth-presence-tier question, mostly negatively.** With an
+API key there is no account association, so a box-hosted Codex run will not
+appear in anyone's ChatGPT/Codex surface — API usage is not a ChatGPT
+conversation. With account auth it *might*, but that depends on server-side
+session sync we have not verified, and the box's own `~/.codex/sessions` lives
+in the box regardless.
+
+The version of the idea worth testing instead depends on nothing OpenAI has to
+give us: **lift the box's codex session file out and resume it on the member's
+own machine.** That is "open the room in my own Codex" via file rather than
+cloud. Cheap to try, fully in our control, still unverified.
 
 **The experiment that decides how loud we are.** The Agents API docs do not
 specify what happens when input arrives mid-turn (§1.3). Two outcomes, both
@@ -614,8 +644,9 @@ Land it only with the collision story written down.
    brain-agnostic, so it comes before any interface extraction.
 5. Extract `RoomRuntime` (§9.2) once two brains have actually run, so the
    interface is shaped by two real implementations rather than one and a guess.
-6. Test whether a box-hosted Codex session is visible in a member's own Codex
-   (§9.3, open question). Cheap, and a fourth presence tier if true.
+6. Test the session-file lift (§9.3): copy the box's codex session out and
+   resume it locally. A fourth presence tier if it works, and it depends on
+   nothing OpenAI has to give us.
 7. Run the concurrent-input experiment against the Agents API (§9.3).
 8. §9.4 multi-brain rooms, with the collision story settled first.
 9. Path (B), the hosted Agents API adapter, only if the contrast is worth it.

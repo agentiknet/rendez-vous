@@ -50,7 +50,12 @@ function activeRoomStatusText(room: Room): string {
 }
 
 function currentJoinLinks(code: string): JoinLinks {
-  return joinLinks(code, { publicUrl: env.publicUrl, whatsappNumber: env.whatsappNumber, telegramBot: env.telegramBot })
+  return joinLinks(code, {
+    publicUrl: env.publicUrl,
+    whatsappNumber: env.whatsappNumber,
+    telegramBot: env.telegramBot,
+    smsNumber: env.smsNumber,
+  })
 }
 
 function newRoomReplyText(room: Room, links: JoinLinks): string {
@@ -61,6 +66,7 @@ function newRoomReplyText(room: Room, links: JoinLinks): string {
   lines.push(links.web)
   if (links.whatsapp !== undefined) lines.push(links.whatsapp)
   if (links.telegram !== undefined) lines.push(links.telegram)
+  if (links.sms !== undefined) lines.push(links.sms)
   return lines.join("\n")
 }
 
@@ -156,6 +162,21 @@ export class RoomService {
 
   roomCount(): number {
     return this.store.list().length
+  }
+
+  /** Whether some room already has a member at this provider+contactRef,
+   *  regardless of which room's code that member joined under (a member's
+   *  stored `address.source` is the room code it joined, so an exact-address
+   *  lookup would miss them unless the caller already knows the code). Used
+   *  by the tier-2 mail webhook (docs/AGENTPUSH.md §8.5) to decide whether a
+   *  subject-line room code hint should be treated as an implicit `join`. */
+  hasMemberAcrossRooms(provider: string, contactRef: string): boolean {
+    for (const room of this.store.list()) {
+      if (room.members.some((member) => member.address.provider === provider && member.address.contactRef === contactRef)) {
+        return true
+      }
+    }
+    return false
   }
 
   async daemonHealth(): Promise<HealthResult | "unreachable"> {

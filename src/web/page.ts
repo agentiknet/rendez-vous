@@ -32,17 +32,20 @@ const STYLE = `
   :root { --accent: #3a6df0; --border: #e2e4ea; --bg: #fafafc; --grey: #6b7280; }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: system-ui, -apple-system, sans-serif; color: #1a1c23; background: var(--bg); }
-  header { padding: 10px 14px; border-bottom: 1px solid var(--border); background: #fff; display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
-  header h1 { margin: 0 0 4px; font-size: 16px; }
-  header h1 .code { color: var(--accent); font-family: ui-monospace, monospace; }
+  header { padding: 14px; border-bottom: 1px solid var(--border); background: #fff; display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; }
+  .join-code { font-size: 26px; font-weight: 700; }
+  .join-code .code { color: var(--accent); font-family: ui-monospace, monospace; }
+  .join-body { display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%; max-width: 320px; }
+  .join-qr { width: 128px; height: 128px; flex: 0 0 auto; }
+  .join-qr svg { width: 100%; height: 100%; display: block; }
+  .join-web-link { font-size: 12px; color: var(--grey); text-decoration: none; word-break: break-all; }
+  .join-web-link:hover { text-decoration: underline; }
+  .join-buttons { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+  .join-btn { display: block; width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); background: #f3f5fb; color: #1a1c23; text-decoration: none; font-size: 14px; text-align: center; cursor: pointer; font-family: inherit; }
+  .join-btn:hover { background: #eef1fb; }
+  .join-btn-stay { background: var(--accent); color: #fff; border-color: var(--accent); }
   #roster { font-size: 13px; color: var(--grey); }
-  .invite { display: flex; align-items: center; gap: 10px; }
-  .invite-links { display: flex; flex-direction: column; font-size: 12px; gap: 2px; }
-  .invite-links a { color: var(--accent); text-decoration: none; }
-  .invite-links a:hover { text-decoration: underline; }
-  .invite-qr { width: 56px; height: 56px; flex: 0 0 auto; }
-  .invite-qr svg { width: 100%; height: 100%; display: block; }
-  main { display: flex; height: calc(100vh - 128px); }
+  main { display: flex; height: calc(100vh - 260px); }
   #transcript-pane { flex: 1 1 55%; overflow-y: auto; padding: 12px; border-right: 1px solid var(--border); }
   #artifact-pane { flex: 1 1 45%; display: flex; align-items: stretch; justify-content: center; }
   #artifact-frame { width: 100%; height: 100%; border: 0; }
@@ -64,6 +67,13 @@ const STYLE = `
     #transcript-pane { border-right: 0; border-bottom: 1px solid var(--border); max-height: 50vh; }
     #artifact-pane { min-height: 40vh; }
     #name-input { flex: 0 0 90px; }
+  }
+  @media (min-width: 640px) {
+    header { flex-direction: row; align-items: center; justify-content: space-between; text-align: left; flex-wrap: wrap; }
+    .join-body { flex-direction: row; max-width: none; }
+    .join-buttons { flex-direction: row; width: auto; }
+    .join-btn { width: auto; }
+    main { height: calc(100vh - 128px); }
   }
 `
 

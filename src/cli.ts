@@ -1,4 +1,4 @@
-import { AgentpushTransport } from "./channels/index.ts"
+import { AgentpushTransport, EmailTransport } from "./channels/index.ts"
 import { DaemonClient } from "./daemon/client.ts"
 import { env } from "./env.ts"
 import type { Transport } from "./fanout/types.ts"
@@ -13,7 +13,11 @@ function buildTransport(): { transport: Transport; description: string } {
     return { transport: new ConsoleTransport(), description: "console only (RDV_AGENTPUSH_URL unset)" }
   }
   const agentpush = new AgentpushTransport({ baseUrl: env.agentpushUrl, apiKey: env.agentpushKey })
-  return { transport: new CompositeTransport(agentpush, new ConsoleTransport()), description: "agentpush (whatsapp/telegram) + console fallback" }
+  const email = new EmailTransport({ baseUrl: env.agentpushUrl, apiKey: env.agentpushKey })
+  return {
+    transport: new CompositeTransport(agentpush, new ConsoleTransport(), email),
+    description: "agentpush (whatsapp/telegram/sms) + email + console fallback",
+  }
 }
 
 function buildBooter(client: DaemonClient, store: RoomStore): { booter: SessionBooter; description: string } {
