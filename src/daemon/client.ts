@@ -18,17 +18,52 @@ export interface HealthResult {
   readonly buildSha: string | undefined
 }
 
+/** Inline `SandboxSpec` (AIP-36) plus the `reuse` reconnect field, the exact
+ *  subset `POST /sessions/agent`'s `sandbox` body field forwards to the
+ *  daemon's `sandboxSpecWithReuseSchema` (`sandbox-spec-schema.ts`). `reuse`
+ *  accepts a prior spawn's `sandboxId` and reconnects to that box instead of
+ *  booting a fresh one — the provider must support it (e2b does). */
+export interface SandboxSpecInput {
+  readonly provider: string
+  readonly config: Record<string, string | number | boolean>
+  readonly reuse?: string
+  readonly extraPorts?: number[]
+}
+
+/** WP3 in-box app serve request (`SandboxAppServeSpec`, `sandbox-app-serve.ts`).
+ *  `dir` must be an absolute path INSIDE the sandbox filesystem, not on this
+ *  host — see docs/UPSTREAM.md and src/sandbox/boot.ts for how that dir gets
+ *  populated before this can succeed. */
+export interface AppServeSpecInput {
+  readonly dir: string
+  readonly port?: number
+}
+
+/** `SessionAppServeInfo`'s caller-visible subset (`sandbox-app-serve.ts`
+ *  also carries `appId`/`dir`, omitted here — not needed by any caller in
+ *  this repo). `ready: false` means the URL is the right address but the
+ *  server hadn't answered within the daemon's readiness window yet. */
+export interface AppServeResultInfo {
+  readonly url: string
+  readonly port: number
+  readonly ready: boolean
+}
+
 export interface SpawnAgentInput {
   readonly adapter: string
   readonly model: string
   readonly cwd: string
   readonly label: string
   readonly prompt?: string
+  readonly sandbox?: string | SandboxSpecInput
+  readonly appServe?: AppServeSpecInput
 }
 
 export interface SpawnAgentResult {
   readonly id: string
   readonly status: string
+  readonly sandboxId: string | undefined
+  readonly appServe: AppServeResultInfo | undefined
 }
 
 export interface PromptInput {
@@ -62,6 +97,23 @@ function numberField(rec: Record<string, unknown>, key: string): number | undefi
 function recordField(rec: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
   const v = rec[key]
   return isRecord(v) ? v : undefined
+}
+
+function booleanField(rec: Record<string, unknown>, key: string): boolean | undefined {
+  const v = rec[key]
+  return typeof v === "boolean" ? v : undefined
+}
+
+/** Parse the descriptor's `appServe` field (`SessionAppServeInfo`) into the
+ *  caller-visible subset. Returns undefined on a shape mismatch — the
+ *  caller then treats the spawn as having produced no artifact rather than
+ *  throwing on an unexpected but non-fatal field drift. */
+function parseAppServeResult(rec: Record<string, unknown>): AppServeResultInfo | undefined {
+  const url = stringField(rec, "url")
+  const port = numberField(rec, "port")
+  const ready = booleanField(rec, "ready")
+  if (url === undefined || port === undefined || ready === undefined) return undefined
+  return { url, port, ready }
 }
 
 /** Classify a non-2xx `/sessions/:id/prompt?wait=false` response.
@@ -121,6 +173,8 @@ export class DaemonClient {
         label: input.label,
         dedupe: false,
         ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
+        ...(input.sandbox !== undefined ? { sandbox: input.sandbox } : {}),
+        ...(input.appServe !== undefined ? { appServe: input.appServe } : {}),
       }),
     })
     const body: unknown = await res.json()
@@ -133,7 +187,10 @@ export class DaemonClient {
     if (id === undefined || status === undefined) {
       throw new Error(`malformed /sessions/agent response: ${JSON.stringify(body).slice(0, 200)}`)
     }
-    return { id, status }
+    const sandboxId = stringField(body, "sandboxId")
+    const appServeRaw = recordField(body, "appServe")
+    const appServe = appServeRaw !== undefined ? parseAppServeResult(appServeRaw) : undefined
+    return { id, status, sandboxId, appServe }
   }
 
   /**
@@ -193,9 +250,21 @@ export class DaemonClient {
     }
   }
 
+  /**
+   * `POST /sessions/:id/kill`, NOT `DELETE /sessions/:id`. The two are not
+   * interchangeable: `DELETE` calls the registry's `forget(id)`, which only
+   * drops the daemon's bookkeeping row — it never calls the live
+   * `agentSession.close()`, so it neither terminates the underlying process
+   * nor triggers a sandboxed session's pause/teardown (`sessions.ts` —
+   * `forget` vs `kill`; `sandbox-agent-session-proxy.ts`'s `close()` is what
+   * actually calls `host.pause()`/`host.stop()`). For a sandboxed session
+   * this distinction is a real cost bug: forgetting one leaks a running
+   * (billed) e2b box instead of pausing it. `kill` is the route that closes
+   * the agent session first and lets the sandbox lifecycle policy run.
+   */
   async kill(sessionId: string): Promise<void> {
-    const res = await fetch(`${this.baseUrl}/sessions/${sessionId}`, {
-      method: "DELETE",
+    const res = await fetch(`${this.baseUrl}/sessions/${sessionId}/kill`, {
+      method: "POST",
       headers: this.authHeaders(),
     })
     if (!res.ok) {

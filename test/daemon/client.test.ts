@@ -3,6 +3,10 @@ import { test } from "node:test"
 import { DaemonClient } from "../../src/daemon/client.ts"
 import { startFakeDaemon, type FakeDaemon } from "./fake-daemon.ts"
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 async function withFakeDaemon(
   opts: Parameters<typeof startFakeDaemon>[0],
   run: (daemon: FakeDaemon, client: DaemonClient) => Promise<void>,
@@ -31,7 +35,54 @@ test("spawnAgent() returns id and status", async () => {
       cwd: "/tmp",
       label: "test",
     })
-    assert.deepEqual(spawned, { id: "sess_fake", status: "running" })
+    assert.deepEqual(spawned, { id: "sess_fake", status: "running", sandboxId: undefined, appServe: undefined })
+  })
+})
+
+test("spawnAgent() sends sandbox + appServe on the wire and parses them back", async () => {
+  await withFakeDaemon({}, async (daemon, client) => {
+    const spawned = await client.spawnAgent({
+      adapter: "claude-code",
+      model: "claude-sonnet-5",
+      cwd: "/home/user",
+      label: "test",
+      sandbox: { provider: "e2b", config: {}, extraPorts: [3210] },
+      appServe: { dir: "/home/user/apps/rdv-hello", port: 3210 },
+    })
+    assert.equal(spawned.sandboxId, "sandbox_fake")
+    assert.deepEqual(spawned.appServe, {
+      url: "https://fake-artifact.example",
+      port: 3210,
+      ready: true,
+    })
+
+    const req = daemon.requestsReceived.find(r => r.path === "/sessions/agent")
+    assert.ok(req !== undefined)
+    assert.deepEqual(req.body, {
+      adapter: "claude-code",
+      model: "claude-sonnet-5",
+      cwd: "/home/user",
+      label: "test",
+      dedupe: false,
+      sandbox: { provider: "e2b", config: {}, extraPorts: [3210] },
+      appServe: { dir: "/home/user/apps/rdv-hello", port: 3210 },
+    })
+  })
+})
+
+test("spawnAgent() with a reuse token sends it under sandbox.reuse", async () => {
+  await withFakeDaemon({}, async (daemon, client) => {
+    await client.spawnAgent({
+      adapter: "claude-code",
+      model: "claude-sonnet-5",
+      cwd: "/home/user",
+      label: "test",
+      sandbox: { provider: "e2b", config: {}, reuse: "sandbox_prior", extraPorts: [3210] },
+    })
+    const req = daemon.requestsReceived.find(r => r.path === "/sessions/agent")
+    assert.ok(req !== undefined)
+    assert.ok(isRecord(req.body))
+    assert.deepEqual(req.body.sandbox, { provider: "e2b", config: {}, reuse: "sandbox_prior", extraPorts: [3210] })
   })
 })
 

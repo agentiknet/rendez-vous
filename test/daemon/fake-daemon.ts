@@ -64,7 +64,24 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
     if (path === "/sessions/agent" && req.method === "POST") {
       const body = await readBody(req)
       requestsReceived.push({ path, body })
-      sendJson(res, 201, { id: "sess_fake", status: "running" })
+      const sandboxRequested = isRecord(body) && body.sandbox !== undefined
+      const appServeRequested = isRecord(body) && isRecord(body.appServe) ? body.appServe : undefined
+      sendJson(res, 201, {
+        id: "sess_fake",
+        status: "running",
+        ...(sandboxRequested ? { sandboxId: "sandbox_fake" } : {}),
+        ...(appServeRequested !== undefined
+          ? {
+              appServe: {
+                appId: "app_fake",
+                dir: appServeRequested.dir,
+                port: typeof appServeRequested.port === "number" ? appServeRequested.port : 3210,
+                url: "https://fake-artifact.example",
+                ready: true,
+              },
+            }
+          : {}),
+      })
       return
     }
 
@@ -117,9 +134,10 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
       return
     }
 
-    const idMatch = path.match(/^\/sessions\/([^/]+)$/)
-    if (idMatch !== null && req.method === "DELETE") {
-      sendJson(res, 200, { ok: true, id: idMatch[1] })
+    const killMatch = path.match(/^\/sessions\/([^/]+)\/kill$/)
+    if (killMatch !== null && req.method === "POST") {
+      requestsReceived.push({ path, body: undefined })
+      sendJson(res, 200, { ok: true, sessionId: killMatch[1] })
       return
     }
 
