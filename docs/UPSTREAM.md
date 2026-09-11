@@ -19,6 +19,8 @@ self-contained without them.
 | 3 | e2b reconnect failure (MCP-connect step) doesn't pause the box on error, unlike sibling failure paths | Medium — cost leak risk | Documented |
 | 4 | `POST /mcps/proxy/call` has no auth gate, unlike neighboring mutating routes | High — security | Documented |
 | 5 | A spawn already in flight server-side keeps running after the requesting client disconnects | Low — operational/budgeting | Documented |
+| 6 | Rendez-vous's own `E2bBooter` sent the HOST's `cwd` into the box's `agent_start`, not a path valid inside it | High — every e2b room boot 500'd | Fixed in this repo |
+| 7 | A just-unpaused box's first turn can error near-instantly with no detail, invisible to the reconnect-retry contract | Medium — silent stall on resume | Documented |
 
 ---
 
@@ -235,3 +237,99 @@ sufficient.
 design note; a hard budget needs a server-side cap (or a pre-flight check
 before the request that would exceed it goes out), not a client-side kill
 after the fact.
+
+---
+
+## 6. Rendez-vous's own bug: the box's `agent_start` needs an in-box `cwd`, not the host's
+
+**Summary.** Not an agentproto bug — a bug in this repo, written up here
+because the failure mode is worth recording for whoever debugs the next one.
+`E2bBooter` (`src/service/booter.ts`) passed `cwd: process.cwd()` (this
+host's own repo checkout, e.g.
+`/Volumes/.../experiments/hackatons/rendez-vous`) into `bootRoomSession`/
+`resumeRoomSession`. That `cwd` rides `POST /sessions/agent` straight through
+to the BOX's own `agent_start` (`session-spawn.ts`'s
+`bootSandboxAgentSession` passes it verbatim to `host.start({ cwd, ... })` —
+see its own comment at the call site, `session-spawn.ts:2718-2726`: "a
+genuinely remote box (e2b) needs its own filesystem story... forwarding it is
+still strictly better than omitting it: the box's OWN `agent_start` needs
+SOME cwd to resolve, and a bad path fails no worse than no path at all" — a
+documented, accepted gap, not a bug on agentproto's side). A host-side path
+does not exist inside the box: the box's own `spawn(execBin, execArgs, {cwd})`
+(`define-agent-cli.ts:500`) fails ENOENT, which that file's own error path
+disambiguates (`:538`, `cwdMissing = isEnoent && !existsSync(cwd)`) into
+`` agent-cli 'claude-code': failed to spawn '<bin> <args>': spawn <bin> ENOENT\ncwd '<path>' does not exist — Node reports a missing working directory with this same ENOENT... `` —
+wrapped by `bootSandboxAgentSession`'s catch (`:3496-3505`) into
+`agent_start: the sandbox's own agent_start failed for adapter "claude-code" — ...`,
+then by `DaemonClient.spawnAgent` into `spawnAgent failed: 500 {...}`.
+
+**Repro.** Ground-truthed live in this repo (2026-09-11 session): every
+`new` room under `RDV_BOOTER=e2b` 500'd with exactly that message chain; the
+sandbox ledger's `cwd` field on the two dead entries
+(`i86kacltf9lzeso7maeua`, `iysytdsb9grusftw4u9bw`) recorded the host repo
+path, confirming what was actually sent. `scripts/prove-sandbox.ts` never hit
+this because it always used its own `BOX_CWD = "/home/user"` constant, never
+`process.cwd()` — the two code paths silently diverged on exactly this
+field.
+
+**Fix (this repo).** `E2bBooter.boot`/`resume` now pass a fixed
+`BOX_CWD = "/home/user"` (matching `scripts/prove-sandbox.ts`) instead of
+`process.cwd()`. `LocalBooter` correctly keeps `process.cwd()` — it runs
+directly on this host, where that path is real.
+
+**Note for agentproto.** Given the call site's own comment already
+acknowledges "a bad path fails no worse than no path at all" as the accepted
+trade-off, no change is being requested — but a caller-side hint (e.g.
+rejecting an `agent_start.sandbox` request whose `cwd` isn't `/`-rooted
+against a documented in-box convention, or defaulting a sandboxed spawn's
+`cwd` to the box's home directory when the caller passes none) would have
+turned this into a 400 instead of an opaque `agent-cli` ENOENT three layers
+of wrapping deep.
+
+---
+
+## 7. A just-unpaused box's first turn can fail near-instantly, invisible to the reconnect-retry contract
+
+**Summary.** `sandbox_reconnect_failed` (finding #3, `isRetryableReconnectError`
+in `src/sandbox/boot.ts`) covers a SPAWN that fails outright when a box's MCP
+layer isn't warmed up yet. Ground-truthed live in this repo
+(2026-09-11 23:08 UTC): a DIFFERENT shape of the same underlying race —
+the spawn itself succeeds (`201`, a real session descriptor,
+`sandboxPorts` present, `remote: true`) and the reconnect-retry logic never
+fires because there is nothing to retry, but the very first TURN sent along
+with that spawn (`resumeRoomSession`'s resume prompt) ends
+`{"kind":"turn-end","reason":"error"}` within ~400ms, with zero
+`text-delta`s and no error text anywhere in the transcript
+(`events.jsonl`) or the descriptor (`lastTurnReason: "error"`, no message
+field). A same-sandboxId reconnect moments later, same prompt, succeeded
+cleanly — confirming this is transient (the box's own agent-cli/network
+stack needing a beat after coming off pause), not a bad prompt or a bad
+`cwd`.
+
+**Anchors.** `packages/runtime/src/session-spawn.ts:3483-3495` — the box's
+own `agent_start` (`host.start`) succeeding is the ONLY thing
+`bootSandboxAgentSession` checks; nothing observes whether the FIRST turn
+that rides along with that same spawn (the `prompt` field on
+`POST /sessions/agent`) actually completed. The daemon's own transcript
+schema records `turn-end.reason` but, at least for `reason: "error"`, no
+accompanying message — compare `reason: "completed"`, which also carries no
+text but at least reflects success.
+
+**Impact.** A caller (like `E2bBooter.resume`) that treats a `201` spawn
+response as "the room is back" has no signal that the opening/resume turn
+it sent along with that spawn silently failed — the member who sent the
+message that triggered the auto-resume waits forever for a reply that will
+never come, with nothing in the HTTP response to say so. Ground-truthed via
+`scripts/simulate-room.ts`'s e2b phase: the script's own
+`waitFor(... "both members to receive a reply after the room auto-resumes")`
+timed out for exactly this reason.
+
+**Suggested fix.** Either surface turn outcome on the spawn response itself
+(e.g. `firstTurn: { reason: "error" }` alongside the `201` body) so a caller
+can retry the PROMPT without a second full spawn, or have the daemon retry
+the first turn internally once before giving up, the same way
+`ensureDaemonHealthy` already retries the box's own health probe on boot.
+Caller-side mitigation in the meantime: `resumeRoomSession` reconnects
+cleanly but this class of failure needs a turn-level retry, not a
+spawn-level one — out of scope for this fix; tracked here for whoever picks
+it up next.

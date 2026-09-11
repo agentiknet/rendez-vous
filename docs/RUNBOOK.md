@@ -186,6 +186,19 @@ any room records that id as its own `sandboxId`, later rooms boot fresh
 sandboxes of their own — surviving a service restart for free, since that
 recording lives in the room store, not in memory.
 
+**Cost protection on a failed reuse (docs/UPSTREAM.md #3):** if a spawn
+against a KNOWN `reuse` sandboxId fails (a fresh boot has no id to act on —
+nothing leaks there beyond what the daemon already pauses on its own),
+`bootRoomSession`/`resumeRoomSession` (`src/sandbox/boot.ts`) best-effort
+DELETE that box directly against e2b's own API — the daemon exposes no HTTP
+route to act on a bare sandboxId with no live session. This needs
+`E2B_API_KEY` (e2b's own credential, set in the environment the Rendez-vous
+process runs in — not one of the `RDV_*` vars above) to do anything; if it's
+unset, the failure is logged and the box is left as-is (check
+`agentproto sandbox list` and e2b's own dashboard by hand). Unit-tested via
+dependency injection (`killOrphanSandbox` on both functions) against the
+fake daemon — no real e2b calls happen in `pnpm test`.
+
 ## 4. Proof scripts
 
 All three need `RDV_DAEMON_TOKEN` exported (§1) and a reachable daemon at
