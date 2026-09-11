@@ -9,10 +9,13 @@ function fakeRoom(code: string): Room {
     sessionId: undefined,
     sandboxId: undefined,
     artifactUrl: undefined,
+    artifactReady: undefined,
     members: [],
     createdAt: "2026-09-11T00:00:00.000Z",
     updatedAt: "2026-09-11T00:00:00.000Z",
     cursor: 0,
+    lastActivityAt: "2026-09-11T00:00:00.000Z",
+    state: "active",
   }
 }
 

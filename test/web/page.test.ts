@@ -19,6 +19,7 @@ function fakeRoom(overrides: Partial<Room> = {}): Room {
     sessionId: "sess-1",
     sandboxId: undefined,
     artifactUrl: undefined,
+    artifactReady: undefined,
     members: [
       {
         id: "m1",
@@ -38,6 +39,8 @@ function fakeRoom(overrides: Partial<Room> = {}): Room {
     createdAt: "2026-09-11T00:00:00.000Z",
     updatedAt: "2026-09-11T00:00:00.000Z",
     cursor: 0,
+    lastActivityAt: "2026-09-11T00:00:00.000Z",
+    state: "active",
     ...overrides,
   }
 }

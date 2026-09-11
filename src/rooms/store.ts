@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { generateCode, normalizeCode } from "./code.ts"
-import type { Address, Member, Room, Tier } from "./types.ts"
+import type { Address, Member, Room, RoomState, Tier } from "./types.ts"
 
 interface RoomFile {
   rooms: Room[]
@@ -16,6 +16,14 @@ function isString(value: unknown): value is string {
 
 function isStringOrUndefined(value: unknown): value is string | undefined {
   return value === undefined || typeof value === "string"
+}
+
+function isBooleanOrUndefined(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === "boolean"
+}
+
+function isRoomState(value: unknown): value is RoomState {
+  return value === "active" || value === "paused"
 }
 
 function isTier(value: unknown): value is Tier {
@@ -53,8 +61,9 @@ function isMember(value: unknown): value is Member {
 }
 
 // JSON.stringify drops object keys whose value is `undefined`, so a persisted room with an
-// unset sessionId/sandboxId/artifactUrl round-trips with that key absent, not present-as-undefined.
-// These three are the only optional fields on Room, so a missing key is treated the same as undefined.
+// unset sessionId/sandboxId/artifactUrl/artifactReady round-trips with that key absent, not
+// present-as-undefined. These are the only optional fields on Room, so a missing key is
+// treated the same as undefined.
 function isRoom(value: unknown): value is Room {
   if (!isObject(value)) return false
   if (
@@ -62,23 +71,29 @@ function isRoom(value: unknown): value is Room {
     !("members" in value) ||
     !("createdAt" in value) ||
     !("updatedAt" in value) ||
-    !("cursor" in value)
+    !("cursor" in value) ||
+    !("lastActivityAt" in value) ||
+    !("state" in value)
   ) {
     return false
   }
   const sessionId = "sessionId" in value ? value.sessionId : undefined
   const sandboxId = "sandboxId" in value ? value.sandboxId : undefined
   const artifactUrl = "artifactUrl" in value ? value.artifactUrl : undefined
+  const artifactReady = "artifactReady" in value ? value.artifactReady : undefined
   return (
     isString(value.code) &&
     isStringOrUndefined(sessionId) &&
     isStringOrUndefined(sandboxId) &&
     isStringOrUndefined(artifactUrl) &&
+    isBooleanOrUndefined(artifactReady) &&
     Array.isArray(value.members) &&
     value.members.every(isMember) &&
     isString(value.createdAt) &&
     isString(value.updatedAt) &&
-    typeof value.cursor === "number"
+    typeof value.cursor === "number" &&
+    isString(value.lastActivityAt) &&
+    isRoomState(value.state)
   )
 }
 
@@ -167,10 +182,13 @@ export class RoomStore {
       sessionId: undefined,
       sandboxId: undefined,
       artifactUrl: undefined,
+      artifactReady: undefined,
       members: [],
       createdAt: now,
       updatedAt: now,
       cursor: 0,
+      lastActivityAt: now,
+      state: "active",
     }
     this.rooms.set(code, room)
     await this.enqueueWrite()
@@ -221,7 +239,9 @@ export class RoomStore {
 
   async update(
     code: string,
-    patch: Partial<Pick<Room, "sessionId" | "sandboxId" | "artifactUrl" | "cursor">>,
+    patch: Partial<
+      Pick<Room, "sessionId" | "sandboxId" | "artifactUrl" | "artifactReady" | "cursor" | "lastActivityAt" | "state">
+    >,
   ): Promise<Room> {
     const normalized = normalizeCode(code)
     if (normalized === undefined) {

@@ -23,6 +23,12 @@ in the codebase reads `process.env` directly.
 | `RDV_AGENTPUSH_URL` | unset | Base URL of the agentpush API this service calls directly for outbound sends. Also selects the transport in `serve` — unset means console-only. |
 | `RDV_AGENTPUSH_KEY` | unset | Sent as `Authorization: Bearer <key>` to `RDV_AGENTPUSH_URL`. |
 | `RDV_AGENTPUSH_WEBHOOK_SECRET` | unset | HMAC secret verifying `x-agentpush-signature` on `POST /inbound/agentpush`. Unset means unsigned requests are accepted — configure it in any internet-reachable environment. |
+| `RDV_BOOTER` | `local` | `e2b` picks `E2bBooter` (sandbox + artifact) in `serve`; anything else is `LocalBooter` (no sandbox, no artifact). |
+| `RDV_ARTIFACT_APP_DIR` | `/home/user/apps/rdv-hello` | In-box path `E2bBooter` seeds and serves the artifact app from. |
+| `RDV_ARTIFACT_PORT` | `3210` | In-box port the artifact app serves on. |
+| `RDV_PREWARM_SANDBOX_ID` | unset | An already-paused e2b sandbox id to reuse for the next `new`, instead of a fresh boot. Consumed at most once — see §4. |
+| `RDV_IDLE_SWEEP_SECONDS` | `60` | How often the idle-pause sweep runs. |
+| `RDV_IDLE_PAUSE_MINUTES` | `20` | How long a room may sit with no activity before the sweep pauses it (R10). |
 
 Every var is optional; unset ones fall back to the defaults above.
 
@@ -125,7 +131,38 @@ curl -s -X POST http://127.0.0.1:8790/inbound/agentpush \
 ```
 A bad or missing signature (when a secret is configured) returns `401`.
 
-## 3. Proof scripts
+## 3. e2b: sandbox, artifact, and idle pause (M4/R8/R10)
+
+Set `RDV_BOOTER=e2b` to pick `E2bBooter`: `new` boots an e2b sandbox with the
+artifact app served on `RDV_ARTIFACT_PORT`, and the room's `artifactUrl`/
+`artifactReady` come from that boot. `resume`/an inbound message to a
+paused room reconnects the box and re-probes the artifact URL, re-serving
+only if it's actually dead (R8 — a resume alone never relaunches
+`app serve`).
+
+**Idle pause (R10):** every `RDV_IDLE_SWEEP_SECONDS`, any active room whose
+`lastActivityAt` is older than `RDV_IDLE_PAUSE_MINUTES` gets its session
+killed (which pauses the e2b box) and marked `state: "paused"`. The next
+message from a known member — or an explicit `resume <code>` — reconnects
+it automatically, telling the sender "Resuming room, one moment…" first.
+`resume <code>` on a room that's still active is a no-op status reply, not
+a reboot.
+
+**Pre-warming for a demo:** boot budget is the scarce resource (each fresh
+e2b boot costs real time and money; reconnecting to a paused box is free).
+The morning of the demo:
+```
+node scripts/prove-sandbox.ts
+```
+This proves the boot/artifact/resume round trip end to end and leaves its
+final box **paused** — copy the sandbox id it prints into
+`RDV_PREWARM_SANDBOX_ID`. The next room created with `new` reuses that box
+instead of paying for a fresh boot. It's consumed at most once: as soon as
+any room records that id as its own `sandboxId`, later rooms boot fresh
+sandboxes of their own — surviving a service restart for free, since that
+recording lives in the room store, not in memory.
+
+## 4. Proof scripts
 
 All three need `RDV_DAEMON_TOKEN` exported (§1) and a reachable daemon at
 `RDV_DAEMON_URL`. Each prints `PASS`/its own success line and exits
@@ -159,3 +196,12 @@ room store and resumes fan-out from the persisted cursor (proving no drop,
 no re-delivery), then Bob sends one more message. Prints every delivered
 message per recipient for both rounds, then `PASS` (or `FAIL: <reason>` and
 exit 1). Kills the spawned session in a `finally`.
+
+With `RDV_BOOTER=e2b`, a third phase runs: `service.pauseRoom(code)` forces
+a pause, the script polls `GET /sessions/:id` until the daemon confirms it,
+then Bob sends one more message and the script asserts the room resumes,
+the artifact URL is unchanged, and both members receive the reply. Run this
+phase with a pre-warmed box so it costs no fresh boot:
+```
+RDV_BOOTER=e2b RDV_PREWARM_SANDBOX_ID=<id from §3> node scripts/simulate-room.ts
+```

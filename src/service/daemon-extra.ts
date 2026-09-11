@@ -21,3 +21,24 @@ export async function isSessionAlive(opts: DaemonExtraOptions, sessionId: string
     return false
   }
 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/** The session descriptor's own `status` field (e.g. `"running"`), or
+ *  undefined on a 404/network failure/malformed body — used by the no-phone
+ *  e2b proof to poll for a kill/pause to actually land. */
+export async function getSessionStatus(opts: DaemonExtraOptions, sessionId: string): Promise<string | undefined> {
+  const base = opts.baseUrl.endsWith("/") ? opts.baseUrl.slice(0, -1) : opts.baseUrl
+  const headers: Record<string, string> = opts.token !== undefined ? { authorization: `Bearer ${opts.token}` } : {}
+  try {
+    const res = await fetch(`${base}/sessions/${sessionId}`, { headers })
+    if (!res.ok) return undefined
+    const body: unknown = await res.json()
+    if (!isRecord(body)) return undefined
+    return typeof body.status === "string" ? body.status : undefined
+  } catch {
+    return undefined
+  }
+}

@@ -39,6 +39,9 @@ test("create mints a room with default fields", async () => {
   assert.deepEqual(room.members, [])
   assert.equal(room.cursor, 0)
   assert.equal(room.createdAt, room.updatedAt)
+  assert.equal(room.artifactReady, undefined)
+  assert.equal(room.state, "active")
+  assert.equal(room.lastActivityAt, room.createdAt)
 })
 
 test("get and list reflect created rooms, code lookup is normalization-tolerant", async () => {
@@ -148,7 +151,15 @@ test("store survives a restart: reopening the same dir sees prior writes", async
   const store1 = await RoomStore.open(dir)
   const room = await store1.create()
   await store1.addMember(room.code, aliceInput())
-  await store1.update(room.code, { sessionId: "sess-42", sandboxId: "box-1", artifactUrl: "https://x.test", cursor: 5 })
+  await store1.update(room.code, {
+    sessionId: "sess-42",
+    sandboxId: "box-1",
+    artifactUrl: "https://x.test",
+    artifactReady: true,
+    cursor: 5,
+    state: "paused",
+    lastActivityAt: "2026-09-12T00:00:00.000Z",
+  })
 
   const store2 = await RoomStore.open(dir)
   const reloaded = store2.get(room.code)
@@ -156,7 +167,10 @@ test("store survives a restart: reopening the same dir sees prior writes", async
   assert.equal(reloaded?.sessionId, "sess-42")
   assert.equal(reloaded?.sandboxId, "box-1")
   assert.equal(reloaded?.artifactUrl, "https://x.test")
+  assert.equal(reloaded?.artifactReady, true)
   assert.equal(reloaded?.cursor, 5)
+  assert.equal(reloaded?.state, "paused")
+  assert.equal(reloaded?.lastActivityAt, "2026-09-12T00:00:00.000Z")
   assert.equal(reloaded?.members.length, 1)
   assert.equal(reloaded?.members[0]?.displayName, "Alice")
 })
@@ -191,6 +205,37 @@ test("open throws a clear error when the file is valid JSON but the wrong shape"
   const dir = trackDir(await freshDir())
   await writeFile(join(dir, "rooms.json"), JSON.stringify({ rooms: [{ nope: true }] }), "utf8")
   await assert.rejects(() => RoomStore.open(dir), /corrupt room store/i)
+})
+
+test("open throws a clear error when a room is missing lastActivityAt or state", async () => {
+  const dir = trackDir(await freshDir())
+  const room = {
+    code: "RDV-7F3K",
+    members: [],
+    createdAt: "2026-09-12T00:00:00.000Z",
+    updatedAt: "2026-09-12T00:00:00.000Z",
+    cursor: 0,
+    // lastActivityAt and state deliberately omitted — predates M8
+  }
+  await writeFile(join(dir, "rooms.json"), JSON.stringify({ rooms: [room] }), "utf8")
+  await assert.rejects(() => RoomStore.open(dir), /corrupt room store/i)
+})
+
+test("open accepts a room whose optional artifactReady key is entirely absent", async () => {
+  const dir = trackDir(await freshDir())
+  const room = {
+    code: "RDV-7F3K",
+    members: [],
+    createdAt: "2026-09-12T00:00:00.000Z",
+    updatedAt: "2026-09-12T00:00:00.000Z",
+    cursor: 0,
+    lastActivityAt: "2026-09-12T00:00:00.000Z",
+    state: "active",
+    // sessionId/sandboxId/artifactUrl/artifactReady all absent, matching a fresh `create()`
+  }
+  await writeFile(join(dir, "rooms.json"), JSON.stringify({ rooms: [room] }), "utf8")
+  const store = await RoomStore.open(dir)
+  assert.equal(store.get("RDV-7F3K")?.artifactReady, undefined)
 })
 
 test("writes are atomic: no partial rooms.json is ever left behind", async () => {

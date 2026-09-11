@@ -25,7 +25,38 @@ partner in the Agents SDK sandbox lineup. Do not say "OpenAI bought E2B" on
 stage — a judge will know, and it costs the whole pitch its credibility. The
 true and stronger statement is below.
 
-### 1.2 The gap, stated precisely
+### 1.2 Their surface, concretely
+
+From the beta reference, so we argue against the real thing:
+
+```
+client.beta.agents.sessions.create(
+    agent       = { "model": "gpt-6-astra", "instructions": ... },
+    environment = { "type": "openai_hosted" },   # or self-hosted, or "none"
+    input       = ...,
+    stream      = True,
+)
+```
+
+- **Sessions** are durable. "Continue or steer" is a documented verb: send
+  another task to the same session, or guide the agent during its current
+  turn.
+- **Artifacts are first-class**:
+  `GET /agents/sessions/{session_id}/artifacts/{artifact_id}/content`, plus
+  list, retrieve and delete.
+- **Environment templates**: `POST /agents/environments/templates/{id}` — a
+  reusable configuration that provisions a fresh environment per session.
+- Streamed events like `agent.session.turn.completed`.
+- Billed at model rates plus standard container rates. US-only data, no Zero
+  Data Retention.
+
+Two things are worth taking seriously here. Their **artifact** is a download
+endpoint; ours is a live served URL that changes while people argue about it,
+which is the better demo but the weaker file story. Their **environment
+template** is a good idea we should copy: a room spec that provisions a fresh
+sandbox per room.
+
+### 1.3 The gap, stated precisely
 
 The durable-agent-session-plus-sandbox is now a commodity. Nine vendors sell
 it; OpenAI now sells it behind one API call.
@@ -33,14 +64,20 @@ it; OpenAI now sells it behind one API call.
 **Every one of them is single-principal.** One API key, one developer, one
 session. The Agents API documentation describes no multi-user or
 collaboration feature. Its multi-agent story is task decomposition into
-subagents — more robots, still one human.
+subagents, which is more robots and still one human.
+
+Sharper still: their documentation does not specify what happens when input
+arrives **while a turn is already in progress**. The whole surface is written
+for one caller who waits their turn. That unanswered question is precisely the
+one Rendez-vous is built around, and the agentproto stack answers it with a
+persisted prompt queue (§3).
 
 So the uncontested ground is not the sandbox. It is **the room around it**:
 several *humans*, several *surfaces*, one *live agent state*.
 
 That is Rendez-vous, and it is a protocol primitive, not a feature.
 
-### 1.3 Challenge fit
+### 1.4 Challenge fit
 
 The brief asks for an agent that belongs somewhere new and is meaningfully
 more useful *because* of that context. Our answer:
