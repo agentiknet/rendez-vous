@@ -133,6 +133,38 @@ stack does *not* have:
 Same room. Same agent. Three levels of presence. This ladder is the demo's
 narrative spine and the clearest expression of "belongs somewhere new".
 
+### 2.3 The room spec (our environment template)
+
+Borrowed directly from the Agents API's environment template (§1.2): a
+reusable configuration that provisions a fresh environment per session.
+Ours provisions a fresh **box per room**, and it is the room's identity.
+
+```
+RoomSpec {
+  id            "pitch-deck" | "landing-page" | "incident"
+  version       semver
+  provider      "e2b"                      # box has no port exposure (R9)
+  image         template slug
+  packages      string[]                   # baked or installed at boot
+  setupCommands string[]                   # deterministic, NOT an agent turn
+  ports         number[]                   # 3210 = the artifact
+  artifact      { app: dir, port: 3210 }   # what gets served publicly
+  runtime       "agentproto" | "openai"    # which brain drives the box (§9)
+  tools         MCP server refs
+  greeting      what a joiner is told on arrival
+}
+```
+
+Two properties earn their keep:
+
+- **Deterministic provisioning.** `setupCommands` beats asking an agent to
+  install things, which we learned the hard way. The spec is the place that
+  rule lives.
+- **A spec is shareable.** A room spec is a file. Publish it, hand someone a
+  QR, and they get a preconfigured room with the right packages, the right
+  tools and the right opening line. That is a product surface, not just
+  config.
+
 ### 2.2 Why rendezvous is not this primitive
 
 The agentproto rendezvous broker is a deliberately dumb two-socket byte
@@ -440,3 +472,115 @@ Two honesty rules for the pitch:
 Check the rules for a "no pre-existing code" clause. If one exists, the answer
 is still fine — a published public dependency is not pre-existing *project*
 code — but we want to have read the sentence before a judge quotes it.
+
+---
+
+## 9. Phase 2 — the room owns the box, runtimes plug in
+
+Everything in §1 through §8 assumes one runtime: an agentproto session that
+boots a box and owns it. That coupling is wrong, and fixing it is what turns
+Rendez-vous from a good demo into a primitive.
+
+### 9.1 Invert the ownership
+
+Today the agent session boots the sandbox, and closing the session pauses or
+kills it (`sandbox-agent-session-proxy.ts:458-489`). So the room's artifact
+lives and dies with one agent process.
+
+Flip it. **The room owns the box. Agent sessions attach and detach.**
+
+```
+  Room ──owns──▶ Sandbox (filesystem + the public artifact URL)
+    │                ▲
+    │                │ attach / detach
+    └──drives──▶ Runtime session  (swappable, restartable, plural)
+```
+
+agentproto already supports this: `sandbox_attach` is connect-never-boot,
+returns a durable connection descriptor, imposes no refcount or lease, and
+permits any number of concurrent attachers (`sandbox-attach.ts:103-176`).
+
+What it buys, all of it structural:
+- Restart the agent without losing the room or the URL.
+- Swap the brain mid-room.
+- Run more than one agent in the same room (§9.4).
+- R8 and R10 stop being special cases: room lifecycle governs the box, so
+  re-serve-on-resume and idle-pause are room concerns with an obvious owner.
+
+### 9.2 RoomRuntime — the three verbs
+
+A room needs exactly three things from whatever is thinking:
+
+```ts
+interface RoomRuntime {
+  start(spec: RoomSpec, sandboxId: string): Promise<RuntimeSessionId>
+  postTurn(id: RuntimeSessionId, attributed: string): Promise<void>  // MUST NOT DROP
+  subscribe(id: RuntimeSessionId, cursor: Cursor): AsyncIterable<RuntimeEvent>
+}
+```
+
+`postTurn` must not drop when the runtime is mid-turn. That one line is the
+whole multiplayer contract, and it is the line every single-principal runtime
+leaves unwritten.
+
+### 9.3 The OpenAI adapter, and why it is a drop-in box
+
+The Agents API offers a **self-hosted sandbox**: you run `codex exec-server`
+over an outbound WebSocket on your own infrastructure, and OpenAI's managed
+harness drives it remotely.
+
+So the second runtime is genuinely drop-in:
+
+```
+  same e2b box
+  same filesystem
+  same agentproto app serve on :3210  →  same public artifact URL
+  different brain:
+      agentproto runtime → adapter runs INSIDE the box's own daemon
+      openai runtime     → codex exec-server in the box, driven from OpenAI
+```
+
+The room does not notice. The humans do not notice. The artifact URL does not
+change. That is the proof that the room is a primitive and the runtime is a
+detail.
+
+**The experiment that decides how loud we are about this.** Their
+documentation does not specify what happens when input arrives while a turn is
+in progress (§1.3). Two outcomes, both good for us:
+
+- It queues → our adapter is thin, and we say the room is portable.
+- It errors or drops → **our adapter has to implement the queue for them**,
+  and we say we had to build multiplayer into their runtime because it was not
+  there.
+
+Do not assume which. It is two API calls to find out, and the answer decides a
+line in the pitch. Run it before writing the slide.
+
+### 9.4 Two agents, one room
+
+Once the box is room-owned and runtimes are pluggable, a room can host more
+than one brain on the same filesystem. Two framings, in order of how novel
+they are:
+
+- **Bring your own agent.** Alice's Claude and Bob's GPT, same room, same
+  artifact. Multiplayer extended from humans to models. Nobody has this.
+- **Builder and reviewer.** One writes, one critiques, both visible in the
+  transcript.
+
+The hazard is real: two writers on one filesystem interleaving turns. Do not
+hand-wave it. The room already serialises human input through a queue; the
+same lock has to cover agents, or each agent gets a lane it alone may write.
+Land it only with the collision story written down.
+
+### 9.5 Frozen order for phase 2
+
+1. Land everything in flight and get the demo rehearsed. Phase 2 starts from a
+   green, rehearsed MVP or not at all.
+2. Room spec (§2.3) as a real file format, with the current hardcoded boot as
+   its first spec.
+3. Invert ownership (§9.1): room owns `sandboxId`, sessions attach.
+4. Extract `RoomRuntime` (§9.2) and move the current code behind it as the
+   `agentproto` implementation. No behaviour change, tests still green.
+5. Run the concurrent-input experiment against the Agents API (§9.3).
+6. Build the `openai` implementation.
+7. Only then consider §9.4, and only with the collision story settled.
