@@ -241,6 +241,108 @@ test("resumeRoomSession gives up after exhausting its reconnect attempts", async
   }
 })
 
+test("resumeRoomSession retries when the reconnect spawn succeeds but its first turn errors, and succeeds on the 2nd attempt", async () => {
+  const artifact = createServer((_req, res) => {
+    res.writeHead(200)
+    res.end("ok")
+  })
+  await new Promise<void>((resolve, reject) => {
+    artifact.once("error", reject)
+    artifact.listen(0, "127.0.0.1", resolve)
+  })
+  const artifactUrl = `http://127.0.0.1:${listeningPort(artifact)}`
+
+  const daemon = await startFakeDaemon({ failFirstTurnForSandbox: { sandboxId: "sandbox_prior", failCount: 1 } })
+  try {
+    const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+    const result = await resumeRoomSession(client, {
+      cwd: "/home/user",
+      label: "rdv-room",
+      adapter: "claude-code",
+      model: "claude-sonnet-5",
+      prompt: "hello again",
+      appDir: "/home/user/apps/rdv-hello",
+      port: 3210,
+      sandboxId: "sandbox_prior",
+      artifactUrl,
+      attempts: 4,
+      retryDelayMs: 1,
+      turnTimeoutMs: 2_000,
+    })
+    assert.equal(result.artifactUrl, artifactUrl)
+
+    // Two reconnect spawns (the first one's turn errored, the second one's
+    // turn completed) plus a kill of the first, broken session before the
+    // retry.
+    const spawnCalls = daemon.requestsReceived.filter(r => r.path === "/sessions/agent")
+    assert.equal(spawnCalls.length, 2)
+    const killCalls = daemon.requestsReceived.filter(r => r.path.endsWith("/kill"))
+    assert.equal(killCalls.length, 1)
+  } finally {
+    await daemon.close()
+    await new Promise<void>((resolve, reject) => artifact.close(err => (err ? reject(err) : resolve())))
+  }
+})
+
+test("resumeRoomSession gives up after exhausting attempts when every reconnect's first turn errors", async () => {
+  const daemon = await startFakeDaemon({ failFirstTurnForSandbox: { sandboxId: "sandbox_prior", failCount: 10 } })
+  try {
+    const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+    await assert.rejects(
+      resumeRoomSession(client, {
+        cwd: "/home/user",
+        label: "rdv-room",
+        adapter: "claude-code",
+        model: "claude-sonnet-5",
+        prompt: "hello again",
+        appDir: "/home/user/apps/rdv-hello",
+        port: 3210,
+        sandboxId: "sandbox_prior",
+        artifactUrl: "http://127.0.0.1:1",
+        attempts: 2,
+        retryDelayMs: 1,
+        turnTimeoutMs: 2_000,
+      }),
+      /first turn errored/,
+    )
+    const spawnCalls = daemon.requestsReceived.filter(r => r.path === "/sessions/agent")
+    assert.equal(spawnCalls.length, 2)
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("resumeRoomSession cost-protects the known sandboxId once every reconnect's first turn has errored", async () => {
+  const daemon = await startFakeDaemon({ failFirstTurnForSandbox: { sandboxId: "sandbox_prior", failCount: 10 } })
+  const killed: string[] = []
+  try {
+    const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+    await assert.rejects(
+      resumeRoomSession(client, {
+        cwd: "/home/user",
+        label: "rdv-room",
+        adapter: "claude-code",
+        model: "claude-sonnet-5",
+        prompt: "hello again",
+        appDir: "/home/user/apps/rdv-hello",
+        port: 3210,
+        sandboxId: "sandbox_prior",
+        artifactUrl: "http://127.0.0.1:1",
+        attempts: 2,
+        retryDelayMs: 1,
+        turnTimeoutMs: 2_000,
+        killOrphanSandbox: async (sandboxId) => {
+          killed.push(sandboxId)
+        },
+      }),
+      /first turn errored/,
+    )
+    assert.deepEqual(killed, ["sandbox_prior"])
+  } finally {
+    await daemon.close()
+  }
+})
+
 test("resumeRoomSession cost-protects the known sandboxId once reconnect attempts are exhausted", async () => {
   const daemon = await startFakeDaemon({ failReconnectsForSandbox: { sandboxId: "sandbox_prior", failCount: 10 } })
   const killed: string[] = []

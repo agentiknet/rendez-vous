@@ -14,7 +14,7 @@ self-contained without them.
 
 | # | Title | Severity | Status |
 | --- | --- | --- | --- |
-| 1 | `POST /sessions/:id/prompt` mid-turn loses a message without `queue:true`, and the daemon's own inbound router never passes it | High — silent data loss | Documented |
+| 1 | `POST /sessions/:id/prompt` mid-turn loses a message without `queue:true`, and both the daemon's own inbound router AND its primary agent-to-agent messaging tool (`agent_prompt`) never pass it | High — silent data loss, affects the primary agent-to-agent messaging tool, not only the inbound webhook router | Documented |
 | 2 | `agentproto app serve` hardcodes the UI path, ignoring APP.md's `ui.path` that `app_install` honours | Medium — silent failure (URL never serves, no error anywhere) | Documented |
 | 3 | e2b reconnect failure (MCP-connect step) doesn't pause the box on error, unlike sibling failure paths | Medium — cost leak risk | Documented |
 | 4 | `POST /mcps/proxy/call` has no auth gate, unlike neighboring mutating routes | High — security | Documented |
@@ -28,18 +28,37 @@ self-contained without them.
 
 **Summary.** `POST /sessions/:id/prompt?wait=false` on a busy session throws
 a mid-turn rejection unless the caller passes `queue: true` — that part is
-correct and by design. The problem is one level up: the daemon's own
-built-in inbound message router never sets that flag, so any host that
-routes provider webhooks through it (the shipped default) silently drops
-one side of a two-people-talking-at-once race, with no error surfaced to
-either sender.
+correct and by design. The problem is one level up: two of the daemon's own
+built-in call sites never set that flag. The inbound message router is one
+(a host routing provider webhooks through it silently drops one side of a
+two-people-talking-at-once race, no error surfaced to either sender). The
+MCP `agent_prompt` tool — the primary agent-to-agent messaging surface, not
+a webhook edge case — is the other: an agent sending a follow-up turn to a
+DIFFERENT, currently-busy session gets the request rejected outright, with
+no queueing option offered at all (only `interrupt`, which cancels the
+target's in-flight turn instead of waiting its turn — a different, much
+more disruptive semantic). Unlike the inbound-router case, this one at
+least surfaces as a visible tool error to the calling agent (`isError:
+true`) rather than a true silent drop — but nothing about that response
+queues or retries the prompt, so it's still lost unless the calling agent
+notices the error and resends, which nothing prompts it to do.
 
 **Anchors.**
 - `packages/runtime/src/inbound-router.ts:92` —
   `await deps.enqueuePrompt(sessionId, msg.text)`, exactly two arguments:
   no `queue`, no `origin`, no way to opt in from this call site.
-- `packages/runtime/src/sessions.ts:4815` — the throw itself:
-  `` `${caller}: session "${id}" is mid-turn — wait for it to finish or cancel` ``.
+- `packages/runtime/src/agent-tools.ts:1157-1160` — the `agent_prompt` tool
+  handler: `await registry.enqueuePrompt(sessionId, input.prompt, {
+  interrupt: input.interrupt, ...(promptSource ? { source: ... } : {}) })` —
+  `interrupt` is the only opt-in field this tool exposes; there is no
+  `queue`. The comment immediately above (`:1140-1149`) confirms this is
+  deliberate ("a session already mid-turn... surfaces here as a real tool
+  error instead of a lying `{queued: true}`"), but deliberate-and-visible is
+  still not the same as deliverable — the caller still has no way to ask for
+  "queue it" short of dropping to the raw HTTP route below.
+- `packages/runtime/src/sessions.ts:4815` — the throw both call sites
+  ultimately hit: `` `${caller}: session "${id}" is mid-turn — wait for it
+  to finish or cancel` ``.
 - `packages/runtime/src/http-server.ts`'s prompt route (`~4410-4507`) —
   where `queue`/`force`/`interrupt` are parsed from the body and honoured
   ONLY on the `?wait=false` arm; the blocking arm has no opt-in at all.
@@ -53,19 +72,44 @@ HTTP 409
 {"error":"send_prompt_failed","message":"enqueuePrompt: session \"<id>\" is mid-turn — wait for it to finish or cancel"}
 ```
 Full request/response bodies for both arms are in `docs/DAEMON-NOTES.md`
-§"Queue behaviour".
+§"Queue behaviour". The `agent_prompt` case observed live (operator report,
+two drops in one session): an agent calls `agent_prompt` on a sibling/child
+session that's still mid-turn from a prior instruction; the tool call
+returns `isError: true` with the exact `sessions.ts:4815` message above,
+and the intended follow-up instruction never reaches the target session
+unless the calling agent explicitly retries it.
 
 **Impact.** Any consumer of the built-in inbound router (the shipped path
 from a provider webhook to a session) loses a message whenever it arrives
 while the session is mid-turn — exactly the "two humans typing at once"
 case, with no retry, no queued state, no error delivered anywhere. Every
 caller of that router path inherits this unless they route around it (as
-this repo does, calling `?wait=false&queue=true` directly instead).
+this repo does, calling `?wait=false&queue=true` directly instead). Beyond
+the webhook path, `agent_prompt` — the tool every multi-agent supervision
+flow uses to drive a child/sibling session — has the identical gap: a
+supervisor that fires a follow-up instruction at a session it doesn't know
+is still busy loses that instruction, has to notice the tool error, and
+has to know to retry (nothing about the error message suggests a fix).
+
+**Workaround (today, from this repo or any other caller).** Bypass
+`agent_prompt` for the busy-target case and call the daemon's own HTTP
+route directly: `POST /sessions/:id/prompt?wait=false` with
+`{"prompt": ..., "queue": true}` — the exact pattern this repo's own
+`DaemonClient.prompt` (`src/daemon/client.ts`) already uses for fan-in, per
+`docs/DAEMON-NOTES.md`'s "Queue behaviour" section. There is no equivalent
+MCP-tool-level workaround; the queueing mechanism only exists on the raw
+HTTP surface today.
 
 **Suggested fix.** `inbound-router.ts:92`'s `routeInto` should call
 `enqueuePrompt(sessionId, msg.text, { queue: true, origin: ... })` instead
 of the bare two-argument form — the queueing mechanism it needs already
 exists and is exercised correctly elsewhere in the same codebase.
+`agent_prompt` needs the same fix at a different call site: either default
+to `queue: true` when `interrupt` isn't set (so "wait your turn" becomes
+the default instead of an immediate rejection), or add an explicit `queue`
+input field mirroring the HTTP route's, so a caller that wants today's
+fail-fast behavior can still opt into it instead of losing that choice
+entirely.
 
 ---
 

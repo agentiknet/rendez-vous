@@ -21,6 +21,13 @@ export interface FakeDaemonOptions {
    *  (`sandbox.reuse === sandboxId`, no `appServe`) for this sandboxId fail
    *  with that error code; the next one succeeds normally. */
   readonly failReconnectsForSandbox?: { readonly sandboxId: string; readonly failCount: number }
+  /** Simulate the OTHER shape of the same race (docs/UPSTREAM.md #7): the
+   *  first `failCount` bare-reconnect spawns (`sandbox.reuse === sandboxId`,
+   *  no `appServe`) for this sandboxId get a normal `201`, but the session's
+   *  `/events/stream` reports its first turn as `turn-end reason:"error"`
+   *  instead of `"completed"`; the next one reports a normal completed
+   *  turn. */
+  readonly failFirstTurnForSandbox?: { readonly sandboxId: string; readonly failCount: number }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -46,6 +53,8 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
   const queuePositionBySession = new Map<string, number>()
   const requestsReceived: { path: string; body: unknown }[] = []
   let reconnectFailuresSeen = 0
+  let turnFailuresSeen = 0
+  const turnOutcomeBySessionId = new Map<string, "completed" | "error">()
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://127.0.0.1")
@@ -91,8 +100,17 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
         return
       }
 
+      const sessionId = "sess_fake"
+      const shouldFailTurn =
+        opts.failFirstTurnForSandbox !== undefined &&
+        reuseId === opts.failFirstTurnForSandbox.sandboxId &&
+        appServeRequested === undefined &&
+        turnFailuresSeen < opts.failFirstTurnForSandbox.failCount
+      if (shouldFailTurn) turnFailuresSeen += 1
+      turnOutcomeBySessionId.set(sessionId, shouldFailTurn ? "error" : "completed")
+
       sendJson(res, 201, {
-        id: "sess_fake",
+        id: sessionId,
         status: "running",
         ...(sandboxRequested ? { sandboxId: "sandbox_fake" } : {}),
         ...(appServeRequested !== undefined
@@ -107,6 +125,21 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
             }
           : {}),
       })
+      return
+    }
+
+    const streamMatch = path.match(/^\/sessions\/([^/]+)\/events\/stream$/)
+    if (streamMatch !== null && req.method === "GET") {
+      const sessionId = streamMatch[1]
+      const outcome = sessionId !== undefined ? (turnOutcomeBySessionId.get(sessionId) ?? "completed") : "completed"
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      })
+      res.write(`data: ${JSON.stringify({ seq: 1, kind: "system-prompt", sessionId, text: "system prompt" })}\n\n`)
+      res.write(`data: ${JSON.stringify({ seq: 2, kind: "user-prompt", sessionId, text: "user prompt" })}\n\n`)
+      res.write(`data: ${JSON.stringify({ seq: 3, kind: "turn-end", sessionId, reason: outcome })}\n\n`)
       return
     }
 
