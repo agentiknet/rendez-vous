@@ -113,3 +113,230 @@ test("GET /health reports the daemon as unreachable when it cannot be reached", 
   assert.equal(body.rooms, 0)
   assert.equal(body.daemon, "unreachable")
 })
+
+async function newRoomHarness(): Promise<{
+  service: RoomService
+  daemon: ExtendedFakeDaemon
+  baseUrl: string
+  code: string
+  sessionId: string
+}> {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const transport = new MemoryTransport()
+  const service = new RoomService({ store, client, booter, transport })
+  services.push(service)
+
+  const created = await service.handleInbound({
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+1" },
+    displayName: "Alice",
+    tier: "messenger",
+    text: "new",
+  })
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") throw new Error("unreachable")
+  const sessionId = created.room.sessionId
+  assert.ok(sessionId !== undefined)
+  if (sessionId === undefined) throw new Error("unreachable")
+
+  const baseUrl = await listenOnRandomPort(service)
+  return { service, daemon, baseUrl, code: created.room.code, sessionId }
+}
+
+async function waitFor(check: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now()
+  while (!check()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor timed out")
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
+test("GET /r/:code renders the room page for a known room", async () => {
+  const { baseUrl, code } = await newRoomHarness()
+  const res = await fetch(`${baseUrl}/r/${code}`)
+  assert.equal(res.status, 200)
+  assert.match(res.headers.get("content-type") ?? "", /text\/html/)
+  const html = await res.text()
+  assert.ok(html.includes(code))
+  assert.ok(html.includes("Alice"))
+})
+
+test("GET /r/:code renders a 404 page with a hint for an unknown room", async () => {
+  const { baseUrl } = await newRoomHarness()
+  const res = await fetch(`${baseUrl}/r/RDV-ZZZZ`)
+  assert.equal(res.status, 404)
+  const html = await res.text()
+  assert.ok(html.includes("RDV-ZZZZ"))
+})
+
+async function readSseRecords(res: Response, count: number): Promise<Record<string, unknown>[]> {
+  if (res.body === null) throw new Error("stream response has no body")
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  const records: Record<string, unknown>[] = []
+
+  while (records.length < count) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let boundary = buffer.indexOf("\n\n")
+    while (boundary !== -1) {
+      const frame = buffer.slice(0, boundary)
+      buffer = buffer.slice(boundary + 2)
+      const dataLine = frame.split("\n").find((line) => line.startsWith("data:"))
+      if (dataLine !== undefined) {
+        const parsed: unknown = JSON.parse(dataLine.slice("data:".length).trim())
+        if (isRecord(parsed)) records.push(parsed)
+      }
+      boundary = buffer.indexOf("\n\n")
+    }
+  }
+  await reader.cancel().catch(() => undefined)
+  return records
+}
+
+test("GET /rooms/:code/stream replays from since=0, filtered to the kinds the page renders", async () => {
+  const { baseUrl, daemon, sessionId, code } = await newRoomHarness()
+
+  daemon.pushRecord(sessionId, { seq: 1, kind: "text-delta", text: "hello" })
+  daemon.pushRecord(sessionId, { seq: 2, kind: "usage_update" })
+  daemon.pushRecord(sessionId, { seq: 3, kind: "turn-end", reason: "completed" })
+
+  const res = await fetch(`${baseUrl}/rooms/${code}/stream?since=0`)
+  assert.equal(res.status, 200)
+  assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/)
+
+  const records = await readSseRecords(res, 2)
+  assert.equal(records.length, 2)
+  assert.equal(records[0]?.kind, "text-delta")
+  assert.equal(records[1]?.kind, "turn-end")
+})
+
+test("GET /rooms/:code/stream replays only records after the given since", async () => {
+  const { baseUrl, daemon, sessionId, code } = await newRoomHarness()
+
+  daemon.pushRecord(sessionId, { seq: 1, kind: "text-delta", text: "old" })
+  daemon.pushRecord(sessionId, { seq: 2, kind: "turn-end", reason: "completed" })
+  daemon.pushRecord(sessionId, { seq: 3, kind: "text-delta", text: "new" })
+  daemon.pushRecord(sessionId, { seq: 4, kind: "turn-end", reason: "completed" })
+
+  const res = await fetch(`${baseUrl}/rooms/${code}/stream?since=2`)
+  const records = await readSseRecords(res, 2)
+  assert.equal(records[0]?.text, "new")
+  assert.equal(records[1]?.kind, "turn-end")
+})
+
+test("GET /rooms/:code/stream closes the upstream daemon connection when the browser disconnects", async () => {
+  const { baseUrl, daemon, sessionId, code } = await newRoomHarness()
+  // `newRoomHarness` already starts the room's own RoomFanout reader (M3), which
+  // holds a persistent upstream subscription of its own, established some time
+  // after `handleInbound` returns — wait for it to land before taking the
+  // baseline, so the browser's stream below is measured as the *only* addition.
+  await waitFor(() => daemon.subscriberCount(sessionId) >= 1)
+  const baseline = daemon.subscriberCount(sessionId)
+
+  const controller = new AbortController()
+  const res = await fetch(`${baseUrl}/rooms/${code}/stream?since=0`, { signal: controller.signal })
+  assert.equal(res.status, 200)
+  await waitFor(() => daemon.subscriberCount(sessionId) === baseline + 1)
+
+  controller.abort()
+  await waitFor(() => daemon.subscriberCount(sessionId) === baseline)
+})
+
+test("GET /rooms/:code/stream returns 409 when the room has no live session", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const service = new RoomService({ store, client, booter, transport: new MemoryTransport() })
+  services.push(service)
+  const room = await store.create()
+
+  const baseUrl = await listenOnRandomPort(service)
+  const res = await fetch(`${baseUrl}/rooms/${room.code}/stream`)
+  assert.equal(res.status, 409)
+})
+
+test("GET /rooms/:code/stream returns 404 for an unknown room", async () => {
+  const { baseUrl } = await newRoomHarness()
+  const res = await fetch(`${baseUrl}/rooms/RDV-ZZZZ/stream`)
+  assert.equal(res.status, 404)
+})
+
+interface MinimalMember {
+  displayName: string
+  tier: string
+}
+
+function isMinimalMember(value: unknown): value is MinimalMember {
+  return isRecord(value) && typeof value.displayName === "string" && typeof value.tier === "string"
+}
+
+function isArrayOf<T>(value: unknown, guard: (v: unknown) => v is T): value is T[] {
+  return Array.isArray(value) && value.every(guard)
+}
+
+test("POST /rooms/:code/send registers a room-web member once (idempotent) and puts queue:true plus the [Name · room-web] prefix on the wire", async () => {
+  const { baseUrl, daemon, sessionId, code } = await newRoomHarness()
+
+  const send = async (): Promise<Record<string, unknown>> => {
+    const res = await fetch(`${baseUrl}/rooms/${code}/send`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Chloe", text: "hi from the web" }),
+    })
+    assert.equal(res.status, 200)
+    return readJson(res)
+  }
+  await send()
+  await send()
+
+  const roomBody = await readJson(await fetch(`${baseUrl}/rooms/${code}`))
+  const members = isArrayOf(roomBody.members, isMinimalMember) ? roomBody.members : []
+  const chloes = members.filter((m) => m.displayName === "Chloe" && m.tier === "room-web")
+  assert.equal(chloes.length, 1, "Chloe should be registered once, not once per send")
+
+  const promptRequests = daemon.requestsReceived.filter((r) => r.path === `/sessions/${sessionId}/prompt`)
+  assert.equal(promptRequests.length, 2)
+  const firstBody = promptRequests[0]?.body
+  assert.ok(isRecord(firstBody))
+  if (!isRecord(firstBody)) return
+  assert.equal(firstBody.queue, true)
+  assert.equal(firstBody.prompt, "[Chloe · room-web] hi from the web")
+})
+
+test("POST /rooms/:code/send treats new/join/resume as plain text, not commands", async () => {
+  const { baseUrl, daemon, sessionId, code } = await newRoomHarness()
+
+  const res = await fetch(`${baseUrl}/rooms/${code}/send`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ displayName: "Dana", text: "new" }),
+  })
+  assert.equal(res.status, 200)
+
+  const promptRequests = daemon.requestsReceived.filter((r) => r.path === `/sessions/${sessionId}/prompt`)
+  assert.equal(promptRequests.length, 1)
+  const body = promptRequests[0]?.body
+  assert.ok(isRecord(body))
+  if (isRecord(body)) assert.equal(body.prompt, "[Dana · room-web] new")
+
+  const spawnCalls = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent").length
+  assert.equal(spawnCalls, 1, "no second room should have been created")
+})
+
+test("POST /rooms/:code/send returns 404 for an unknown room", async () => {
+  const { baseUrl } = await newRoomHarness()
+  const res = await fetch(`${baseUrl}/rooms/RDV-ZZZZ/send`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ displayName: "X", text: "hi" }),
+  })
+  assert.equal(res.status, 404)
+})

@@ -25,6 +25,8 @@ export interface ExtendedFakeDaemon {
   readonly url: string
   readonly requestsReceived: { readonly path: string; readonly body: unknown }[]
   pushRecord(sessionId: string, record: FanoutRecordLike): void
+  /** Number of live `GET /sessions/:id/events/stream` connections currently held open for this session. */
+  subscriberCount(sessionId: string): number
   close(): Promise<void>
 }
 
@@ -192,6 +194,7 @@ export async function startExtendedFakeDaemon(opts: FakeDaemonOptions = {}): Pro
     url: `http://127.0.0.1:${address.port}`,
     requestsReceived: inner.requestsReceived,
     pushRecord,
+    subscriberCount: (sessionId: string) => subscribersFor(sessionId).size,
     close: async () => {
       for (const set of subscribers.values()) {
         for (const res of set) res.end()

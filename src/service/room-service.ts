@@ -1,4 +1,5 @@
-import type { DaemonClient, HealthResult } from "../daemon/client.ts"
+import type { DaemonClient, HealthResult, PromptResult } from "../daemon/client.ts"
+import type { TranscriptRecord } from "../daemon/records.ts"
 import { fanIn } from "../fanin/index.ts"
 import { RoomFanout } from "../fanout/reader.ts"
 import type { Transport } from "../fanout/types.ts"
@@ -22,12 +23,30 @@ export type InboundOutcome =
   | { kind: "unknown-code" }
   | { kind: "unknown-sender" }
 
+export type RoomWebSendOutcome =
+  | { kind: "sent"; member: Member; result: PromptResult }
+  | { kind: "unknown-code" }
+  | { kind: "no-session" }
+
 function welcomeText(prefix: string, room: Room): string {
   const lines = [`${prefix}: ${room.code}`]
   if (room.artifactUrl !== undefined) {
     lines.push(room.artifactUrl)
   }
   return lines.join("\n")
+}
+
+/** Stable, deterministic contact ref for a room-web guest: the same
+ *  displayName in the same room always resolves to the same member, which
+ *  is what makes `store.addMember`'s idempotency actually kick in here —
+ *  there is no browser/session id to key on instead. */
+function slugify(displayName: string): string {
+  const slug = displayName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+  return slug.length > 0 ? slug : "guest"
 }
 
 export class RoomService {
@@ -76,6 +95,33 @@ export class RoomService {
     } catch {
       return "unreachable"
     }
+  }
+
+  /** Raw transcript passthrough for the tier-3 web view's own SSE reader (R6:
+   *  the browser talks only to us, never the daemon — this is the one seam
+   *  that keeps the bearer inside the service). */
+  events(sessionId: string, since: number, signal: AbortSignal): AsyncIterable<TranscriptRecord> {
+    return this.client.events(sessionId, since, signal)
+  }
+
+  /** A plain message from the room-web tier: no `new`/`join`/`resume`
+   *  commands accepted here, the caller already knows the room. */
+  async sendFromRoomWeb(code: string, displayName: string, text: string): Promise<RoomWebSendOutcome> {
+    const room = this.store.get(code)
+    if (room === undefined) {
+      return { kind: "unknown-code" }
+    }
+    if (room.sessionId === undefined) {
+      return { kind: "no-session" }
+    }
+
+    const member = await this.store.addMember(code, {
+      displayName,
+      tier: "room-web",
+      address: { provider: "room-web", source: code, contactRef: slugify(displayName) },
+    })
+    const result = await fanIn(this.client, room.sessionId, member, text)
+    return { kind: "sent", member, result }
   }
 
   async handleInbound(input: InboundInput): Promise<InboundOutcome> {

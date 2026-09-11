@@ -83,6 +83,20 @@ curl -s http://127.0.0.1:8790/rooms/RDV-7F3K
 ```
 Returns the `Room` JSON, or `404 {"error":"not_found"}`.
 
+### `GET /r/:code` — the room web view (tier 3)
+
+A plain HTML page (no build step): live transcript on the left, the
+artifact `<iframe>` on the right once one exists, roster and a send box.
+The page talks only to this service — `GET /rooms/:code/stream?since=<seq>`
+(SSE, re-emits the daemon transcript) and `POST /rooms/:code/send`
+(`{"displayName","text"}`, registers a `room-web` member and fans in) —
+never the daemon directly (R6, architecture.md §4.2). Unknown code → its
+own 404 page.
+
+**Try it in two steps:**
+1. `curl -s -X POST http://127.0.0.1:8790/inbound/simulated -H 'content-type: application/json' -d '{"provider":"whatsapp","source":"agentpush","contactRef":"+1","displayName":"Alice","tier":"messenger","text":"new"}'` — note `room.code` in the reply (or run `node scripts/simulate-room.ts`, which prints a code directly).
+2. Open `http://127.0.0.1:8790/r/<code>` in a browser.
+
 ## 3. Proof scripts
 
 All three need `RDV_DAEMON_TOKEN` exported (§1) and a reachable daemon at
