@@ -125,6 +125,10 @@ function verifySignature(
   return { ok: true }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 function getStringField(obj: Record<string, unknown>, key: string): string | undefined {
   const value = obj[key]
   return typeof value === "string" ? value : undefined
@@ -145,12 +149,11 @@ export function parseAgentpushWebhook(input: ParseAgentpushWebhookInput): Webhoo
     return { ok: false, status: 400, reason: "invalid_json" }
   }
 
-  if (typeof parsed !== "object" || parsed === null) {
+  if (!isRecord(parsed)) {
     return { ok: false, status: 400, reason: "invalid_json" }
   }
 
-  const envelope = parsed as Record<string, unknown>
-
+  const envelope = parsed
   const version = envelope.version
   if (version !== undefined && version !== ENVELOPE_VERSION) {
     return { ok: false, status: 400, reason: "unsupported_envelope_version" }

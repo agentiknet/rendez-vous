@@ -64,19 +64,18 @@ interface UploadMediaResult {
   media_id: string
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 function isSendMessageResult(value: unknown): value is SendMessageResult {
-  if (typeof value !== "object" || value === null || !("status" in value)) return false
-  const status = (value as { status: unknown }).status
+  if (!isRecord(value)) return false
+  const status = value.status
   return status === "sent" || status === "queued" || status === "blocked" || status === "failed"
 }
 
 function isUploadMediaResult(value: unknown): value is UploadMediaResult {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "media_id" in value &&
-    typeof (value as { media_id: unknown }).media_id === "string"
-  )
+  return isRecord(value) && typeof value.media_id === "string"
 }
 
 export interface AgentpushTransportOptions {
