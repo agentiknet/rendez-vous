@@ -73,8 +73,19 @@ function handleGetRoom(service: RoomService, res: ServerResponse, encodedCode: s
   sendJson(res, 200, room)
 }
 
+async function handleHealth(service: RoomService, res: ServerResponse): Promise<void> {
+  const rooms = service.roomCount()
+  const daemon = await service.daemonHealth()
+  sendJson(res, 200, { status: "ok", rooms, daemon })
+}
+
 async function handle(service: RoomService, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", "http://127.0.0.1")
+
+  if (url.pathname === "/health" && req.method === "GET") {
+    await handleHealth(service, res)
+    return
+  }
 
   if (url.pathname === "/inbound/simulated" && req.method === "POST") {
     await handleInboundSimulated(service, req, res)

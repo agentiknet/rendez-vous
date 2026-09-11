@@ -1,4 +1,4 @@
-import type { DaemonClient } from "../daemon/client.ts"
+import type { DaemonClient, HealthResult } from "../daemon/client.ts"
 import { fanIn } from "../fanin/index.ts"
 import { RoomFanout } from "../fanout/reader.ts"
 import type { Transport } from "../fanout/types.ts"
@@ -64,6 +64,18 @@ export class RoomService {
 
   getRoom(code: string): Room | undefined {
     return this.store.get(code)
+  }
+
+  roomCount(): number {
+    return this.store.list().length
+  }
+
+  async daemonHealth(): Promise<HealthResult | "unreachable"> {
+    try {
+      return await this.client.health()
+    } catch {
+      return "unreachable"
+    }
   }
 
   async handleInbound(input: InboundInput): Promise<InboundOutcome> {
