@@ -13,6 +13,16 @@ Proves boot/artifact/resume end to end and leaves its final box **paused**.
 Copy the sandbox id it prints into `RDV_PREWARM_SANDBOX_ID` (RUNBOOK.md §3)
 — the first `new` of the day reuses it instead of paying for a fresh boot.
 
+**Paused boxes expire on e2b's side within roughly 20–60 minutes**, even
+though the local room/ledger state still shows them `paused` — both boxes
+pre-warmed earlier today came back `"Paused sandbox not found"` on reconnect
+despite that. So: run this step **no earlier than 10 minutes before going on
+stage**, and never trust `agentproto sandbox list` (or the local ledger) as
+a liveness check — it only reflects what we last recorded, not what e2b
+still has. If the pre-warm box is gone, `new` just boots a fresh one instead
+(about 40s) — annoying, not fatal; don't stall the demo trying to diagnose
+it live.
+
 ## 2. Confirm the daemon
 
 ```
