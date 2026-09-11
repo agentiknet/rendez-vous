@@ -683,6 +683,62 @@ specify what happens when input arrives mid-turn (§1.3). Two outcomes, both
 good: it queues, and the room is portable; or it errors, and our layer has to
 supply multiplayer that their runtime does not have. Run it. Do not assume.
 
+### 9.3b The artifact URL must outlive the box
+
+**The gap, as shipped.** `src/fanout/render.ts:19` appends the room's raw
+`artifactUrl` to outbound messages, and `src/fanout/reader.ts:112` re-sends it
+whenever it changes. That URL is e2b's own:
+`https://<port>-<sandboxId>.e2b.app`, a pure function of sandbox id and port
+(`sandbox-e2b/src/provider.ts:274-276`).
+
+Stable for a given box. **Not stable across box replacement.** And boxes get
+replaced: a pre-warmed box expires within 20 to 60 minutes while the local
+ledger still calls it `paused` (see `docs/DEMO.md` §1), a resume can cold-boot,
+a box can die.
+
+So the failure is concrete: Alice has the artifact link in her WhatsApp thread.
+The room resumes onto a fresh box. Her link is dead. The code does re-send a
+new one, so she is not stranded, but the thread now holds a broken link and
+anyone who scrolled up or bookmarked gets a dead page. Step 4 of the demo
+script is *resume after kill*, so this is on the critical path, not a corner
+case.
+
+**The fix needs no new tunnel.** The service already runs behind cloudflared at
+`RDV_PUBLIC_URL` — it has to, for agentpush webhooks and join links. Add one
+route on it:
+
+```
+GET /r/:code/artifact/*   →  look up room.artifactUrl  →  reverse-proxy
+```
+
+Which gives `https://<rdv-host>/r/RDV-7F3K/artifact`:
+
+- **stable forever**, because it is keyed on the room code, not the box;
+- survives box replacement, cold boot and pause/resume with no re-send;
+- same shape as the join link already in the QR, so one mental model;
+- same origin as the room web view, so the artifact iframe has no
+  cross-origin problem;
+- gateable to room members, which the raw e2b URL never was — today that URL
+  is public to anyone who has it.
+
+**Proxy, not redirect.** A `302` is less code but puts the ephemeral e2b origin
+in the browser bar, so the viewer's tab goes stale the moment the box changes.
+A reverse proxy keeps the stable URL in the bar for the whole session.
+
+The cost is that the service must be up whenever anyone views the artifact. It
+already must be up for messaging and the web room, so this adds no new
+dependency.
+
+**Tunnel choice matters more than it looks.** `scripts/tunnel.sh --quick` mints
+a fresh random `*.trycloudflare.com` on every run, so a restart silently
+invalidates every join link and QR already sent. `--named` keeps a stable
+hostname across restarts. For anything rehearsed or printed in advance, use
+`--named`.
+
+Optional polish, not required: wildcard DNS (`RDV-7F3K.rdv.<host>`) resolving
+to the same proxy. Prettier on stage, needs a wildcard cert and a named tunnel,
+and buys nothing functional over the path form.
+
 ### 9.4 Two agents, one room
 
 Once the box is room-owned and runtimes are pluggable, a room can host more
