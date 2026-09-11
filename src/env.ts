@@ -21,6 +21,10 @@ export interface Env {
   readonly agentAdapter: string
   /** Model id passed to the daemon when a room boots its session. */
   readonly agentModel: string
+  /** WhatsApp number for join links, digits only, no leading `+`. Undefined when not configured. */
+  readonly whatsappNumber: string | undefined
+  /** Telegram bot username for join links, without the leading `@`. Undefined when not configured. */
+  readonly telegramBot: string | undefined
 }
 
 type Source = Readonly<Record<string, string | undefined>>
@@ -53,6 +57,22 @@ function stripTrailingSlash(url: string): string {
   return url.endsWith("/") ? url.slice(0, -1) : url
 }
 
+function readWhatsappNumber(source: Source, key: string): string | undefined {
+  const raw = readOptionalString(source, key)
+  if (raw === undefined) return undefined
+  const digits = raw.startsWith("+") ? raw.slice(1) : raw
+  if (!/^[0-9]+$/.test(digits)) {
+    throw new Error(`${key} must contain only digits, with an optional leading +, got "${raw}"`)
+  }
+  return digits
+}
+
+function readTelegramBot(source: Source, key: string): string | undefined {
+  const raw = readOptionalString(source, key)
+  if (raw === undefined) return undefined
+  return raw.startsWith("@") ? raw.slice(1) : raw
+}
+
 /**
  * Build an `Env` from an arbitrary source map. Exported so tests can pass a
  * literal instead of mutating `process.env`.
@@ -67,6 +87,8 @@ export function loadEnv(source: Source): Env {
     publicUrl: stripTrailingSlash(readString(source, "RDV_PUBLIC_URL", `http://127.0.0.1:${port}`)),
     agentAdapter: readString(source, "RDV_AGENT_ADAPTER", "claude-code"),
     agentModel: readString(source, "RDV_AGENT_MODEL", "claude-sonnet-5"),
+    whatsappNumber: readWhatsappNumber(source, "RDV_WHATSAPP_NUMBER"),
+    telegramBot: readTelegramBot(source, "RDV_TELEGRAM_BOT"),
   })
 }
 
