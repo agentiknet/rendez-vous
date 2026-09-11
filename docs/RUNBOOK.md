@@ -20,9 +20,11 @@ in the codebase reads `process.env` directly.
 | `RDV_AGENT_MODEL` | `claude-sonnet-5` | Model id passed to `spawnAgent`. |
 | `RDV_WHATSAPP_NUMBER` | unset | Digits only (leading `+` optional). Adds a `wa.me` join link when set. |
 | `RDV_TELEGRAM_BOT` | unset | Bot username, leading `@` optional. Adds a `t.me` join link when set. |
+| `RDV_SMS_NUMBER` | unset | Digits only (leading `+` optional). Adds an `sms:` join link when set (docs/AGENTPUSH.md §9.5). |
 | `RDV_AGENTPUSH_URL` | unset | Base URL of the agentpush API this service calls directly for outbound sends. Also selects the transport in `serve` — unset means console-only. |
 | `RDV_AGENTPUSH_KEY` | unset | Sent as `Authorization: Bearer <key>` to `RDV_AGENTPUSH_URL`. |
 | `RDV_AGENTPUSH_WEBHOOK_SECRET` | unset | HMAC secret verifying `x-agentpush-signature` on `POST /inbound/agentpush`. Unset means unsigned requests are accepted — configure it in any internet-reachable environment. |
+| `RDV_EMAIL_WEBHOOK_SECRET` | unset | HMAC secret verifying `x-agentpush-signature` on `POST /inbound/agentpush-mail` (docs/AGENTPUSH.md §8.4). Independent from `RDV_AGENTPUSH_WEBHOOK_SECRET` — the mail `inbound_route` is a separate row with its own `notify_secret`. |
 | `RDV_BOOTER` | `local` | `e2b` picks `E2bBooter` (sandbox + artifact) in `serve`; anything else is `LocalBooter` (no sandbox, no artifact). |
 | `RDV_ARTIFACT_APP_DIR` | `/home/user/apps/rdv-hello` | In-box path `E2bBooter` seeds and serves the artifact app from. |
 | `RDV_ARTIFACT_PORT` | `3210` | In-box port the artifact app serves on. |
@@ -127,6 +129,28 @@ BODY='{"channel":"whatsapp","from":"+15550001111","text":"new","messageId":"msg-
 SECRET=dev-secret   # must match RDV_AGENTPUSH_WEBHOOK_SECRET the service was started with
 SIG="sha256=$(node -e 'const c=require("crypto");process.stdout.write(c.createHmac("sha256",process.argv[1]).update(process.argv[2]).digest("hex"))' "$SECRET" "$BODY")"
 curl -s -X POST http://127.0.0.1:8790/inbound/agentpush \
+  -H "content-type: application/json" -H "x-agentpush-signature: $SIG" -d "$BODY"
+```
+A bad or missing signature (when a secret is configured) returns `401`.
+
+### `POST /inbound/agentpush-mail`
+
+The webhook agentpush's Gmail poll worker calls on an inbound mail message
+(docs/AGENTPUSH.md §8.2), a different envelope than the messenger webhook
+above but the same `X-Agentpush-Signature` HMAC scheme, verified against
+`RDV_EMAIL_WEBHOOK_SECRET`. Dedupes by `message_id` on the same
+`MessageDedup` instance the messenger webhook shares. When the subject line
+carries a room code (`RDV-XXXX`) and the sender isn't yet a member of any
+room, an implicit `join <code>` runs first, then the message text fans in as
+a tier-2 turn — so a first mail from a room's own reply address, sent
+without having already joined on another tier, still lands in the room.
+
+Simulate a signed call locally:
+```
+BODY='{"event":"inbound_mail","route":{"name":"rendez-vous-mail","dispatch_tag":"rendez-vous-mail"},"message":{"message_id":"mail-1","from":"alice@example.com","subject":"Re: Room RDV-7F3K update","text":"count me in"},"workspace_id":"acme"}'
+SECRET=dev-mail-secret   # must match RDV_EMAIL_WEBHOOK_SECRET the service was started with
+SIG="sha256=$(node -e 'const c=require("crypto");process.stdout.write(c.createHmac("sha256",process.argv[1]).update(process.argv[2]).digest("hex"))' "$SECRET" "$BODY")"
+curl -s -X POST http://127.0.0.1:8790/inbound/agentpush-mail \
   -H "content-type: application/json" -H "x-agentpush-signature: $SIG" -d "$BODY"
 ```
 A bad or missing signature (when a secret is configured) returns `401`.
