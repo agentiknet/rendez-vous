@@ -1,12 +1,15 @@
 import type { DaemonClient, HealthResult, PromptResult } from "../daemon/client.ts"
 import type { TranscriptRecord } from "../daemon/records.ts"
+import { env } from "../env.ts"
 import { fanIn } from "../fanin/index.ts"
 import { RoomFanout } from "../fanout/reader.ts"
 import type { Transport } from "../fanout/types.ts"
+import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
 import { handleCommand, parseCommand } from "../rooms/commands.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import type { Address, Member, Room, Tier } from "../rooms/types.ts"
 import type { SessionBooter } from "./booter.ts"
+import { hasSendMedia } from "./transports.ts"
 
 export interface InboundInput {
   address: Address
@@ -30,6 +33,33 @@ export type RoomWebSendOutcome =
 
 function welcomeText(prefix: string, room: Room): string {
   const lines = [`${prefix}: ${room.code}`]
+  if (room.artifactUrl !== undefined) {
+    lines.push(room.artifactUrl)
+  }
+  return lines.join("\n")
+}
+
+function currentJoinLinks(code: string): JoinLinks {
+  return joinLinks(code, { publicUrl: env.publicUrl, whatsappNumber: env.whatsappNumber, telegramBot: env.telegramBot })
+}
+
+function newRoomReplyText(room: Room, links: JoinLinks): string {
+  const lines = [`Room created: ${room.code}`]
+  if (room.artifactUrl !== undefined) {
+    lines.push(room.artifactUrl)
+  }
+  lines.push(links.web)
+  if (links.whatsapp !== undefined) lines.push(links.whatsapp)
+  if (links.telegram !== undefined) lines.push(links.telegram)
+  return lines.join("\n")
+}
+
+function joinRoomReplyText(room: Room): string {
+  const lines = [`Joined room: ${room.code}`]
+  const roster = room.members.map((member) => member.displayName).join(", ")
+  if (roster.length > 0) {
+    lines.push(`With: ${roster}`)
+  }
   if (room.artifactUrl !== undefined) {
     lines.push(room.artifactUrl)
   }
@@ -155,7 +185,11 @@ export class RoomService {
       artifactUrl: booted.artifactUrl,
     })
     this.fanout.start(room.code)
-    await this.transport.send(result.member, { text: welcomeText("Room created", room), artifactUrl: room.artifactUrl })
+
+    const links = currentJoinLinks(room.code)
+    await this.transport.send(result.member, { text: newRoomReplyText(room, links), artifactUrl: room.artifactUrl })
+    await this.sendJoinQr(result.member, room, links)
+
     return { kind: "created", room, member: result.member }
   }
 
@@ -171,10 +205,19 @@ export class RoomService {
     }
     this.fanout.start(result.room.code)
     await this.transport.send(result.member, {
-      text: welcomeText("Joined room", result.room),
+      text: joinRoomReplyText(result.room),
       artifactUrl: result.room.artifactUrl,
     })
     return { kind: "joined", room: result.room, member: result.member }
+  }
+
+  /** Only when the transport can actually deliver an image (R6-adjacent: the
+   *  QR just encodes the same public web join link, no daemon access needed). */
+  private async sendJoinQr(member: Member, room: Room, links: JoinLinks): Promise<void> {
+    const transport = this.transport
+    if (!hasSendMedia(transport)) return
+    const png = await qrPng(links.web)
+    await transport.sendMedia(member, png, `Scan to join ${room.code}`)
   }
 
   private async handleResume(

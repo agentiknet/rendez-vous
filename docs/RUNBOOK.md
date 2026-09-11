@@ -18,6 +18,11 @@ in the codebase reads `process.env` directly.
 | `RDV_PUBLIC_URL` | `http://127.0.0.1:<RDV_PORT>` | Public origin used to mint join links. |
 | `RDV_AGENT_ADAPTER` | `claude-code` | Adapter slug passed to `spawnAgent`. |
 | `RDV_AGENT_MODEL` | `claude-sonnet-5` | Model id passed to `spawnAgent`. |
+| `RDV_WHATSAPP_NUMBER` | unset | Digits only (leading `+` optional). Adds a `wa.me` join link when set. |
+| `RDV_TELEGRAM_BOT` | unset | Bot username, leading `@` optional. Adds a `t.me` join link when set. |
+| `RDV_AGENTPUSH_URL` | unset | Base URL of the agentpush API this service calls directly for outbound sends. Also selects the transport in `serve` — unset means console-only. |
+| `RDV_AGENTPUSH_KEY` | unset | Sent as `Authorization: Bearer <key>` to `RDV_AGENTPUSH_URL`. |
+| `RDV_AGENTPUSH_WEBHOOK_SECRET` | unset | HMAC secret verifying `x-agentpush-signature` on `POST /inbound/agentpush`. Unset means unsigned requests are accepted — configure it in any internet-reachable environment. |
 
 Every var is optional; unset ones fall back to the defaults above.
 
@@ -96,6 +101,29 @@ own 404 page.
 **Try it in two steps:**
 1. `curl -s -X POST http://127.0.0.1:8790/inbound/simulated -H 'content-type: application/json' -d '{"provider":"whatsapp","source":"agentpush","contactRef":"+1","displayName":"Alice","tier":"messenger","text":"new"}'` — note `room.code` in the reply (or run `node scripts/simulate-room.ts`, which prints a code directly).
 2. Open `http://127.0.0.1:8790/r/<code>` in a browser.
+
+The page header also shows the same join links and a scannable QR of the web
+link, so a laptop tab can invite a phone too.
+
+### `POST /inbound/agentpush`
+
+The webhook agentpush calls on an inbound WhatsApp/Telegram message. Verifies
+`x-agentpush-signature: sha256=<hex hmac-sha256 of the raw body>` against
+`RDV_AGENTPUSH_WEBHOOK_SECRET` (skipped when unset — configure it in any
+internet-reachable environment), dedupes by `messageId` (in-memory, one
+instance per running server — a replay returns `{"deduped":true}`, not a
+second turn), and maps to the same `handleInbound` every other tier goes
+through, with `tier: "messenger"`.
+
+Simulate a signed call locally:
+```
+BODY='{"channel":"whatsapp","from":"+15550001111","text":"new","messageId":"msg-1","displayName":"Alice"}'
+SECRET=dev-secret   # must match RDV_AGENTPUSH_WEBHOOK_SECRET the service was started with
+SIG="sha256=$(node -e 'const c=require("crypto");process.stdout.write(c.createHmac("sha256",process.argv[1]).update(process.argv[2]).digest("hex"))' "$SECRET" "$BODY")"
+curl -s -X POST http://127.0.0.1:8790/inbound/agentpush \
+  -H "content-type: application/json" -H "x-agentpush-signature: $SIG" -d "$BODY"
+```
+A bad or missing signature (when a secret is configured) returns `401`.
 
 ## 3. Proof scripts
 

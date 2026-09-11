@@ -4,11 +4,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, test } from "node:test"
 import { DaemonClient } from "../../src/daemon/client.ts"
+import type { OutboundMessage, Transport } from "../../src/fanout/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
-import type { Address, Tier } from "../../src/rooms/types.ts"
+import type { Address, Member, Tier } from "../../src/rooms/types.ts"
 import { LocalBooter } from "../../src/service/booter.ts"
 import { RoomService } from "../../src/service/room-service.ts"
-import { MemoryTransport } from "../../src/service/transports.ts"
+import { MemoryTransport, type RecordedSend } from "../../src/service/transports.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -59,6 +60,19 @@ async function buildHarness(): Promise<Harness> {
   return { service, store, transport, daemon }
 }
 
+async function buildHarnessWithTransport<T extends Transport>(
+  transport: T,
+): Promise<{ service: RoomService; store: RoomStore; transport: T; daemon: ExtendedFakeDaemon }> {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const service = new RoomService({ store, client, booter, transport })
+  services.push(service)
+  return { service, store, transport, daemon }
+}
+
 function alice(text: string): { address: Address; displayName: string; tier: Tier; text: string } {
   return {
     address: { provider: "whatsapp", source: "agentpush", contactRef: "+15550001111" },
@@ -85,6 +99,16 @@ async function waitFor(check: () => boolean, timeoutMs = 2000): Promise<void> {
   }
 }
 
+/** A plain `Transport` with no `sendMedia` at all — for asserting that the
+ *  QR send is skipped, not just silently swallowed, when unsupported. */
+class PlainTransport implements Transport {
+  readonly sends: RecordedSend[] = []
+
+  async send(member: Member, message: OutboundMessage): Promise<void> {
+    this.sends.push({ member, message })
+  }
+}
+
 test("new boots a session via the booter and replies to the sender with the code and artifact url", async () => {
   const { service, transport } = await buildHarness()
 
@@ -100,7 +124,34 @@ test("new boots a session via the booter and replies to the sender with the code
   assert.ok(transport.sends[0]?.message.text.includes(outcome.room.code))
 })
 
-test("join adds a second member to an existing room and replies with a welcome", async () => {
+test("new includes the web join link in the reply and sends a QR when the transport supports media", async () => {
+  const { service, transport } = await buildHarness()
+
+  const outcome = await service.handleInbound(alice("new"))
+  assert.equal(outcome.kind, "created")
+  if (outcome.kind !== "created") return
+
+  const replyText = transport.sends[0]?.message.text ?? ""
+  assert.ok(replyText.includes(`/r/${outcome.room.code}`), "reply should include the web join link")
+
+  assert.equal(transport.mediaSends.length, 1)
+  assert.equal(transport.mediaSends[0]?.member.displayName, "Alice")
+  assert.ok(transport.mediaSends[0]?.caption.includes(outcome.room.code))
+  assert.ok((transport.mediaSends[0]?.png.length ?? 0) > 0, "should send actual PNG bytes")
+})
+
+test("new never calls sendMedia when the transport does not support it", async () => {
+  const plain = new PlainTransport()
+  const { service } = await buildHarnessWithTransport(plain)
+
+  const outcome = await service.handleInbound(alice("new"))
+  assert.equal(outcome.kind, "created")
+  assert.equal(plain.sends.length, 1)
+  // PlainTransport has no sendMedia at all — if RoomService ever called it
+  // unconditionally this test would throw a TypeError instead of just failing.
+})
+
+test("join adds a second member to an existing room and replies with a welcome that lists the roster", async () => {
   const { service, transport } = await buildHarness()
 
   const created = await service.handleInbound(alice("new"))
@@ -116,6 +167,9 @@ test("join adds a second member to an existing room and replies with a welcome",
 
   assert.equal(transport.sends.length, 2)
   assert.equal(transport.sends[1]?.member.displayName, "Bob")
+  const joinReplyText = transport.sends[1]?.message.text ?? ""
+  assert.ok(joinReplyText.includes("Alice"), "join reply should list the roster, including who was already there")
+  assert.ok(joinReplyText.includes("Bob"))
 })
 
 test("join on an unknown code replies with guidance and returns a typed error", async () => {

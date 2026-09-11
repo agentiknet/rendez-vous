@@ -4,6 +4,8 @@
  * constraint 3, architecture.md §2.1). The browser talks only to our
  * service — never the daemon directly (R6, architecture.md §4.2).
  */
+import type { JoinLinks } from "../links/index.ts"
+import { qrSvg } from "../links/index.ts"
 import type { Room } from "../rooms/types.ts"
 
 function escapeHtml(value: string): string {
@@ -30,10 +32,16 @@ const STYLE = `
   :root { --accent: #3a6df0; --border: #e2e4ea; --bg: #fafafc; --grey: #6b7280; }
   * { box-sizing: border-box; }
   body { margin: 0; font-family: system-ui, -apple-system, sans-serif; color: #1a1c23; background: var(--bg); }
-  header { padding: 10px 14px; border-bottom: 1px solid var(--border); background: #fff; }
+  header { padding: 10px 14px; border-bottom: 1px solid var(--border); background: #fff; display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
   header h1 { margin: 0 0 4px; font-size: 16px; }
   header h1 .code { color: var(--accent); font-family: ui-monospace, monospace; }
   #roster { font-size: 13px; color: var(--grey); }
+  .invite { display: flex; align-items: center; gap: 10px; }
+  .invite-links { display: flex; flex-direction: column; font-size: 12px; gap: 2px; }
+  .invite-links a { color: var(--accent); text-decoration: none; }
+  .invite-links a:hover { text-decoration: underline; }
+  .invite-qr { width: 56px; height: 56px; flex: 0 0 auto; }
+  .invite-qr svg { width: 100%; height: 100%; display: block; }
   main { display: flex; height: calc(100vh - 128px); }
   #transcript-pane { flex: 1 1 55%; overflow-y: auto; padding: 12px; border-right: 1px solid var(--border); }
   #artifact-pane { flex: 1 1 45%; display: flex; align-items: stretch; justify-content: center; }
@@ -224,7 +232,14 @@ function script(code: string, room: Room): string {
   `
 }
 
-export function renderRoomPage(room: Room): string {
+function inviteLinksHtml(links: JoinLinks): string {
+  const items = [`<a href="${escapeHtml(links.web)}">${escapeHtml(links.web)}</a>`]
+  if (links.whatsapp !== undefined) items.push(`<a href="${escapeHtml(links.whatsapp)}">Join on WhatsApp</a>`)
+  if (links.telegram !== undefined) items.push(`<a href="${escapeHtml(links.telegram)}">Join on Telegram</a>`)
+  return items.join("")
+}
+
+export function renderRoomPage(room: Room, links: JoinLinks): string {
   const code = room.code
   const artifactHidden = room.artifactUrl === undefined
   return `<!doctype html>
@@ -237,8 +252,14 @@ export function renderRoomPage(room: Room): string {
 </head>
 <body>
 <header>
-  <h1>Room <span class="code">${escapeHtml(code)}</span></h1>
-  <div id="roster">${rosterHtml(room)}</div>
+  <div>
+    <h1>Room <span class="code">${escapeHtml(code)}</span></h1>
+    <div id="roster">${rosterHtml(room)}</div>
+  </div>
+  <div class="invite">
+    <div class="invite-links">${inviteLinksHtml(links)}</div>
+    <div class="invite-qr" title="Scan to join ${escapeHtml(code)}">${qrSvg(links.web)}</div>
+  </div>
 </header>
 <main>
   <section id="transcript-pane">

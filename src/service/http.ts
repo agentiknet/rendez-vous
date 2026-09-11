@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
+import { MessageDedup, parseAgentpushWebhook } from "../channels/index.ts"
 import type { TranscriptRecord } from "../daemon/records.ts"
 import { env } from "../env.ts"
+import { joinLinks } from "../links/index.ts"
 import type { Tier } from "../rooms/types.ts"
 import { renderRoomNotFoundPage, renderRoomPage } from "../web/page.ts"
 import type { RoomService } from "./room-service.ts"
@@ -29,13 +31,25 @@ function isTier(value: unknown): value is Tier {
   return value === "messenger" || value === "email" || value === "room-web"
 }
 
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+async function readRawBodyText(req: IncomingMessage): Promise<string> {
   const chunks: Uint8Array[] = []
   for await (const chunk of req) {
     chunks.push(chunk)
   }
-  const text = Buffer.concat(chunks).toString("utf8")
+  return Buffer.concat(chunks).toString("utf8")
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const text = await readRawBodyText(req)
   return text.length > 0 ? JSON.parse(text) : undefined
+}
+
+function flattenHeaders(headers: IncomingMessage["headers"]): Record<string, string | undefined> {
+  const flat: Record<string, string | undefined> = {}
+  for (const [key, value] of Object.entries(headers)) {
+    flat[key] = Array.isArray(value) ? value[0] : value
+  }
+  return flat
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -100,8 +114,9 @@ function handleRoomPage(service: RoomService, res: ServerResponse, encodedCode: 
     res.end(renderRoomNotFoundPage(code))
     return
   }
+  const links = joinLinks(room.code, { publicUrl: env.publicUrl, whatsappNumber: env.whatsappNumber, telegramBot: env.telegramBot })
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" })
-  res.end(renderRoomPage(room))
+  res.end(renderRoomPage(room, links))
 }
 
 function parseSince(raw: string | null): number {
@@ -187,7 +202,53 @@ async function handleRoomSend(
   sendJson(res, 200, outcome.result)
 }
 
-async function handle(service: RoomService, req: IncomingMessage, res: ServerResponse): Promise<void> {
+/**
+ * `parseAgentpushWebhook` already verifies the signature and does the
+ * dedup-relevant shape checks; this only adds the one thing it can't know —
+ * whether we have already processed this `messageId` — and maps a fresh
+ * envelope onto `RoomService.handleInbound`. `fanIn` underneath posts with
+ * `?wait=false`, so awaiting `handleInbound` here does not wait for the
+ * agent's turn to finish, only for the queue-admission round trip — the
+ * "respond fast" requirement is satisfied by that, not by skipping the await.
+ */
+async function handleAgentpushWebhook(
+  service: RoomService,
+  dedup: MessageDedup,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const rawBody = await readRawBodyText(req)
+  const result = parseAgentpushWebhook({
+    rawBody,
+    headers: flattenHeaders(req.headers),
+    secret: env.agentpushWebhookSecret,
+  })
+
+  if (!result.ok) {
+    sendJson(res, result.status, { error: result.reason })
+    return
+  }
+  if ("ignored" in result) {
+    sendJson(res, 200, { ignored: result.ignored })
+    return
+  }
+
+  const envelope = result.envelope
+  if (dedup.seen(envelope.messageId)) {
+    sendJson(res, 200, { deduped: true })
+    return
+  }
+
+  const outcome = await service.handleInbound({
+    address: { provider: envelope.provider, source: envelope.source, contactRef: envelope.contactRef },
+    displayName: envelope.displayName,
+    tier: "messenger",
+    text: envelope.text,
+  })
+  sendJson(res, 200, outcome)
+}
+
+async function handle(service: RoomService, dedup: MessageDedup, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", "http://127.0.0.1")
 
   if (url.pathname === "/health" && req.method === "GET") {
@@ -197,6 +258,11 @@ async function handle(service: RoomService, req: IncomingMessage, res: ServerRes
 
   if (url.pathname === "/inbound/simulated" && req.method === "POST") {
     await handleInboundSimulated(service, req, res)
+    return
+  }
+
+  if (url.pathname === "/inbound/agentpush" && req.method === "POST") {
+    await handleAgentpushWebhook(service, dedup, req, res)
     return
   }
 
@@ -248,8 +314,9 @@ async function handle(service: RoomService, req: IncomingMessage, res: ServerRes
 }
 
 export function createHttpServer(service: RoomService): Server {
+  const dedup = new MessageDedup()
   return createServer((req, res) => {
-    handle(service, req, res).catch((error: unknown) => {
+    handle(service, dedup, req, res).catch((error: unknown) => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal_error", message: error instanceof Error ? error.message : String(error) })
       }

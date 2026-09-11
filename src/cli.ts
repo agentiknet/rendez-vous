@@ -1,21 +1,34 @@
+import { AgentpushTransport } from "./channels/index.ts"
 import { DaemonClient } from "./daemon/client.ts"
 import { env } from "./env.ts"
+import type { Transport } from "./fanout/types.ts"
 import { RoomStore } from "./rooms/store.ts"
 import { LocalBooter } from "./service/booter.ts"
 import { startHttpServer } from "./service/http.ts"
 import { RoomService } from "./service/room-service.ts"
-import { ConsoleTransport } from "./service/transports.ts"
+import { CompositeTransport, ConsoleTransport } from "./service/transports.ts"
+
+function buildTransport(): { transport: Transport; description: string } {
+  if (env.agentpushUrl === undefined) {
+    return { transport: new ConsoleTransport(), description: "console only (RDV_AGENTPUSH_URL unset)" }
+  }
+  const agentpush = new AgentpushTransport({ baseUrl: env.agentpushUrl, apiKey: env.agentpushKey })
+  return { transport: new CompositeTransport(agentpush, new ConsoleTransport()), description: "agentpush (whatsapp/telegram) + console fallback" }
+}
 
 async function serve(): Promise<void> {
   const store = await RoomStore.open(env.dataDir)
   const client = new DaemonClient({ baseUrl: env.daemonUrl, token: env.daemonToken })
   const booter = new LocalBooter(client, { baseUrl: env.daemonUrl, token: env.daemonToken })
-  const transport = new ConsoleTransport()
+  const { transport, description } = buildTransport()
   const service = new RoomService({ store, client, booter, transport })
 
   service.start()
   const server = startHttpServer(service)
   console.log(`rendez-vous service listening on :${env.port}`)
+  console.log(`transport: ${description}`)
+  console.log(`public url: ${env.publicUrl}`)
+  console.log(`room pages: ${env.publicUrl}/r/<code>`)
 
   let shuttingDown = false
   const shutdown = (): void => {
