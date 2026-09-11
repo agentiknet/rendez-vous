@@ -279,3 +279,174 @@ None of these were discoverable on this machine: no agentpush process is
 listening on any port (only the agentproto daemon on `18790`), no
 `~/.agentpush`/`~/.config/agentpush` config, and no matching environment
 variables — see the M5-ground-truth report for the check.
+
+## 8. Email (tier 2) — M10
+
+**Correction to this milestone's premise: email is not unimplemented in
+agentpush.** The brief's fallback ("if email is not implemented, build a
+generic `RDV_EMAIL_SEND_URL`/`RDV_EMAIL_SEND_KEY` adapter, mark it 'adapter
+pending'") does not apply — agentpush has a full mailbox surface: Gmail
+OAuth connect flow, a poll-driven inbound path, mailbox-triage tools, and
+`channel: "mail"` on the same `send_message` tool used for WhatsApp/Telegram
+(`apps/api/src/app.ts:660-919` for the OAuth flow,
+`packages/tools/src/tools/mailbox*.ts` for the triage tools,
+`packages/tools/src/lib/channel-alias.ts:21-30` for `"mail"` in
+`MAIL_DOMAIN_CHANNELS`). Built against the real contract, not a placeholder
+— consistent with how M5 was corrected.
+
+### 8.1 Outbound — same endpoint, `channel: "mail"`
+
+Identical call to §1: `POST {RDV_AGENTPUSH_URL}/tools/send_message`, same
+`Authorization: Bearer <key>`, same response envelope
+(`{status:"sent"|"queued",message_id,cost?}` / `{status:"blocked",...}` /
+`{status:"failed",...}`). Mail-only `content` fields
+(`packages/tools/src/tools/send-message.ts:33-97`):
+
+```json
+{
+  "to": { "channel": "mail", "address": "alice@example.com" },
+  "content": {
+    "subject": "Room RDV-7F3K update",
+    "text": "...",
+    "reply_to_message_id": "<id of the message being replied to>"
+  }
+}
+```
+
+- `subject` — required for a sane inbox line; without it the mail goes out
+  with `"(no subject)"` (`packages/messaging/src/providers/gmail/provider.ts:382-383`).
+- `html`/`format: "markdown"` — richer body, not used by Rendez-vous (plain
+  text digest is enough for tier 2).
+- `cc`/`bcc` — mail-only, rejected with an error on every other channel
+  (`send-message.ts:65-74`) — not used here either.
+- **Threading**: `reply_to_message_id` set to a prior message's provider id
+  makes Gmail's `resolveThreading` fetch that message's `Message-ID`/
+  `References`/`Subject` via the Gmail API and set real RFC 2822
+  `In-Reply-To`/`References` headers on the outbound MIME message
+  (`packages/messaging/src/providers/gmail/provider.ts:296-341`). This is
+  genuine thread continuation, not a synthetic id Rendez-vous invents.
+  Non-Gmail mail providers accept the field but send unthreaded
+  (`send-message.ts:187`, "les autres providers mail envoient hors-thread").
+
+`EmailTransport` (`src/channels/email/outbound.ts`) keeps one
+`threadRef: memberId -> last message_id` map in memory and passes it as
+`reply_to_message_id` on every send after the first for that member — each
+reply threads off the immediately-prior message in the conversation.
+
+### 8.2 Inbound — a different envelope, same signature scheme
+
+**This is not `MessagingInboundEnvelope`.** Gmail inbound does not arrive
+through the messaging webhook path (`POST /inbound/whatsapp`-style routes)
+at all — there's no live webhook for Gmail. Instead `apps/worker` polls
+Gmail's API on an interval (`apps/worker/src/poll-inbound.ts`, `pollAccount`
+at :165-238) and, for a message matching an enabled `mail`-channel
+`inbound_route`, builds its own notify payload:
+
+```json
+{
+  "event": "inbound_mail",
+  "route": { "name": "rendez-vous", "dispatch_tag": "rendez-vous" },
+  "message": {
+    "message_id": "18d2f...",
+    "from": "alice@example.com",
+    "subject": "Re: the room",
+    "text": "sounds good",
+    "timestamp": "2026-09-12T00:00:00.000Z"
+  },
+  "workspace_id": "acme"
+}
+```
+(`apps/worker/src/poll-inbound.ts:124-144`, `buildNotifyPayload`.) Route
+evaluation for mail runs under a fixed channel name,
+`MAIL_CHANNEL = "mail"` (`packages/core/src/domain/inbound-route/evaluate.ts:22`,
+`:191` in poll-inbound.ts) — a route with `channel: null` (catch-all) or
+`channel: "mail"` is eligible.
+
+**Same signature, different shape, no shared discriminant field.** Both
+paths dispatch through the identical `push.dispatch()`
+(`packages/sdk/src/push.ts:504-531`) via the shared
+`buildInboundNotifyRequest` (`evaluate.ts:94-111`), so
+`X-Agentpush-Signature: sha256=<hex HMAC-SHA256(notify_secret, rawBody)>`
+is byte-for-byte the same scheme as §3. agentpush itself tells a mail
+payload apart from a messaging one structurally — `notifyKindForPayload`
+checks for `version`+`channel` (messaging) vs. anything else (mail)
+(`evaluate.ts:113-123`) — `parseEmailInbound` does the same: it rejects
+anything whose `event` isn't `"inbound_mail"` rather than assume the caller
+only ever routes mail payloads to it.
+
+**No display name, same as the messaging tier.** `message.from` is always a
+*bare* email address against real agentpush — Gmail's provider strips any
+display name before this payload is built:
+`extractEmail(decodeRfc2047(findHeader(headers, "From")))`
+(`packages/messaging/src/providers/gmail/provider.ts:512-514`).
+`parseEmailInbound` still accepts an RFC 5322 `"Name <addr>"` form
+defensively for a future/alternate mail connector — dead code against real
+agentpush today, kept because it costs nothing and matches this milestone's
+interface spec (`displayName` from the From header when present).
+
+**No quote/signature stripping on agentpush's side.** Gmail's
+`findPlainText` returns the raw MIME plain-text part verbatim
+(`provider.ts:518`) — no heuristic applied upstream. `parseEmailInbound`
+does the stripping itself: drop lines starting with `>`, and drop a line
+matching `/^On .* wrote:$/` or `/^-- $/` and everything after it. A message
+that's entirely quote/signature is `{ok:true, ignored:"no_text"}` after
+stripping, same "ignored, not an error" treatment as an empty-text
+messaging inbound (§3).
+
+`roomCodeHint` has no agentpush counterpart — it's parsed from the subject
+locally (`RDV-XXXX`, validated through `normalizeCode`,
+src/rooms/code.ts) and returned for the caller to act on; the parser never
+routes on it itself.
+
+### 8.3 Setup (operator, one-time)
+
+A **second** `inbound_route` (or one shared catch-all with `channel: null`)
+via `POST /tools/inbound_route_create`, this time evaluated against Gmail
+poll traffic rather than a live messaging webhook:
+
+```json
+{
+  "name": "rendez-vous-mail",
+  "channel": "mail",
+  "match_type": "catch_all",
+  "dispatch_tag": "rendez-vous-mail",
+  "dispatch_mode": "notify",
+  "notify_url": "https://<our public origin>/inbound/agentpush-mail",
+  "notify_secret": "<same value as RDV_EMAIL_WEBHOOK_SECRET>"
+}
+```
+
+A connected Gmail account must already exist on the workspace (the OAuth
+consent flow at `apps/api/src/app.ts:660-919`) — out of scope for this
+service, an operator action against agentpush's own dashboard/API.
+
+### 8.4 Env
+
+- Outbound reuses `RDV_AGENTPUSH_URL`/`RDV_AGENTPUSH_KEY` (§7) — it's the
+  same `/tools/send_message` endpoint, just `channel: "mail"`. No new
+  fields needed.
+- `RDV_EMAIL_WEBHOOK_SECRET` (new) — independent from
+  `RDV_AGENTPUSH_WEBHOOK_SECRET`, since the mail `inbound_route` is a
+  separate row with its own `notify_secret` (an operator could reuse the
+  same value across both routes, or set a different one — this service
+  doesn't assume either).
+
+### 8.5 What the service executor needs to wire
+
+- A second webhook route (e.g. `POST /inbound/agentpush-mail`) that reads
+  the raw body + headers, calls `parseEmailInbound({rawBody, headers,
+  secret: env.emailWebhookSecret})`, and on a returned `envelope` treats it
+  like any other tier's inbound turn — `envelope.provider` is `"email"`,
+  `envelope.roomCodeHint` is available if the room needs to be resolved
+  from the subject rather than an existing `(provider, source, contactRef)`
+  binding.
+- Dedup: reuse the existing `MessageDedup` class
+  (`src/channels/agentpush/inbound.ts`) keyed on `envelope.messageId` — it's
+  already channel-agnostic, no email-specific variant needed.
+- Construct one `EmailTransport` alongside the existing
+  `AgentpushTransport` for tier-2 members (`member.address.provider ===
+  "email"`), same `{baseUrl: env.agentpushUrl, apiKey: env.agentpushKey}`
+  options shape.
+- For the subject line to read `"Room RDV-7F3K update"` instead of the
+  generic fallback, whoever creates an email member should set
+  `address.source` to the room's code.

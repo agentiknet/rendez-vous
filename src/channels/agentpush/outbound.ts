@@ -7,7 +7,8 @@
  * file:line citations. Replaces the M5 version, which correctly identified
  * that the agentproto daemon's own agentpush path is MCP-mediated (no raw
  * HTTP endpoint to copy) but then inferred a fictional REST shape. This
- * version calls agentpush's real, generic tool-execution route directly.
+ * version calls agentpush's real, generic tool-execution route directly via
+ * `AgentpushToolClient` (tools-client.ts), shared with the email transport.
  *
  * `send`: `POST {baseUrl}/tools/send_message`
  * (packages/tools/src/tools/send-message.ts:198-250, dispatched by
@@ -35,6 +36,7 @@
 
 import type { OutboundMessage, Transport } from "../../fanout/types.ts"
 import type { Member } from "../../rooms/types.ts"
+import { AgentpushToolClient, type AgentpushToolClientOptions, isUploadMediaResult } from "./tools-client.ts"
 
 type MessengerProvider = "whatsapp" | "telegram"
 
@@ -42,60 +44,13 @@ function messengerProvider(provider: string): MessengerProvider | undefined {
   return provider === "whatsapp" || provider === "telegram" ? provider : undefined
 }
 
-interface SentResult {
-  status: "sent" | "queued"
-  message_id: string
-}
-
-interface BlockedResult {
-  status: "blocked"
-  blocked_reason: string
-  suggestion: string
-}
-
-interface FailedResult {
-  status: "failed"
-  error: string
-}
-
-type SendMessageResult = SentResult | BlockedResult | FailedResult
-
-interface UploadMediaResult {
-  media_id: string
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function isSendMessageResult(value: unknown): value is SendMessageResult {
-  if (!isRecord(value)) return false
-  const status = value.status
-  return status === "sent" || status === "queued" || status === "blocked" || status === "failed"
-}
-
-function isUploadMediaResult(value: unknown): value is UploadMediaResult {
-  return isRecord(value) && typeof value.media_id === "string"
-}
-
-export interface AgentpushTransportOptions {
-  /** `RDV_AGENTPUSH_URL`, no trailing slash. */
-  baseUrl: string
-  /** `RDV_AGENTPUSH_KEY`, a workspace API key minted per docs/AGENTPUSH.md §4. */
-  apiKey: string | undefined
-  /** Injectable for tests; defaults to the global `fetch`. */
-  fetchImpl?: typeof fetch
-}
+export type AgentpushTransportOptions = AgentpushToolClientOptions
 
 export class AgentpushTransport implements Transport {
-  private readonly baseUrl: string
-  private readonly apiKey: string | undefined
-  private readonly fetchImpl: typeof fetch
+  private readonly client: AgentpushToolClient
 
   constructor(opts: AgentpushTransportOptions) {
-    this.baseUrl = opts.baseUrl.endsWith("/") ? opts.baseUrl.slice(0, -1) : opts.baseUrl
-    this.apiKey = opts.apiKey
-    this.fetchImpl = opts.fetchImpl ?? fetch
+    this.client = new AgentpushToolClient(opts)
   }
 
   async send(member: Member, message: OutboundMessage): Promise<void> {
@@ -123,18 +78,18 @@ export class AgentpushTransport implements Transport {
       return
     }
 
-    await this.callTool(member.id, "send_message", {
+    await this.client.call(`member ${member.id}`, "send_message", {
       to: { channel: provider, address: member.address.contactRef },
       content: { text: caption, media: [{ type: "image", providerMediaId: mediaId, caption }] },
     })
   }
 
   private async sendText(memberId: string, provider: MessengerProvider, address: string, text: string): Promise<void> {
-    await this.callTool(memberId, "send_message", { to: { channel: provider, address }, content: { text } })
+    await this.client.call(`member ${memberId}`, "send_message", { to: { channel: provider, address }, content: { text } })
   }
 
   private async uploadImage(memberId: string, provider: MessengerProvider, png: Uint8Array): Promise<string | undefined> {
-    const result = await this.callTool(memberId, "upload_media", {
+    const result = await this.client.call(`member ${memberId}`, "upload_media", {
       channel: provider,
       type: "image",
       data: Buffer.from(png).toString("base64"),
@@ -143,35 +98,5 @@ export class AgentpushTransport implements Transport {
     })
     if (!isUploadMediaResult(result)) return undefined
     return result.media_id
-  }
-
-  private async callTool(memberId: string, toolName: string, args: Record<string, unknown>): Promise<unknown> {
-    const headers: Record<string, string> = { "content-type": "application/json" }
-    if (this.apiKey !== undefined) {
-      headers.authorization = `Bearer ${this.apiKey}`
-    }
-
-    try {
-      const res = await this.fetchImpl(`${this.baseUrl}/tools/${toolName}`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(args),
-      })
-      const body: unknown = await res.json().catch(() => undefined)
-      if (!res.ok) {
-        console.error(`[channels/agentpush] ${toolName} failed for member ${memberId}: HTTP ${res.status}`)
-        return undefined
-      }
-      if (isSendMessageResult(body) && (body.status === "blocked" || body.status === "failed")) {
-        const reason = body.status === "blocked" ? body.blocked_reason : body.error
-        console.error(`[channels/agentpush] ${toolName} ${body.status} for member ${memberId}: ${reason}`)
-      }
-      return body
-    } catch (err) {
-      console.error(
-        `[channels/agentpush] ${toolName} error for member ${memberId}: ${err instanceof Error ? err.message : String(err)}`,
-      )
-      return undefined
-    }
   }
 }

@@ -43,6 +43,7 @@ test("valid signed whatsapp text becomes an envelope", () => {
       displayName: "+15551234567",
       text: "hello from the field",
       messageId: "wamid.abc123",
+      roomCodeHint: undefined,
     },
   })
 })
@@ -71,6 +72,7 @@ test("valid signed telegram text becomes an envelope", () => {
       displayName: "123456789",
       text: "ping from telegram",
       messageId: "tg-42",
+      roomCodeHint: undefined,
     },
   })
 })

@@ -58,17 +58,26 @@
  * not a compile-time guarantee — our `MessageDedup` is the only redelivery
  * guard on our side of an at-least-once webhook (docs/AGENTPUSH.md §3,
  * "Delivery semantics").
+ *
+ * `provider` is widened to include `"email"` and `InboundEnvelope` carries a
+ * `roomCodeHint` field so `src/channels/email/inbound.ts` (M10) can reuse
+ * this same envelope/result shape for the mail tier's entirely different
+ * wire contract (docs/AGENTPUSH.md §8) — messenger envelopes always set
+ * `roomCodeHint: undefined` since a WhatsApp/Telegram message has no subject
+ * line to parse one from.
  */
 
-import { createHmac, timingSafeEqual } from "node:crypto"
+import { isRecord, getStringField } from "../json.ts"
+import { verifyAgentpushSignature } from "./signature.ts"
 
 export interface InboundEnvelope {
-  provider: "whatsapp" | "telegram"
+  provider: "whatsapp" | "telegram" | "email"
   source: string
   contactRef: string
   displayName: string
   text: string
   messageId: string
+  roomCodeHint: string | undefined
 }
 
 export type WebhookResult =
@@ -90,53 +99,9 @@ function isMessengerChannel(value: string): value is "whatsapp" | "telegram" {
   return MESSENGER_CHANNELS.includes(value)
 }
 
-function lookupHeader(headers: Record<string, string | undefined>, name: string): string | undefined {
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === name) return value
-  }
-  return undefined
-}
-
-function constantTimeHexEquals(a: string, b: string): boolean {
-  if (a.length !== b.length) return false
-  const aBuf = Buffer.from(a, "hex")
-  const bBuf = Buffer.from(b, "hex")
-  if (aBuf.length !== bBuf.length || aBuf.length === 0) return false
-  return timingSafeEqual(aBuf, bBuf)
-}
-
-function verifySignature(
-  rawBody: string,
-  headers: Record<string, string | undefined>,
-  secret: string,
-): { ok: true } | { ok: false; reason: string } {
-  const header = lookupHeader(headers, "x-agentpush-signature")
-  if (header === undefined) return { ok: false, reason: "missing x-agentpush-signature" }
-
-  const prefix = "sha256="
-  if (!header.startsWith(prefix)) return { ok: false, reason: "bad x-agentpush-signature format" }
-
-  const hex = header.slice(prefix.length)
-  if (!/^[0-9a-fA-F]+$/.test(hex)) return { ok: false, reason: "bad x-agentpush-signature hex" }
-
-  const expected = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex")
-  if (!constantTimeHexEquals(expected, hex)) return { ok: false, reason: "bad x-agentpush-signature" }
-
-  return { ok: true }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function getStringField(obj: Record<string, unknown>, key: string): string | undefined {
-  const value = obj[key]
-  return typeof value === "string" ? value : undefined
-}
-
 export function parseAgentpushWebhook(input: ParseAgentpushWebhookInput): WebhookResult {
   if (input.secret !== undefined) {
-    const verified = verifySignature(input.rawBody, input.headers, input.secret)
+    const verified = verifyAgentpushSignature(input.rawBody, input.headers, input.secret)
     if (!verified.ok) {
       return { ok: false, status: 401, reason: verified.reason }
     }
@@ -194,6 +159,7 @@ export function parseAgentpushWebhook(input: ParseAgentpushWebhookInput): Webhoo
       displayName: contactRef,
       text,
       messageId,
+      roomCodeHint: undefined,
     },
   }
 }

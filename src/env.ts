@@ -50,6 +50,34 @@ export interface Env {
    *  since this service has exactly one agentpush webhook route, not one
    *  per provider/slug. */
   readonly agentpushWebhookSecret: string | undefined
+  /** Which `SessionBooter` `serve` wires up: `"e2b"` picks `E2bBooter`
+   *  (sandbox + artifact), anything else falls back to `LocalBooter`. */
+  readonly booter: "local" | "e2b"
+  /** In-box path `E2bBooter` seeds and serves the artifact app from. Matches
+   *  `scripts/prove-sandbox.ts`'s `APP_DIR` — the layout that module's
+   *  ground-truthing found actually serves (docs/UPSTREAM.md, "Second live
+   *  attempt"). */
+  readonly artifactAppDir: string
+  /** In-box port `E2bBooter` serves the artifact app on. */
+  readonly artifactPort: number
+  /** A pre-warmed, already-paused e2b sandbox id to reuse for the next room
+   *  that runs `new`, instead of paying for a fresh boot. Consumed at most
+   *  once: `E2bBooter` checks the store for a room that already recorded
+   *  this id as its `sandboxId` before offering it again, so a service
+   *  restart can't hand the same box to a second room (build brief M4/R10). */
+  readonly prewarmSandboxId: string | undefined
+  /** How often `RoomService` checks for idle rooms to pause, in seconds. */
+  readonly idleSweepSeconds: number
+  /** How long a room may sit with no activity before the sweep pauses it. */
+  readonly idlePauseMinutes: number
+  /** HMAC secret for verifying `x-agentpush-signature` on the tier-2 email
+   *  inbound webhook (src/channels/email/inbound.ts). Independent from
+   *  `agentpushWebhookSecret`: agentpush's Gmail poll path dispatches
+   *  through its own `inbound_route` row (docs/AGENTPUSH.md §8), which can
+   *  carry a different `notify_secret` than the messaging route's. Outbound
+   *  email reuses `agentpushUrl`/`agentpushKey` — it's the same
+   *  `/tools/send_message` endpoint, just `channel: "mail"`. */
+  readonly emailWebhookSecret: string | undefined
 }
 
 type Source = Readonly<Record<string, string | undefined>>
@@ -103,6 +131,20 @@ function readOptionalUrl(source: Source, key: string): string | undefined {
   return raw === undefined ? undefined : stripTrailingSlash(raw)
 }
 
+function readBooter(source: Source, key: string): "local" | "e2b" {
+  return readOptionalString(source, key) === "e2b" ? "e2b" : "local"
+}
+
+function readPositiveInt(source: Source, key: string, fallback: number): number {
+  const raw = source[key]
+  if (raw === undefined || raw.trim().length === 0) return fallback
+  const n = Number.parseInt(raw, 10)
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`${key} must be a positive integer, got "${raw}"`)
+  }
+  return n
+}
+
 /**
  * Build an `Env` from an arbitrary source map. Exported so tests can pass a
  * literal instead of mutating `process.env`.
@@ -122,6 +164,13 @@ export function loadEnv(source: Source): Env {
     agentpushUrl: readOptionalUrl(source, "RDV_AGENTPUSH_URL"),
     agentpushKey: readOptionalString(source, "RDV_AGENTPUSH_KEY"),
     agentpushWebhookSecret: readOptionalString(source, "RDV_AGENTPUSH_WEBHOOK_SECRET"),
+    booter: readBooter(source, "RDV_BOOTER"),
+    artifactAppDir: readString(source, "RDV_ARTIFACT_APP_DIR", "/home/user/apps/rdv-hello"),
+    artifactPort: readPort(source, "RDV_ARTIFACT_PORT", 3210),
+    prewarmSandboxId: readOptionalString(source, "RDV_PREWARM_SANDBOX_ID"),
+    idleSweepSeconds: readPositiveInt(source, "RDV_IDLE_SWEEP_SECONDS", 60),
+    idlePauseMinutes: readPositiveInt(source, "RDV_IDLE_PAUSE_MINUTES", 20),
+    emailWebhookSecret: readOptionalString(source, "RDV_EMAIL_WEBHOOK_SECRET"),
   })
 }
 
