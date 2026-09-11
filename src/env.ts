@@ -25,6 +25,31 @@ export interface Env {
   readonly whatsappNumber: string | undefined
   /** Telegram bot username for join links, without the leading `@`. Undefined when not configured. */
   readonly telegramBot: string | undefined
+  /**
+   * Base URL of the agentpush API our own outbound transport calls directly,
+   * no trailing slash. The daemon never reads an agentpush URL from its own
+   * environment — it reaches agentpush through an imported MCP server, whose
+   * `apiBase` is a provider-manifest config value, not an env var (see
+   * `defineAuthProvider` in skill-pack-agentpush/skills/auth/SKILL.md). There
+   * is no daemon-side env name to mirror here.
+   */
+  readonly agentpushUrl: string | undefined
+  /**
+   * API key for the agentpush base URL above, sent as `Authorization: Bearer
+   * <key>`. The closest daemon-side convention is `AGENTPUSH_API_KEY`,
+   * mentioned in the same SKILL.md as the env var value to migrate OUT of
+   * the daemon's global env and into its credential broker — not a name the
+   * daemon itself reads. Kept as `RDV_AGENTPUSH_KEY` to stay inside this
+   * service's own `RDV_*` namespace.
+   */
+  readonly agentpushKey: string | undefined
+  /** HMAC secret for verifying `x-agentpush-signature` on inbound webhooks
+   *  straight into this service (src/channels/agentpush/inbound.ts). Mirrors
+   *  the per-endpoint `secret` field the daemon's own `InboundEndpoint`
+   *  carries (inbound-endpoints.ts:30), scoped here to one shared secret
+   *  since this service has exactly one agentpush webhook route, not one
+   *  per provider/slug. */
+  readonly agentpushWebhookSecret: string | undefined
 }
 
 type Source = Readonly<Record<string, string | undefined>>
@@ -73,6 +98,11 @@ function readTelegramBot(source: Source, key: string): string | undefined {
   return raw.startsWith("@") ? raw.slice(1) : raw
 }
 
+function readOptionalUrl(source: Source, key: string): string | undefined {
+  const raw = readOptionalString(source, key)
+  return raw === undefined ? undefined : stripTrailingSlash(raw)
+}
+
 /**
  * Build an `Env` from an arbitrary source map. Exported so tests can pass a
  * literal instead of mutating `process.env`.
@@ -89,6 +119,9 @@ export function loadEnv(source: Source): Env {
     agentModel: readString(source, "RDV_AGENT_MODEL", "claude-sonnet-5"),
     whatsappNumber: readWhatsappNumber(source, "RDV_WHATSAPP_NUMBER"),
     telegramBot: readTelegramBot(source, "RDV_TELEGRAM_BOT"),
+    agentpushUrl: readOptionalUrl(source, "RDV_AGENTPUSH_URL"),
+    agentpushKey: readOptionalString(source, "RDV_AGENTPUSH_KEY"),
+    agentpushWebhookSecret: readOptionalString(source, "RDV_AGENTPUSH_WEBHOOK_SECRET"),
   })
 }
 
