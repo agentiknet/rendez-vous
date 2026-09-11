@@ -52,13 +52,13 @@ function isMember(value: unknown): value is Member {
   )
 }
 
+// JSON.stringify drops object keys whose value is `undefined`, so a persisted room with an
+// unset sessionId/sandboxId/artifactUrl round-trips with that key absent, not present-as-undefined.
+// These three are the only optional fields on Room, so a missing key is treated the same as undefined.
 function isRoom(value: unknown): value is Room {
   if (!isObject(value)) return false
   if (
     !("code" in value) ||
-    !("sessionId" in value) ||
-    !("sandboxId" in value) ||
-    !("artifactUrl" in value) ||
     !("members" in value) ||
     !("createdAt" in value) ||
     !("updatedAt" in value) ||
@@ -66,11 +66,14 @@ function isRoom(value: unknown): value is Room {
   ) {
     return false
   }
+  const sessionId = "sessionId" in value ? value.sessionId : undefined
+  const sandboxId = "sandboxId" in value ? value.sandboxId : undefined
+  const artifactUrl = "artifactUrl" in value ? value.artifactUrl : undefined
   return (
     isString(value.code) &&
-    isStringOrUndefined(value.sessionId) &&
-    isStringOrUndefined(value.sandboxId) &&
-    isStringOrUndefined(value.artifactUrl) &&
+    isStringOrUndefined(sessionId) &&
+    isStringOrUndefined(sandboxId) &&
+    isStringOrUndefined(artifactUrl) &&
     Array.isArray(value.members) &&
     value.members.every(isMember) &&
     isString(value.createdAt) &&

@@ -161,6 +161,20 @@ test("store survives a restart: reopening the same dir sees prior writes", async
   assert.equal(reloaded?.members[0]?.displayName, "Alice")
 })
 
+test("store survives a restart when sandboxId and artifactUrl are still unset", async () => {
+  const dir = trackDir(await freshDir())
+  const store1 = await RoomStore.open(dir)
+  const room = await store1.create()
+  await store1.update(room.code, { sessionId: "sess-1" })
+
+  const store2 = await RoomStore.open(dir)
+  const reloaded = store2.get(room.code)
+  assert.ok(reloaded)
+  assert.equal(reloaded?.sessionId, "sess-1")
+  assert.equal(reloaded?.sandboxId, undefined)
+  assert.equal(reloaded?.artifactUrl, undefined)
+})
+
 test("open on a missing file starts an empty store", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)
