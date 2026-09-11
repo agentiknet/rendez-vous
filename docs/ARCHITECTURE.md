@@ -523,38 +523,68 @@ interface RoomRuntime {
 whole multiplayer contract, and it is the line every single-principal runtime
 leaves unwritten.
 
-### 9.3 The OpenAI adapter, and why it is a drop-in box
+### 9.3 Two ways to put another brain in the box
 
-The Agents API offers a **self-hosted sandbox**: you run `codex exec-server`
-over an outbound WebSocket on your own infrastructure, and OpenAI's managed
-harness drives it remotely.
+**Correction to an earlier draft of this section**, which proposed building an
+OpenAI adapter on top of `codex exec-server`. That is the harder of two paths
+and it is not the one to take first.
 
-So the second runtime is genuinely drop-in:
+**(A) A local adapter in our box. Free today.**
+
+The host already has **19 installed adapters**, all speaking ACP to the same
+session interface — verified via `adapter_list`:
+
+| adapter | protocol | notable models |
+| --- | --- | --- |
+| `codex` | acp | gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.6-sol |
+| `claude-code` | acp | fable-5.1, opus, sonnet, haiku |
+| `gemini` | acp | gemini-3.5-flash, gemini-3.1-pro |
+| `grok-cli` | acp | grok-4.6 |
+| `kimi-cli` | acp | kimi-k3 |
+| `mistral-vibe` | acp | mistral-vibe-cli, mistral-large |
+| `opencode`, `hermes`, `jcode`, `mastracode` | acp/print | 400 to 550 routed models each |
+
+A sandbox spec's `installAdapters` installs any of them **inside the box**, and
+the box's own daemon spawns it there. So the second brain is one parameter:
 
 ```
-  same e2b box
-  same filesystem
-  same agentproto app serve on :3210  →  same public artifact URL
-  different brain:
-      agentproto runtime → adapter runs INSIDE the box's own daemon
-      openai runtime     → codex exec-server in the box, driven from OpenAI
+agent_start({
+  adapter: "codex",                         // was "claude-code"
+  model:   "gpt-5.2-codex",
+  sandbox: { provider: "e2b", config: { installAdapters: ["codex"] } },
+  appServe: { dir: "...", port: 3210 },
+})
 ```
 
-The room does not notice. The humans do not notice. The artifact URL does not
-change. That is the proof that the room is a primitive and the runtime is a
-detail.
+Same box. Same filesystem. Same public artifact URL. Different brain, running
+**locally in the room's own sandbox**, on its own CLI auth. Zero new code.
 
-**The experiment that decides how loud we are about this.** Their
-documentation does not specify what happens when input arrives while a turn is
-in progress (§1.3). Two outcomes, both good for us:
+This reframes §9.4 completely. "Bring your own agent" is not the expensive
+stretch goal — it is the **cheapest** big idea we have, because the adapter
+layer already did the work. A room can host Claude, Codex, Gemini and Mistral
+on one filesystem today.
 
-- It queues → our adapter is thin, and we say the room is portable.
-- It errors or drops → **our adapter has to implement the queue for them**,
-  and we say we had to build multiplayer into their runtime because it was not
-  there.
+**(B) The hosted Agents API. Secondary.**
 
-Do not assume which. It is two API calls to find out, and the answer decides a
-line in the pitch. Run it before writing the slide.
+Their self-hosted sandbox option runs `codex exec-server` in our box over an
+outbound WebSocket, with OpenAI's managed harness driving it from their
+servers. It buys their orchestration, context compaction and recovery, and it
+costs a real adapter.
+
+Worth building only if (A) proves the point and we want the contrast on stage:
+same room, one brain local in our box, one brain hosted on theirs.
+
+**Open question, not yet a claim.** The codex adapter keeps a native session id
+(`adapterSessionId`, with `nativeTerminalResume`). If a Codex session created
+inside our box is visible in the member's own Codex surface, that is a **fourth
+presence tier**: the room shows up in the tool they already use, with no
+integration on our side. Plausible, unverified, and cheap to test. Do not put
+it on a slide until someone has actually seen it render.
+
+**The experiment that decides how loud we are.** The Agents API docs do not
+specify what happens when input arrives mid-turn (§1.3). Two outcomes, both
+good: it queues, and the room is portable; or it errors, and our layer has to
+supply multiplayer that their runtime does not have. Run it. Do not assume.
 
 ### 9.4 Two agents, one room
 
@@ -579,8 +609,13 @@ Land it only with the collision story written down.
 2. Room spec (§2.3) as a real file format, with the current hardcoded boot as
    its first spec.
 3. Invert ownership (§9.1): room owns `sandboxId`, sessions attach.
-4. Extract `RoomRuntime` (§9.2) and move the current code behind it as the
-   `agentproto` implementation. No behaviour change, tests still green.
-5. Run the concurrent-input experiment against the Agents API (§9.3).
-6. Build the `openai` implementation.
-7. Only then consider §9.4, and only with the collision story settled.
+4. **Second brain, path (A)**: boot a room with `adapter: "codex"` in the same
+   spec. One parameter. This is now the cheapest proof that the room is
+   brain-agnostic, so it comes before any interface extraction.
+5. Extract `RoomRuntime` (§9.2) once two brains have actually run, so the
+   interface is shaped by two real implementations rather than one and a guess.
+6. Test whether a box-hosted Codex session is visible in a member's own Codex
+   (§9.3, open question). Cheap, and a fourth presence tier if true.
+7. Run the concurrent-input experiment against the Agents API (§9.3).
+8. §9.4 multi-brain rooms, with the collision story settled first.
+9. Path (B), the hosted Agents API adapter, only if the contrast is worth it.

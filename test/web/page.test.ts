@@ -9,6 +9,7 @@ function fakeLinks(overrides: Partial<JoinLinks> = {}): JoinLinks {
     web: "http://127.0.0.1:8790/r/RDV-7F3K",
     whatsapp: "https://wa.me/15550001111?text=join%20RDV-7F3K",
     telegram: "https://t.me/rdv_bot?start=RDV-7F3K",
+    sms: "sms:+15550001111?&body=join%20RDV-7F3K",
     ...overrides,
   }
 }
