@@ -15,15 +15,66 @@
  * docs/UPSTREAM.md for the full writeup.
  */
 
-import type { DaemonClient } from "../daemon/client.ts"
+import type { DaemonClient, SpawnAgentInput, SpawnAgentResult } from "../daemon/client.ts"
 import { probeArtifact } from "./artifact.ts"
 
 const SANDBOX_PROVIDER = "e2b"
+const DEFAULT_RESUME_ATTEMPTS = 4
+const DEFAULT_RESUME_RETRY_DELAY_MS = 10_000
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * `sandbox_reconnect_failed` covers more than one failure inside
+ * `createSandboxAgentSessionHost`: `provider.connect()`'s own
+ * `ensureDaemonHealthy` (box's plain `/health`, ~3s probe — ground-truthed
+ * in `provider.ts`), AND a separate MCP-transport connect attempt right
+ * after (`connectDaemonAgentSessionHost`, `@agentproto/worktree`) that has
+ * no readiness wait of its own. A box whose `/health` answers within 3s but
+ * whose MCP layer isn't warmed up yet hits exactly this: `ensureDaemonHealthy`
+ * returns, `provider.connect()` succeeds, and the MCP connect a moment later
+ * fails — transient, ground-truthed against a real box (docs/UPSTREAM.md).
+ * `DaemonClient.spawnAgent` throws on any non-2xx; this only retries when
+ * the thrown message names this specific code, not any other spawn failure. */
+function isRetryableReconnectError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes("sandbox_reconnect_failed")
+}
+
+async function spawnWithReconnectRetry(
+  client: DaemonClient,
+  input: SpawnAgentInput,
+  attempts: number,
+  retryDelayMs: number,
+): Promise<SpawnAgentResult> {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await client.spawnAgent(input)
+    } catch (err) {
+      if (attempt === attempts || !isRetryableReconnectError(err)) throw err
+      await sleep(retryDelayMs)
+    }
+  }
+  // Unreachable: the loop above always either returns or throws before
+  // falling off the end (attempts >= 1 is the caller's responsibility).
+  throw new Error("spawnWithReconnectRetry: attempts must be >= 1")
+}
 
 export interface RoomSessionResult {
   readonly sessionId: string
   readonly sandboxId: string | undefined
   readonly artifactUrl: string | undefined
+  /** Whether the daemon's own readiness probe (`pollServeReady`,
+   *  `sandbox-app-serve.ts`, up to 15s) confirmed the URL was answering
+   *  before this call returned. `false` means the URL is the right address
+   *  but the server hadn't answered in that window — ground-truthed against
+   *  a real box (docs/UPSTREAM.md): a caller that only checks for a
+   *  non-undefined `artifactUrl` can be fooled by a URL that never actually
+   *  serves anything. Undefined when this result didn't come from a fresh
+   *  `appServe` call (e.g. `resumeRoomSession`'s no-reserve-needed path —
+   *  it already confirmed liveness itself via `probeArtifact`). */
+  readonly artifactReady: boolean | undefined
 }
 
 export interface BootRoomSessionOpts {
@@ -56,6 +107,7 @@ export async function bootRoomSession(client: DaemonClient, opts: BootRoomSessio
     sessionId: spawned.id,
     sandboxId: spawned.sandboxId,
     artifactUrl: spawned.appServe?.url,
+    artifactReady: spawned.appServe?.ready,
   }
 }
 
@@ -72,6 +124,13 @@ export interface ResumeRoomSessionOpts {
    *  (architecture.md §3: "the URL is a pure function of sandbox id and
    *  port"), so resume probes this exact string rather than re-deriving it. */
   readonly artifactUrl: string
+  /** Reconnect attempts before giving up on a persistently retryable
+   *  `sandbox_reconnect_failed`. Default 4. */
+  readonly attempts?: number
+  /** Delay between reconnect attempts. Default 10s — long enough for the
+   *  box's MCP layer to catch up to its already-healthy `/health` endpoint
+   *  (see `isRetryableReconnectError`'s doc comment). */
+  readonly retryDelayMs?: number
 }
 
 /**
@@ -82,19 +141,24 @@ export interface ResumeRoomSessionOpts {
  * that probe comes back dead.
  */
 export async function resumeRoomSession(client: DaemonClient, opts: ResumeRoomSessionOpts): Promise<RoomSessionResult> {
-  const reconnected = await client.spawnAgent({
-    adapter: opts.adapter,
-    model: opts.model,
-    cwd: opts.cwd,
-    label: opts.label,
-    prompt: opts.prompt,
-    sandbox: {
-      provider: SANDBOX_PROVIDER,
-      config: {},
-      extraPorts: [opts.port],
-      reuse: opts.sandboxId,
+  const reconnected = await spawnWithReconnectRetry(
+    client,
+    {
+      adapter: opts.adapter,
+      model: opts.model,
+      cwd: opts.cwd,
+      label: opts.label,
+      prompt: opts.prompt,
+      sandbox: {
+        provider: SANDBOX_PROVIDER,
+        config: {},
+        extraPorts: [opts.port],
+        reuse: opts.sandboxId,
+      },
     },
-  })
+    opts.attempts ?? DEFAULT_RESUME_ATTEMPTS,
+    opts.retryDelayMs ?? DEFAULT_RESUME_RETRY_DELAY_MS,
+  )
 
   const status = await probeArtifact(opts.artifactUrl)
   if (status === "alive") {
@@ -102,6 +166,7 @@ export async function resumeRoomSession(client: DaemonClient, opts: ResumeRoomSe
       sessionId: reconnected.id,
       sandboxId: reconnected.sandboxId,
       artifactUrl: opts.artifactUrl,
+      artifactReady: true,
     }
   }
 

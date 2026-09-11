@@ -16,6 +16,11 @@ export interface FakeDaemon {
 
 export interface FakeDaemonOptions {
   readonly requireAuth?: string
+  /** Simulate the real, ground-truthed `sandbox_reconnect_failed` transient
+   *  (docs/UPSTREAM.md): the first `failCount` bare-reconnect spawns
+   *  (`sandbox.reuse === sandboxId`, no `appServe`) for this sandboxId fail
+   *  with that error code; the next one succeeds normally. */
+  readonly failReconnectsForSandbox?: { readonly sandboxId: string; readonly failCount: number }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -40,6 +45,7 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
   const busyBySession = new Map<string, boolean>()
   const queuePositionBySession = new Map<string, number>()
   const requestsReceived: { path: string; body: unknown }[] = []
+  let reconnectFailuresSeen = 0
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://127.0.0.1")
@@ -64,8 +70,27 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
     if (path === "/sessions/agent" && req.method === "POST") {
       const body = await readBody(req)
       requestsReceived.push({ path, body })
-      const sandboxRequested = isRecord(body) && body.sandbox !== undefined
+      const sandboxField = isRecord(body) && isRecord(body.sandbox) ? body.sandbox : undefined
+      const sandboxRequested = sandboxField !== undefined
       const appServeRequested = isRecord(body) && isRecord(body.appServe) ? body.appServe : undefined
+      const reuseId = sandboxField !== undefined ? sandboxField.reuse : undefined
+
+      if (
+        opts.failReconnectsForSandbox !== undefined &&
+        reuseId === opts.failReconnectsForSandbox.sandboxId &&
+        appServeRequested === undefined &&
+        reconnectFailuresSeen < opts.failReconnectsForSandbox.failCount
+      ) {
+        reconnectFailuresSeen += 1
+        sendJson(res, 500, {
+          error: "sandbox_reconnect_failed",
+          message:
+            `agent_start: sandbox reconnect failed (provider "e2b", sandbox "${reuseId}") — ` +
+            "worktree-agent: could not reach the agentproto daemon's MCP endpoint (simulated)",
+        })
+        return
+      }
+
       sendJson(res, 201, {
         id: "sess_fake",
         status: "running",

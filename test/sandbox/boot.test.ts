@@ -145,3 +145,67 @@ test("resumeRoomSession kills the reconnect and re-serves when the artifact prob
     await daemon.close()
   }
 })
+
+test("resumeRoomSession retries a transient sandbox_reconnect_failed and succeeds on the 3rd attempt", async () => {
+  const artifact = createServer((_req, res) => {
+    res.writeHead(200)
+    res.end("ok")
+  })
+  await new Promise<void>((resolve, reject) => {
+    artifact.once("error", reject)
+    artifact.listen(0, "127.0.0.1", resolve)
+  })
+  const artifactUrl = `http://127.0.0.1:${listeningPort(artifact)}`
+
+  const daemon = await startFakeDaemon({ failReconnectsForSandbox: { sandboxId: "sandbox_prior", failCount: 2 } })
+  try {
+    const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+    const result = await resumeRoomSession(client, {
+      cwd: "/home/user",
+      label: "rdv-room",
+      adapter: "claude-code",
+      model: "claude-sonnet-5",
+      prompt: "hello again",
+      appDir: "/home/user/apps/rdv-hello",
+      port: 3210,
+      sandboxId: "sandbox_prior",
+      artifactUrl,
+      attempts: 4,
+      retryDelayMs: 1,
+    })
+    assert.equal(result.artifactUrl, artifactUrl)
+
+    const spawnCalls = daemon.requestsReceived.filter(r => r.path === "/sessions/agent")
+    assert.equal(spawnCalls.length, 3)
+  } finally {
+    await daemon.close()
+    await new Promise<void>((resolve, reject) => artifact.close(err => (err ? reject(err) : resolve())))
+  }
+})
+
+test("resumeRoomSession gives up after exhausting its reconnect attempts", async () => {
+  const daemon = await startFakeDaemon({ failReconnectsForSandbox: { sandboxId: "sandbox_prior", failCount: 10 } })
+  try {
+    const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+    await assert.rejects(
+      resumeRoomSession(client, {
+        cwd: "/home/user",
+        label: "rdv-room",
+        adapter: "claude-code",
+        model: "claude-sonnet-5",
+        prompt: "hello again",
+        appDir: "/home/user/apps/rdv-hello",
+        port: 3210,
+        sandboxId: "sandbox_prior",
+        artifactUrl: "http://127.0.0.1:1",
+        attempts: 3,
+        retryDelayMs: 1,
+      }),
+      /sandbox_reconnect_failed/,
+    )
+    const spawnCalls = daemon.requestsReceived.filter(r => r.path === "/sessions/agent")
+    assert.equal(spawnCalls.length, 3)
+  } finally {
+    await daemon.close()
+  }
+})

@@ -145,3 +145,106 @@ whether to re-run with a larger budget, add a delay before the
 reconnect-immediately-after-pause step, or accept the fake-daemon test
 coverage (49 passing tests, including the exact real captured descriptor
 above) as sufficient for the hackathon deadline.
+
+## Second live attempt (2026-09-12) — root cause found, fixed, verified live
+
+New budget: 3 fresh e2b boots, reconnects free/unlimited. `resumeRoomSession`
+gained a built-in retry (default 4 attempts, 10s apart) around the bare
+reconnect, treating `sandbox_reconnect_failed` as retryable — proven with a
+fake-daemon unit test that fails twice then succeeds (`test/sandbox/boot.test.ts`).
+
+**Step 0** (free): tried resuming `ibnw6yj9w3ejc99bb49of` from the previous
+run. e2b: `"Paused sandbox ibnw6yj9w3ejc99bb49of not found"` — gone (TTL or
+GC), as expected. Moved on.
+
+**Step 1, boots 1–3**: fresh boot, phase-1 session left ALIVE, phase-2
+`reuse`+`appServe` against that same still-booted (never paused) box. This
+part worked — reuse against a LIVE box succeeded on the first try every
+time, no `sandbox_reconnect_failed` at all (unsurprising in hindsight: there
+was never a pause/resume to race against). But **all three boots produced
+the identical symptom**: `appServe.ready: false`, and fetching the URL
+directly returned e2b's own edge error, not ours:
+
+```json
+{"sandboxId":"<id>","message":"The sandbox is running but port is not open","port":3210,"code":502}
+```
+
+`bootRoomSession`'s result type didn't surface `ready` at all before this —
+fixed by adding `RoomSessionResult.artifactReady: boolean | undefined`, so a
+caller can no longer mistake "got a URL" for "URL actually serves." Step 1
+was also hardened to treat `artifactReady !== true` as a hard failure
+(cleans up both sessions, throws, triggers a fresh-boot retry) instead of
+silently continuing to step 2 with a broken artifact — the first version of
+this script didn't do that and limped into step 2 with a dead session,
+which is what actually happened on boot 1.
+
+**Process note:** stopping the script's own retry loop by killing the local
+`node` process (`kill -9`) does NOT cancel a spawn already in flight
+server-side — the daemon keeps executing `spawnAgentSession` regardless of
+whether the client that requested it is still alive. A `kill -9` issued
+right as boot 2's retry decision printed still let a 4th box
+(`isdcltsb8oxiyq7plv8ga`) get created before the process actually died,
+one over the stated 3-boot budget. Caught and paused it by hand afterward
+(`sandbox list --json` doesn't lie, even when a client-side log does). If a
+hard boot budget matters, the stop condition needs to live server-side (or
+the client needs to check the budget BEFORE issuing the request that would
+exceed it, not react after the fact to a process signal that can't reach an
+in-flight HTTP call).
+
+**Isolating the cause — concurrency was NOT it.** The identical symptom
+across three fresh boots, always in the "phase-1 still alive" reuse
+pattern, suggested a live-session-concurrency conflict. Falsified by hand,
+for free: reconnected to a paused box (`iysytdsb9grusftw4u9bw`) whose
+phase-1 session had been dead for minutes, re-ran the SAME appServe
+sequence — `artifactReady: false` again, identical 502. Same box, zero
+concurrent sessions, same failure. Not a concurrency bug.
+
+**Actual root cause, found by reading the box's own log.** Reconnected once
+more (free) and had the agent `cat` `<appDir>/.agentproto/app-serve.log`
+plus check for a listening process on port 3210. The log had the real
+answer:
+
+```
+agentproto app serve: /home/user/apps/rdv-hello has no UI to serve (missing /home/user/apps/rdv-hello/.agentproto/ui).
+```
+
+`agentproto app serve`'s own CLI (per its `--help`) hardcodes the UI
+location as `<appDir>/.agentproto/ui/` and does **not** honour the APP.md
+frontmatter's `ui.path` field for finding it — only `app_install`/
+`loadAppHandle` (`app-kit/src/load-app.ts`) respect that field. Every one
+of this repo's app dirs put the UI at `<appDir>/ui/index.html` with
+`ui.path: ui/index.html` in the frontmatter: `app_install` read the
+frontmatter, found the file, and happily installed. `app serve` then
+ignored the frontmatter entirely, looked for the hardcoded path, found
+nothing, printed its own usage/help text to the log, and exited — so
+nothing ever bound to the port, `command_execute`'s own exit code was still
+0 (the launcher script backgrounds the process and returns immediately, see
+`buildServeLaunchScript`'s doc comment), and the daemon's readiness probe
+correctly reported `ready: false` after its 15s window elapsed. This is a
+straightforward inconsistency between `app_install`'s and `app serve`'s
+idea of where an app's UI lives, not an infrastructure flake — worth
+flagging upstream regardless of the "not filed" note above, since the fix
+(either `app serve` should read `ui.path` from frontmatter, or `app_install`
+should reject/relocate a UI that isn't already at the hardcoded path) is
+small and the current state silently produces a URL that never serves
+anything.
+
+**Fixed and verified live**, no new boot needed (two free reconnects on the
+already-paused, already-populated `iysytdsb9grusftw4u9bw`): moved the UI to
+`<appDir>/.agentproto/ui/index.html`, matching `ui.path` in APP.md to the
+same location, re-ran `bootRoomSession`'s appServe. Result:
+`artifactReady: true`, `probeArtifact` → `alive`, a direct `fetch` → `200`
+with the real `window.McpApp` bridge HTML in the body. `scripts/prove-sandbox.ts`'s
+`CREATE_APP_SCRIPT` now uses the correct layout.
+
+**Full round trip proven**, including resume: killed the working session
+(pause), waited 20s, called `resumeRoomSession` — reconnected, found the
+artifact still alive (no re-serve needed), returned `artifactReady: true`.
+Final session killed; box `iysytdsb9grusftw4u9bw` left **paused**, holding
+a genuinely working artifact — the pre-warm candidate for the demo.
+
+Boots used this round: 4 (1 over budget, see the `kill -9` race above) — 3
+distinct boxes hit the UI-path bug, the 4th (`isdcltsb8oxiyq7plv8ga`) was
+paused unused once the root cause was already found. All boxes from both
+sessions are confirmed `paused` in `agentproto sandbox list --json` as of
+this writing — none left running.
