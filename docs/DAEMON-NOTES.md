@@ -210,24 +210,28 @@ fan-in must always call with `?wait=false` and `queue: true`.
 
 ## Session teardown
 
-**Correction (found during M4):** `DELETE /sessions/:id` → `registry.forget(id)`
-→ `200 {"ok":true,"id":"<id>"}` if it existed, `404` otherwise. Bearer
-required. But `forget` ONLY drops the daemon's bookkeeping row
-(`sessions.ts` — it tears down the transcript writer and removes the map
-entry) — it never calls the live `agentSession.close()`. It does **not**
-terminate the underlying process, and for a sandboxed session it does
-**not** pause or kill the box. Using `DELETE` alone to "clean up" a
-throwaway session — which is what the M1/M2 probe scripts in this repo did
-— leaks the underlying process/sandbox; the daemon just stops tracking it.
+**Correction (found during M4):** `DELETE /sessions/:id`
+(`http-server.ts:5444`) → `registry.forget(id)` (`sessions.ts:7796`) →
+`200 {"ok":true,"id":"<id>"}` if it existed, `404` otherwise. Bearer
+required. But `forget` ONLY drops the daemon's bookkeeping row (it tears
+down the transcript writer and removes the map entry) — it never calls the
+live `agentSession.close()`. It does **not** terminate the underlying
+process, and for a sandboxed session it does **not** pause or kill the
+box. Using `DELETE` alone to "clean up" a throwaway session — which is
+what the M1/M2 probe scripts in this repo did — leaks the underlying
+process/sandbox; the daemon just stops tracking it.
 
-The route that actually tears down is `POST /sessions/:id/kill` →
-`registry.kill(id)` → `200 {"ok":true,"sessionId":"<id>"}` if it was alive,
-`404` otherwise. `kill` calls `agentSession.close()` (SIGTERM on a local
-child; for a sandboxed session, `sandbox-agent-session-proxy.ts` closes the
-remote session then pauses the box by default — `lifecycle.ts`'s
+The route that actually tears down is `POST /sessions/:id/kill`
+(`http-server.ts:5394`) → `registry.kill(id)` (`sessions.ts:7415`) →
+`200 {"ok":true,"sessionId":"<id>"}` if it was alive, `404` otherwise.
+`kill` calls `agentSession.close()` (SIGTERM on a local child; for a
+sandboxed session, `sandbox-agent-session-proxy.ts` closes the remote
+session then pauses the box by default — `lifecycle.ts`'s
 `resolveLifecyclePolicy`, pause unless the spec declares `destroy_on`).
 **Use `POST /sessions/:id/kill`, not `DELETE`, to actually end a session** —
-`src/daemon/client.ts`'s `DaemonClient.kill()` does this.
+`src/daemon/client.ts`'s `DaemonClient.kill()` does this. See
+`docs/UPSTREAM.md` #3 for a related gap: this pause-by-default path is
+itself NOT reached on every failure mode of a sandboxed reconnect.
 
 `GET /sessions` (no id) lists every known session with `id`, `status`,
 `label` among other descriptor fields — useful to confirm a session is gone

@@ -1,250 +1,237 @@
-# Upstream findings
+# Upstream findings — for the agentproto maintainers
 
-Bugs and gaps found in `agentproto/ts@264c4c7a` while building Rendez-vous.
-Per the build brief: documented here with a repro, not fixed in this repo,
-no PR without checking with the operator first.
+Findings from building Rendez-vous, a host application that drives an
+unmodified `agentproto/ts@264c4c7a` daemon over its public HTTP surface (no
+fork, no vendored copy — see `docs/ARCHITECTURE.md` §3). Every claim below
+was verified independently at its cited `file:line` in the read-only
+checkout, not taken on faith from an earlier note. Nothing here has been
+opened as a PR; per this project's build brief, these are documented for
+the operator/maintainers to triage. Raw run logs and curl transcripts
+backing the M4 entries live in `docs/UPSTREAM-LOGS.md` — this file is
+self-contained without them.
 
-## R8 — app-serve does not survive a resume
+## Summary
 
-**Claim** (architecture.md §4.2 R8): nothing re-launches `agentproto app
-serve` after a sandboxed session resumes via `SandboxProvider.connect()`.
+| # | Title | Severity | Status |
+| --- | --- | --- | --- |
+| 1 | `POST /sessions/:id/prompt` mid-turn loses a message without `queue:true`, and the daemon's own inbound router never passes it | High — silent data loss | Documented |
+| 2 | `agentproto app serve` hardcodes the UI path, ignoring APP.md's `ui.path` that `app_install` honours | Medium — silent failure (URL never serves, no error anywhere) | Documented |
+| 3 | e2b reconnect failure (MCP-connect step) doesn't pause the box on error, unlike sibling failure paths | Medium — cost leak risk | Documented |
+| 4 | `POST /mcps/proxy/call` has no auth gate, unlike neighboring mutating routes | High — security | Documented |
+| 5 | A spawn already in flight server-side keeps running after the requesting client disconnects | Low — operational/budgeting | Documented |
 
-**Ground truth, read from source:**
+---
 
-- `packages/sandbox-e2b/src/provider.ts`'s `connect()` (~line 316) calls
-  `ensureDaemonHealthy(...)` — a health probe against the BOX's own
-  agentproto daemon (`GET /health` inside the box) — and, if that isn't
-  healthy, re-runs the CLI update. It never touches the app-serve process.
-- `packages/runtime/src/session-spawn.ts`'s `bootSandboxAgentSession`
-  (~line 3390-3535) is the only place `startSandboxAppServe` is called, and
-  it is called ONCE per `spawnAgentSession` call, gated on
-  `if (opts.appServe)`. A spawn call made with `sandbox: {reuse:
-  "<sandboxId>"}` and no `appServe` field — i.e. a plain reconnect, which is
-  the only thing `SandboxProvider.connect()` maps to — never reaches that
-  branch.
-- The detached server process itself (`nohup agentproto app serve ... &`,
-  `sandbox-app-serve.ts`'s `buildServeLaunchScript`) is started once, at
-  first boot, inside the box's process tree. `pause({keepMemory: true})`
-  preserves that process's memory image, so in the common case it keeps
-  running/listening across a pause — but there is no code path that
-  verifies this or relaunches it if the process did NOT survive (a template
-  update, an OOM inside the box, the box's own daemon having restarted the
-  workstation's process tree, etc).
+## 1. Mid-turn prompt loss without `queue: true`
 
-**Repro** (no e2b required to see the code path; the live repro is in
-`scripts/prove-sandbox.ts`'s resume phase, run against a real box):
+**Summary.** `POST /sessions/:id/prompt?wait=false` on a busy session throws
+a mid-turn rejection unless the caller passes `queue: true` — that part is
+correct and by design. The problem is one level up: the daemon's own
+built-in inbound message router never sets that flag, so any host that
+routes provider webhooks through it (the shipped default) silently drops
+one side of a two-people-talking-at-once race, with no error surfaced to
+either sender.
 
-1. `POST /sessions/agent` with `sandbox: {provider:"e2b", extraPorts:[3210]}`
-   and `appServe: {dir:"/home/user/apps/<app>", port:3210}` on an already-
-   populated app dir. Descriptor comes back with `appServe.url` and
-   `appServe.ready: true`. The URL answers.
-2. `POST /sessions/<id>/kill` on that session. Per `sessions.ts`'s `kill()`
-   → `agentSession.close()` → `sandbox-agent-session-proxy.ts` (~line 466):
-   default lifecycle policy is `pause` (`lifecycle.ts`'s
-   `resolveLifecyclePolicy`), so the box is paused, not destroyed.
-3. `POST /sessions/agent` again, same adapter, with
-   `sandbox: {provider:"e2b", reuse:"<sandboxId>", extraPorts:[3210]}` and
-   **no** `appServe` field (the shape any resume-by-reconnect path takes).
-   This succeeds — the box resumes, the descriptor carries the SAME
-   `sandboxId` and a re-resolved `sandboxPorts` entry for 3210 (the URL is a
-   pure function of sandbox id + port, so it's textually identical to
-   step 1's URL) — but the descriptor carries no `appServe` field at all,
-   because nothing asked for one.
-4. Whether the URL from step 1 still answers now depends ENTIRELY on
-   whether the detached server process happened to survive the pause in
-   memory. Nothing in the reconnect path checks this either way.
+**Anchors.**
+- `packages/runtime/src/inbound-router.ts:92` —
+  `await deps.enqueuePrompt(sessionId, msg.text)`, exactly two arguments:
+  no `queue`, no `origin`, no way to opt in from this call site.
+- `packages/runtime/src/sessions.ts:4815` — the throw itself:
+  `` `${caller}: session "${id}" is mid-turn — wait for it to finish or cancel` ``.
+- `packages/runtime/src/http-server.ts`'s prompt route (`~4410-4507`) —
+  where `queue`/`force`/`interrupt` are parsed from the body and honoured
+  ONLY on the `?wait=false` arm; the blocking arm has no opt-in at all.
 
-**Impact on Rendez-vous:** a room that pauses (idle, or the demo laptop
-sleeps) and resumes may come back with a session and a sandbox but a dead
-artifact URL, with no error from the daemon at any point — the reconnect
-call reports success regardless.
-
-**Workaround shipped here** (`src/sandbox/boot.ts`'s `resumeRoomSession`):
-reconnect first (cheap: no install, no relaunch), `probeArtifact` the known
-URL, and only when that probe is dead pay for a full second spawn call that
-includes `appServe` again — which reruns `app_install` (idempotent against
-the same dir) and relaunches the detached server. This is a full workaround
-at the Rendez-vous layer; it does not touch agentproto.
-
-**Not filed upstream** — per the build brief, flagging here for the
-operator to decide whether it's worth a PR.
-
-## Real-run findings, `scripts/prove-sandbox.ts` (2026-09-11)
-
-Two e2b boots were spent on this run (the script's full budget). Neither
-reached a working, probed artifact URL — both failed for reasons outside
-this repo's code, in the daemon's sandbox-reconnect and box-boot paths.
-Recorded here rather than re-attempted, per the budget.
-
-**Boot 1** (`sandboxId: ibnw6yj9w3ejc99bb49of`) — phase 1 (fresh boot, no
-`appServe`, a prompt that runs one exact shell command to create the app
-dir) succeeded cleanly: `GET /sessions/sess_251a34c1` afterward shows
-`status: "killed"`, `toolCallsThisTurn: 1`, `activitySummary.text: "done"` —
-the agent ran the exact command and nothing else, as instructed. That
-descriptor is the real captured JSON in `test/sandbox/descriptor.test.ts`.
-
-Phase 2 (reconnect + `appServe` against that same box, immediately after
-killing/pausing phase 1's session) failed:
-
+**Repro.** `scripts/prove-queue.ts` in this repo: spawns a session with a
+slow prompt, fans in two more messages with `queue: true` while it's busy
+(both land, in order, as `202` with `queuePosition`), then repeats without
+`queue` to get the exact `409`:
 ```
-spawnAgent failed: 500 {"error":"sandbox_reconnect_failed","message":
-"agent_start: sandbox reconnect failed (provider \"e2b\", sandbox
-\"ibnw6yj9w3ejc99bb49of\") — worktree-agent: could not reach the
-agentproto daemon's MCP endpoint at ..."}
+HTTP 409
+{"error":"send_prompt_failed","message":"enqueuePrompt: session \"<id>\" is mid-turn — wait for it to finish or cancel"}
 ```
+Full request/response bodies for both arms are in `docs/DAEMON-NOTES.md`
+§"Queue behaviour".
 
-Traced the error string to `packages/worktree/src/agent-session-host.ts:74`
-— `connectDaemonAgentSessionHost`, called from
-`packages/sandbox/src/agent-session-host.ts:204` (`createSandboxAgentSessionHost`)
-AFTER `provider.connect()` already returned successfully (i.e. the box's
-plain `GET /health` answered fine — `ensureDaemonHealthy` passed). The
-failure is a SEPARATE MCP-transport connection attempt to the same box that
-didn't succeed, immediately after a pause→resume with no delay in between.
-Reads like the box's MCP/WebSocket layer needing a beat longer to come back
-than its plain HTTP health endpoint does — unconfirmed against a second
-data point.
+**Impact.** Any consumer of the built-in inbound router (the shipped path
+from a provider webhook to a session) loses a message whenever it arrives
+while the session is mid-turn — exactly the "two humans typing at once"
+case, with no retry, no queued state, no error delivered anywhere. Every
+caller of that router path inherits this unless they route around it (as
+this repo does, calling `?wait=false&queue=true` directly instead).
 
-**Notable gap found in this failure's cleanup:** the `catch` around this
-step in `session-spawn.ts` (~3449, the one producing `sandbox_reconnect_failed`)
-returns the error WITHOUT calling `host.stop()`/pausing the box — unlike
-the sibling catches around `host.start()` and `startSandboxAppServe`
-failing, which do call `host.stop()`. A bare reconnect that fails at the
-MCP-connect step (as opposed to the `ensureDaemonHealthy` step, which IS
-covered — `provider.connect()`'s own catch kills the box on THAT failure)
-can leave a box resumed-but-untracked, no daemon-side session referencing
-it. Checked this by hand: a follow-up bare reconnect attempt against the
-same sandboxId got `"Paused sandbox ibnw6yj9w3ejc99bb49of not found"` (e2b's
-own error) — the box was no longer there to pause, so nothing was actively
-leaking by the time this was checked, but the code path that could leave a
-resumed, untracked, billing box behind is real and worth a second look.
+**Suggested fix.** `inbound-router.ts:92`'s `routeInto` should call
+`enqueuePrompt(sessionId, msg.text, { queue: true, origin: ... })` instead
+of the bare two-argument form — the queueing mechanism it needs already
+exists and is exercised correctly elsewhere in the same codebase.
 
-**Boot 2** (the automatic retry) failed at the FIRST spawn (fresh box, no
-reuse) — a different failure mode, the box's own daemon never became
-healthy within the boot timeout:
+---
 
-```
-spawnAgent failed: 500 {"error":"sandbox_boot_failed","message":
-"agent_start: sandbox boot failed (provider \"e2b\") — @agentproto/sandbox-e2b:
-agentproto daemon did not become healthy at https://18790-irsm2610n264xxa822b0r..."}
-```
-(message truncated in the captured log; not re-run to complete it, per budget).
-Per `provider.ts`'s `boot()`, a failure at this step kills the box
-(`sandbox.kill()` in the `catch`), so boot 2's box does not need any
-follow-up — it was torn down by the provider itself.
+## 2. `agentproto app serve` ignores APP.md's `ui.path`
 
-**Net:** the DaemonClient/boot.ts code path (request shapes, response
-parsing, the two-phase file-creation dance, the reconnect-then-reserve
-logic) is exercised and correct as far as it got — phase 1 succeeded twice,
-proving the file-creation prompt and the `sandbox`+no-`appServe` spawn path
-both work for real. What's unverified against live e2b is the actual
-`appServe` install+launch+probe sequence and the resume/re-serve dance,
-because neither boot got far enough to reach it. This looks like e2b/box
-infrastructure flakiness on this run, not a bug in this repo's request
-shapes — but it means M4's live proof is incomplete. Operator call on
-whether to re-run with a larger budget, add a delay before the
-reconnect-immediately-after-pause step, or accept the fake-daemon test
-coverage (49 passing tests, including the exact real captured descriptor
-above) as sufficient for the hackathon deadline.
+**Summary.** `app_install` (`loadAppHandle`) reads an app's `ui.path`
+frontmatter field to find its UI file — any relative path validates and
+installs. `agentproto app serve`'s own CLI command reads no such field: it
+hardcodes the UI directory as `<appDir>/.agentproto/ui/` and exits with an
+error if nothing is there, regardless of what `ui.path` says. An app whose
+UI lives anywhere else installs successfully and then never serves
+anything — the daemon's own readiness probe correctly reports `ready:
+false`, but nothing upstream of that treats install-success-plus-serve-
+never-answering as an error worth surfacing loudly.
 
-## Second live attempt (2026-09-12) — root cause found, fixed, verified live
+**Anchors.**
+- `packages/app-kit/src/load-app.ts:251` — `resolveRef(dir, fm.ui.path)`,
+  reading the frontmatter path.
+- `packages/cli/src/app-serve.ts:1077-1078` — `const uiRoot = join(appDir,
+  ".agentproto", "ui")`, hardcoded, no reference to `fm.ui.path` anywhere in
+  this file.
+- `packages/cli/src/app-serve.ts:1086-1089` — the resulting error:
+  `` `agentproto app serve: ${appDir} has no UI to serve (missing ${uiRoot}).` ``.
+- `packages/runtime/src/sandbox-app-serve.ts`'s `buildServeLaunchScript` —
+  the detached launcher backgrounds the process and returns immediately
+  (`nohup ... & echo $!`), so `command_execute`'s own exit code is `0` even
+  when the backgrounded `app serve` process exits seconds later on this
+  exact error — nothing at the launch step notices.
 
-New budget: 3 fresh e2b boots, reconnects free/unlimited. `resumeRoomSession`
-gained a built-in retry (default 4 attempts, 10s apart) around the bare
-reconnect, treating `sandbox_reconnect_failed` as retryable — proven with a
-fake-daemon unit test that fails twice then succeeds (`test/sandbox/boot.test.ts`).
+**Repro.** Install an app with `ui: { path: ui/index.html }` (UI at
+`<dir>/ui/index.html`) via `app_install` — succeeds. Then
+`agentproto app serve <dir>` (or `appServe` on `agent_start`) — the
+detached process writes the "has no UI to serve" message + its own usage
+text to `<dir>/.agentproto/app-serve.log` and exits; the readiness probe
+times out (`ready: false`); the returned URL 502s at the provider edge
+("The sandbox is running but port is not open" on e2b). Full transcript in
+`docs/UPSTREAM-LOGS.md`.
 
-**Step 0** (free): tried resuming `ibnw6yj9w3ejc99bb49of` from the previous
-run. e2b: `"Paused sandbox ibnw6yj9w3ejc99bb49of not found"` — gone (TTL or
-GC), as expected. Moved on.
+**Impact.** Any agentproto app whose UI isn't already at the hardcoded
+`.agentproto/ui/` path — which is legal per the schema and per
+`app_install`'s own validation — silently fails to serve, with a URL that
+looks valid and a descriptor that claims success. Discovered in this repo
+only by reconnecting to a live box and reading its log file by hand.
 
-**Step 1, boots 1–3**: fresh boot, phase-1 session left ALIVE, phase-2
-`reuse`+`appServe` against that same still-booted (never paused) box. This
-part worked — reuse against a LIVE box succeeded on the first try every
-time, no `sandbox_reconnect_failed` at all (unsurprising in hindsight: there
-was never a pause/resume to race against). But **all three boots produced
-the identical symptom**: `appServe.ready: false`, and fetching the URL
-directly returned e2b's own edge error, not ours:
+**Suggested fix.** Either `app serve` should resolve the UI directory from
+the installed app's own `ui.path` (consistent with `app_install`), or
+`app_install` should reject/relocate a UI that isn't already at the
+hardcoded path so the mismatch surfaces at install time instead of at
+serve time.
 
-```json
-{"sandboxId":"<id>","message":"The sandbox is running but port is not open","port":3210,"code":502}
-```
+---
 
-`bootRoomSession`'s result type didn't surface `ready` at all before this —
-fixed by adding `RoomSessionResult.artifactReady: boolean | undefined`, so a
-caller can no longer mistake "got a URL" for "URL actually serves." Step 1
-was also hardened to treat `artifactReady !== true` as a hard failure
-(cleans up both sessions, throws, triggers a fresh-boot retry) instead of
-silently continuing to step 2 with a broken artifact — the first version of
-this script didn't do that and limped into step 2 with a dead session,
-which is what actually happened on boot 1.
+## 3. e2b reconnect failure doesn't pause the box
 
-**Process note:** stopping the script's own retry loop by killing the local
-`node` process (`kill -9`) does NOT cancel a spawn already in flight
-server-side — the daemon keeps executing `spawnAgentSession` regardless of
-whether the client that requested it is still alive. A `kill -9` issued
-right as boot 2's retry decision printed still let a 4th box
-(`isdcltsb8oxiyq7plv8ga`) get created before the process actually died,
-one over the stated 3-boot budget. Caught and paused it by hand afterward
-(`sandbox list --json` doesn't lie, even when a client-side log does). If a
-hard boot budget matters, the stop condition needs to live server-side (or
-the client needs to check the budget BEFORE issuing the request that would
-exceed it, not react after the fact to a process signal that can't reach an
-in-flight HTTP call).
+**Summary.** A sandboxed spawn with `sandbox.reuse` set that fails during
+the box's own `agent_start`/`startSandboxAppServe` steps gets cleaned up
+(`host.stop()`) before the error returns. A failure one step earlier — the
+MCP-transport connect inside `createSandboxAgentSessionHost`, which is what
+`sandbox_reconnect_failed` most often reports — does not: the box is left
+however `provider.connect()` left it (resumed, not paused), with no
+daemon-side session tracking it.
 
-**Isolating the cause — concurrency was NOT it.** The identical symptom
-across three fresh boots, always in the "phase-1 still alive" reuse
-pattern, suggested a live-session-concurrency conflict. Falsified by hand,
-for free: reconnected to a paused box (`iysytdsb9grusftw4u9bw`) whose
-phase-1 session had been dead for minutes, re-ran the SAME appServe
-sequence — `artifactReady: false` again, identical 502. Same box, zero
-concurrent sessions, same failure. Not a concurrency bug.
+**Anchors.**
+- `packages/runtime/src/session-spawn.ts:3436-3465` — the `try/catch`
+  around `createSandboxAgentSessionHost`; the `catch` (~3449) returns
+  `{ ok: false, code: "sandbox_reconnect_failed", ... }` with no `host.stop()`
+  or pause call, unlike the sibling catches around `host.start()` (~3496)
+  and `startSandboxAppServe` failing (~3512), which both call
+  `host.stop()`.
+- `packages/sandbox-e2b/src/provider.ts:233-246` — `ensureDaemonHealthy`'s
+  own failure path (a distinct, earlier step) IS covered: `provider.ts`'s
+  `connect()`/`boot()` kill the box in their own `catch` when THIS step
+  throws.
+- `packages/sandbox/src/agent-session-host.ts:204` — where the uncovered
+  MCP connect (`connectDaemonAgentSessionHost`,
+  `packages/worktree/src/agent-session-host.ts:65-81`) happens, after
+  `provider.connect()` already returned successfully.
 
-**Actual root cause, found by reading the box's own log.** Reconnected once
-more (free) and had the agent `cat` `<appDir>/.agentproto/app-serve.log`
-plus check for a listening process on port 3210. The log had the real
-answer:
+**Repro.** Pause a sandboxed session (`POST /sessions/:id/kill`, default
+lifecycle is pause — `packages/sandbox/src/lifecycle.ts`'s
+`resolveLifecyclePolicy`), then immediately reconnect
+(`sandbox.reuse: "<id>"`, no delay). Ground-truthed live in this repo: the
+MCP connect step failed once with this exact shape (transcript in
+`docs/UPSTREAM-LOGS.md`); the daemon's `sandbox_reconnect_failed` response
+carried no indication the box had been left running.
 
-```
-agentproto app serve: /home/user/apps/rdv-hello has no UI to serve (missing /home/user/apps/rdv-hello/.agentproto/ui).
-```
+**Impact.** A caller that treats `sandbox_reconnect_failed` as "nothing
+happened, safe to retry with a fresh boot" can leak a running (billed) e2b
+box with no daemon-side record of it — the only way to find it afterward is
+the provider's own dashboard/CLI, not `agentproto sandbox list` if the
+ledger entry itself is stale.
 
-`agentproto app serve`'s own CLI (per its `--help`) hardcodes the UI
-location as `<appDir>/.agentproto/ui/` and does **not** honour the APP.md
-frontmatter's `ui.path` field for finding it — only `app_install`/
-`loadAppHandle` (`app-kit/src/load-app.ts`) respect that field. Every one
-of this repo's app dirs put the UI at `<appDir>/ui/index.html` with
-`ui.path: ui/index.html` in the frontmatter: `app_install` read the
-frontmatter, found the file, and happily installed. `app serve` then
-ignored the frontmatter entirely, looked for the hardcoded path, found
-nothing, printed its own usage/help text to the log, and exited — so
-nothing ever bound to the port, `command_execute`'s own exit code was still
-0 (the launcher script backgrounds the process and returns immediately, see
-`buildServeLaunchScript`'s doc comment), and the daemon's readiness probe
-correctly reported `ready: false` after its 15s window elapsed. This is a
-straightforward inconsistency between `app_install`'s and `app serve`'s
-idea of where an app's UI lives, not an infrastructure flake — worth
-flagging upstream regardless of the "not filed" note above, since the fix
-(either `app serve` should read `ui.path` from frontmatter, or `app_install`
-should reject/relocate a UI that isn't already at the hardcoded path) is
-small and the current state silently produces a URL that never serves
-anything.
+**Suggested fix.** Wrap the `createSandboxAgentSessionHost` call's failure
+path with the same `host.stop()`-on-error contract its sibling catches
+already have, OR have `provider.connect()` itself own cleanup on ANY
+downstream failure in the same boot sequence, not just its own
+`ensureDaemonHealthy` step.
 
-**Fixed and verified live**, no new boot needed (two free reconnects on the
-already-paused, already-populated `iysytdsb9grusftw4u9bw`): moved the UI to
-`<appDir>/.agentproto/ui/index.html`, matching `ui.path` in APP.md to the
-same location, re-ran `bootRoomSession`'s appServe. Result:
-`artifactReady: true`, `probeArtifact` → `alive`, a direct `fetch` → `200`
-with the real `window.McpApp` bridge HTML in the body. `scripts/prove-sandbox.ts`'s
-`CREATE_APP_SCRIPT` now uses the correct layout.
+---
 
-**Full round trip proven**, including resume: killed the working session
-(pause), waited 20s, called `resumeRoomSession` — reconnected, found the
-artifact still alive (no re-serve needed), returned `artifactReady: true`.
-Final session killed; box `iysytdsb9grusftw4u9bw` left **paused**, holding
-a genuinely working artifact — the pre-warm candidate for the demo.
+## 4. `POST /mcps/proxy/call` has no auth gate
 
-Boots used this round: 4 (1 over budget, see the `kill -9` race above) — 3
-distinct boxes hit the UI-path bug, the 4th (`isdcltsb8oxiyq7plv8ga`) was
-paused unused once the root cause was already found. All boxes from both
-sessions are confirmed `paused` in `agentproto sandbox list --json` as of
-this writing — none left running.
+**Summary.** Unlike every neighboring mutating route in the same file,
+`POST /mcps/proxy/call` — which invokes an arbitrary tool on any already-
+imported MCP server, including one holding real third-party credentials —
+calls neither `checkSessionsToken` nor any `authorize()`/rejection path
+before executing. Anyone who can reach the daemon's HTTP port can drive any
+imported MCP tool with zero token.
+
+**Anchors.**
+- `packages/runtime/src/http-server.ts:2371-2404` — the handler itself:
+  parses `{ alias, toolName, args }` and calls
+  `opts.mcpProxy.callTool(body.alias, body.toolName, body.args ?? {})`
+  directly, no auth check anywhere in the block.
+- Compare `packages/runtime/src/http-server.ts:2130`, `:2200`, `:2237` —
+  the three `/workspaces*` mutating routes in the SAME file, each opening
+  with `const gate = checkSessionsToken(req); if (gate !== "ok") { ... return }`
+  before doing anything else.
+- The sibling GET routes `/mcps/proxy/status` (`:2335`) and
+  `/mcps/proxy/tools/:alias` (`:2356`) are also ungated, consistent with
+  other read-only routes in this file — `/mcps/proxy/call` is the one that
+  actually executes an action and is the only one of the three worth
+  flagging.
+
+**Repro.** `curl -X POST http://<daemon>:18790/mcps/proxy/call -d '{"alias":"<imported-alias>","toolName":"<tool>","args":{}}'` — no
+`Authorization` header sent, no token required, same as the two read-only
+neighbors above but for a route that has side effects.
+
+**Impact.** Any MCP server a daemon operator has imported (agentpush,
+anything else) is reachable and callable by anyone who can reach the
+daemon's HTTP port, with none of the credential the import itself is meant
+to gate. Same class of gap as `docs/ARCHITECTURE.md`'s R6 (no
+multi-principal scoping on the daemon surface), but sharper here — it
+doesn't even need a paired-laptop bearer, just network reachability.
+Investigated and written up in full in this repo's `docs/AGENTPUSH.md` §6
+(ranking direct-REST vs. this proxy for outbound messaging); re-verified
+independently at the anchor above before including it here.
+
+**Suggested fix.** Add the same `checkSessionsToken`/`authorize()` gate its
+three `/workspaces*` neighbors already have to `POST /mcps/proxy/call` (and
+arguably to the two GET routes, for consistency, though they're lower
+stakes).
+
+---
+
+## 5. A disconnected client can't cancel a spawn already in flight
+
+**Summary.** `spawnAgentSession` runs entirely server-side inside the
+daemon process; nothing about it is tied to the requesting HTTP client
+staying connected. A client that decides "stop, don't spawn any more"
+(e.g. a boot-budget guard) and kills its own process cannot cancel a
+request already sent — the daemon keeps executing it to completion
+regardless.
+
+**Repro.** Ground-truthed live in this repo (`docs/UPSTREAM-LOGS.md`,
+"second live attempt"): killing the local `node` process (`kill -9`) right
+as it decided to retry with a fresh boot still let that boot complete
+server-side, one box over the caller's intended budget.
+
+**Impact.** Any client-side request budget (boot count, cost cap, rate
+limit) enforced by "don't send the next request" has a race window: once a
+request is sent, no client-side action can stop it from completing and its
+side effects (an e2b box, in this case) from existing. Not a bug in the
+strict sense — this is normal request/response semantics — but worth
+knowing before building budget enforcement that assumes a client kill is
+sufficient.
+
+**Suggested fix.** None expected from agentproto; this is a caller-side
+design note; a hard budget needs a server-side cap (or a pre-flight check
+before the request that would exceed it goes out), not a client-side kill
+after the fact.
