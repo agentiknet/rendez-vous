@@ -240,3 +240,114 @@ test("resumeRoomSession gives up after exhausting its reconnect attempts", async
     await daemon.close()
   }
 })
+
+test("resumeRoomSession cost-protects the known sandboxId once reconnect attempts are exhausted", async () => {
+  const daemon = await startFakeDaemon({ failReconnectsForSandbox: { sandboxId: "sandbox_prior", failCount: 10 } })
+  const killed: string[] = []
+  try {
+    const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+    await assert.rejects(
+      resumeRoomSession(client, {
+        cwd: "/home/user",
+        label: "rdv-room",
+        adapter: "claude-code",
+        model: "claude-sonnet-5",
+        prompt: "hello again",
+        appDir: "/home/user/apps/rdv-hello",
+        port: 3210,
+        sandboxId: "sandbox_prior",
+        artifactUrl: "http://127.0.0.1:1",
+        attempts: 3,
+        retryDelayMs: 1,
+        killOrphanSandbox: async (sandboxId) => {
+          killed.push(sandboxId)
+        },
+      }),
+      /sandbox_reconnect_failed/,
+    )
+    assert.deepEqual(killed, ["sandbox_prior"])
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("resumeRoomSession does NOT cost-protect while retries are still succeeding eventually", async () => {
+  const artifact = createServer((_req, res) => {
+    res.writeHead(200)
+    res.end("ok")
+  })
+  await new Promise<void>((resolve, reject) => {
+    artifact.once("error", reject)
+    artifact.listen(0, "127.0.0.1", resolve)
+  })
+  const artifactUrl = `http://127.0.0.1:${listeningPort(artifact)}`
+
+  const daemon = await startFakeDaemon({ failReconnectsForSandbox: { sandboxId: "sandbox_prior", failCount: 2 } })
+  const killed: string[] = []
+  try {
+    const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+    await resumeRoomSession(client, {
+      cwd: "/home/user",
+      label: "rdv-room",
+      adapter: "claude-code",
+      model: "claude-sonnet-5",
+      prompt: "hello again",
+      appDir: "/home/user/apps/rdv-hello",
+      port: 3210,
+      sandboxId: "sandbox_prior",
+      artifactUrl,
+      attempts: 4,
+      retryDelayMs: 1,
+      killOrphanSandbox: async (sandboxId) => {
+        killed.push(sandboxId)
+      },
+    })
+    assert.deepEqual(killed, [])
+  } finally {
+    await daemon.close()
+    await new Promise<void>((resolve, reject) => artifact.close(err => (err ? reject(err) : resolve())))
+  }
+})
+
+test("bootRoomSession cost-protects a known reuseSandboxId when the spawn fails outright", async () => {
+  const deadPort = await closedPort()
+  const killed: string[] = []
+  const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${deadPort}`, token: undefined })
+  await assert.rejects(
+    bootRoomSession(client, {
+      cwd: "/home/user",
+      label: "rdv-room",
+      adapter: "claude-code",
+      model: "claude-sonnet-5",
+      prompt: "hello room",
+      appDir: "/home/user/apps/rdv-hello",
+      port: 3210,
+      reuseSandboxId: "sandbox_prior",
+      killOrphanSandbox: async (sandboxId) => {
+        killed.push(sandboxId)
+      },
+    }),
+  )
+  assert.deepEqual(killed, ["sandbox_prior"])
+})
+
+test("bootRoomSession never calls the orphan killer for a genuinely fresh boot (no reuseSandboxId)", async () => {
+  const deadPort = await closedPort()
+  const killed: string[] = []
+  const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${deadPort}`, token: undefined })
+  await assert.rejects(
+    bootRoomSession(client, {
+      cwd: "/home/user",
+      label: "rdv-room",
+      adapter: "claude-code",
+      model: "claude-sonnet-5",
+      prompt: "hello room",
+      appDir: "/home/user/apps/rdv-hello",
+      port: 3210,
+      killOrphanSandbox: async (sandboxId) => {
+        killed.push(sandboxId)
+      },
+    }),
+  )
+  assert.deepEqual(killed, [])
+})

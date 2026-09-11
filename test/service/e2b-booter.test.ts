@@ -61,6 +61,14 @@ test("E2bBooter.boot sends the sandbox spec, appServe and the pre-warm reuse id 
   assert.ok(isRecord(body))
   if (!isRecord(body)) return
 
+  // `cwd` is forwarded verbatim into the BOX's own `agent_start` (never
+  // resolved against this host's filesystem) — it must be a path that
+  // exists INSIDE the e2b image, never this process's own `process.cwd()`
+  // (the host repo checkout), which does not exist in the box and makes the
+  // box's own agent-cli spawn fail with ENOENT.
+  assert.equal(body.cwd, "/home/user")
+  assert.notEqual(body.cwd, process.cwd())
+
   assert.ok(isRecord(body.sandbox))
   if (!isRecord(body.sandbox)) return
   assert.equal(body.sandbox.provider, "e2b")

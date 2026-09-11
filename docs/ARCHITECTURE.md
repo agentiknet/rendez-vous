@@ -629,6 +629,55 @@ session history server-side is still unverified, and the box's own
 box's session out, resume locally) remains the variant that depends on nothing
 OpenAI has to give us. Test both; claim neither yet.
 
+**Credential scope is a room-spec policy, not a global decision.**
+
+You do not have to choose "device-auth every sandbox" or "ship my key
+everywhere". agentproto already models the middle: a **named auth profile**
+(`~/.agentproto/auth-profiles.json`, `auth_profile_list`), referenced at spawn
+as `access: { profileRef }`. A profile stores non-secret metadata plus a key
+identity; the secret itself never appears in a listing.
+
+This host already carries one for Codex:
+
+```
+{ id: "codex-local", endpoint: "openai", method: "oauth-bearer",
+  source: "codex", label: "My Codex login",
+  models: ["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"],
+  keyStatus: "self-refreshing" }
+```
+
+`keyStatus` is the axis that matters:
+
+- **`self-refreshing`** — read fresh from the local login on every spawn
+  (`~/.codex/auth.json` for codex, the Keychain for claude-code). agentproto
+  stores nothing. Host-bound.
+- **`stored`** — held in agentproto's own credential store behind a
+  `credentialRef`, with a one-way fingerprint. Reusable, portable across boxes.
+
+So the room spec carries an `auth` field with three modes:
+
+| mode | who approves | stored where | friction | bills |
+| --- | --- | --- | --- | --- |
+| `profile` | nobody, uses `profileRef` | host profile store | none | room owner |
+| `device` | every member, every room | nowhere, dies with the box | per room | each member |
+| `device-once` | member, first room only | that member's minted profile | once ever | each member |
+
+**`device-once` is the default we want.** A member device-auths the first time
+they ever join a room; we mint them a profile from it; every later room
+references `profileRef` and they are never asked again. One approval, N rooms,
+per-member billing, and no pooled credential anywhere.
+
+Reserve `device` for a room spec that declares itself sensitive, and `profile`
+for solo or development rooms where the operator is the only human.
+
+**One consequence worth designing around:** subscription auth gates the model
+list. The `codex-local` profile allows only `gpt-5.6-luna | sol | terra` — the
+ChatGPT-tier models — while the adapter manifest lists 38 including
+`gpt-5.2-codex`. An API key reaches the API models; a subscription reaches the
+subscription models. A room spec that names a model must therefore be
+compatible with the auth mode it asks for, and the spec validator should catch
+that mismatch at boot rather than at first turn.
+
 **The experiment that decides how loud we are.** The Agents API docs do not
 specify what happens when input arrives mid-turn (§1.3). Two outcomes, both
 good: it queues, and the room is portable; or it errors, and our layer has to
