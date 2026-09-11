@@ -25,7 +25,12 @@ export interface HealthResult {
  *  booting a fresh one — the provider must support it (e2b does). */
 export interface SandboxSpecInput {
   readonly provider: string
-  readonly config: Record<string, string | number | boolean>
+  /** `setupCommands`/`installPackages` are the e2b provider's own array-typed
+   *  config fields (`E2bSandboxConfig`, `provider.ts`) — `setupCommands` runs
+   *  BEFORE the box's daemon starts and before any `app_install`/`appServe`
+   *  call, on every boot AND every reconnect, so it's the deterministic
+   *  seeding hook `src/sandbox/app-seed.ts` targets. */
+  readonly config: Record<string, string | number | boolean | string[]>
   readonly reuse?: string
   readonly extraPorts?: number[]
 }

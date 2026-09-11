@@ -1,10 +1,13 @@
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
+import { fileURLToPath } from "node:url"
 import { test } from "node:test"
 import { DaemonClient } from "../../src/daemon/client.ts"
 import { bootRoomSession, resumeRoomSession } from "../../src/sandbox/boot.ts"
 import { startFakeDaemon } from "../daemon/fake-daemon.ts"
 import { listeningPort } from "./support.ts"
+
+const ROOM_ARTIFACT_APP_DIR = fileURLToPath(new URL("../../apps/room-artifact", import.meta.url))
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -70,6 +73,34 @@ test("bootRoomSession forwards reuseSandboxId as sandbox.reuse", async () => {
       extraPorts: [3210],
       reuse: "sandbox_prior",
     })
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("bootRoomSession with seedFromDir sends a single deterministic setupCommands entry, no agent turn", async () => {
+  const daemon = await startFakeDaemon({})
+  try {
+    const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+    await bootRoomSession(client, {
+      cwd: "/home/user",
+      label: "rdv-room",
+      adapter: "claude-code",
+      model: "claude-sonnet-5",
+      prompt: "hello room",
+      appDir: "/home/user/apps/rdv-hello",
+      port: 3210,
+      seedFromDir: ROOM_ARTIFACT_APP_DIR,
+    })
+    const req = daemon.requestsReceived.find(r => r.path === "/sessions/agent")
+    assert.ok(req !== undefined)
+    assert.ok(isRecord(req.body))
+    assert.ok(isRecord(req.body.sandbox))
+    assert.ok(isRecord(req.body.sandbox.config))
+    const setupCommands = req.body.sandbox.config.setupCommands
+    assert.ok(Array.isArray(setupCommands))
+    assert.equal(setupCommands.length, 1)
+    assert.ok(typeof setupCommands[0] === "string" && setupCommands[0].includes("rdv-room-artifact"))
   } finally {
     await daemon.close()
   }

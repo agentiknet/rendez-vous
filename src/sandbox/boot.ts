@@ -1,21 +1,22 @@
 /**
  * Sandbox boot and resume (M4, architecture.md §3 "Sandbox plus artifact",
- * §4.2 R8/R9). e2b only — R9: `box` exposes no port, so no artifact URL is
- * possible on that provider.
+ * §4.2 R8/R9; docs/ARTIFACT.md "Artifact strategy"). e2b only — R9: `box`
+ * exposes no port, so no artifact URL is possible on that provider.
  *
- * `bootRoomSession` is a single spawn: `sandbox` + `appServe` together. This
- * only succeeds when `appDir` ALREADY EXISTS inside the sandbox filesystem
- * — `appServe`'s `app_install` step runs before the agent's own prompt ever
- * gets a turn (ground-truthed in session-spawn.ts: `startSandboxAppServe`
- * runs immediately after the box boots, and the initial prompt is only
- * delivered once that whole spawn call returns). A fresh box has nothing at
- * `appDir` yet, so callers booting for the first time must populate it in a
- * separate, `appServe`-less spawn first (see scripts/prove-sandbox.ts) and
- * pass that spawn's `sandboxId` back in as `reuseSandboxId` here. See
- * docs/UPSTREAM.md for the full writeup.
+ * `bootRoomSession` is a single spawn: `sandbox` + `appServe` together, with
+ * the app directory seeded DETERMINISTICALLY via `sandbox.config
+ * .setupCommands` (`src/sandbox/app-seed.ts`) rather than by an agent turn.
+ * `setupCommands` run before the box's daemon starts and before
+ * `app_install`/`appServe` ever runs (ground-truthed in `provider.ts`'s
+ * `ensureDaemonHealthy`), on every boot AND every reconnect — so passing
+ * `seedFromDir` makes every call in this module self-sufficient: no
+ * "populate it first in a separate spawn" step, no LLM in the loop. See
+ * docs/ARTIFACT.md for the full ranking against the alternatives, and
+ * docs/UPSTREAM.md for the two-spawn approach this replaced.
  */
 
-import type { DaemonClient, SpawnAgentInput, SpawnAgentResult } from "../daemon/client.ts"
+import type { DaemonClient, SandboxSpecInput, SpawnAgentInput, SpawnAgentResult } from "../daemon/client.ts"
+import { buildAppSeedScript } from "./app-seed.ts"
 import { probeArtifact } from "./artifact.ts"
 
 const SANDBOX_PROVIDER = "e2b"
@@ -61,6 +62,25 @@ async function spawnWithReconnectRetry(
   throw new Error("spawnWithReconnectRetry: attempts must be >= 1")
 }
 
+/** Build the `sandbox` spec, seeding `appDir` deterministically via
+ *  `setupCommands` when `seedFromDir` is given. Included on every call this
+ *  module makes (boot, live reuse, or a bare resume reconnect) — harmless
+ *  when omitted, and idempotent (a plain overwrite) when present, per
+ *  `setupCommands`'s own "runs on every boot/connect" contract. */
+function buildSandboxSpec(opts: {
+  readonly port: number
+  readonly appDir: string
+  readonly seedFromDir: string | undefined
+  readonly reuse: string | undefined
+}): SandboxSpecInput {
+  return {
+    provider: SANDBOX_PROVIDER,
+    config: opts.seedFromDir !== undefined ? { setupCommands: [buildAppSeedScript(opts.seedFromDir, opts.appDir)] } : {},
+    extraPorts: [opts.port],
+    ...(opts.reuse !== undefined ? { reuse: opts.reuse } : {}),
+  }
+}
+
 export interface RoomSessionResult {
   readonly sessionId: string
   readonly sandboxId: string | undefined
@@ -86,6 +106,11 @@ export interface BootRoomSessionOpts {
   readonly appDir: string
   readonly port: number
   readonly reuseSandboxId?: string
+  /** Local (this host's) absolute path to an agentproto app source dir
+   *  (e.g. `apps/room-artifact`) to seed into `appDir` deterministically
+   *  before `appServe` installs it. Omit only when `appDir` is already
+   *  populated some other way. */
+  readonly seedFromDir?: string
 }
 
 export async function bootRoomSession(client: DaemonClient, opts: BootRoomSessionOpts): Promise<RoomSessionResult> {
@@ -95,12 +120,12 @@ export async function bootRoomSession(client: DaemonClient, opts: BootRoomSessio
     cwd: opts.cwd,
     label: opts.label,
     prompt: opts.prompt,
-    sandbox: {
-      provider: SANDBOX_PROVIDER,
-      config: {},
-      extraPorts: [opts.port],
-      ...(opts.reuseSandboxId !== undefined ? { reuse: opts.reuseSandboxId } : {}),
-    },
+    sandbox: buildSandboxSpec({
+      port: opts.port,
+      appDir: opts.appDir,
+      seedFromDir: opts.seedFromDir,
+      reuse: opts.reuseSandboxId,
+    }),
     appServe: { dir: opts.appDir, port: opts.port },
   })
   return {
@@ -131,6 +156,10 @@ export interface ResumeRoomSessionOpts {
    *  box's MCP layer to catch up to its already-healthy `/health` endpoint
    *  (see `isRetryableReconnectError`'s doc comment). */
   readonly retryDelayMs?: number
+  /** Same as `BootRoomSessionOpts.seedFromDir` — included on the bare
+   *  reconnect too (harmless: `setupCommands` re-runs idempotently on every
+   *  connect) and forwarded to the re-serve fallback below. */
+  readonly seedFromDir?: string
 }
 
 /**
@@ -149,12 +178,12 @@ export async function resumeRoomSession(client: DaemonClient, opts: ResumeRoomSe
       cwd: opts.cwd,
       label: opts.label,
       prompt: opts.prompt,
-      sandbox: {
-        provider: SANDBOX_PROVIDER,
-        config: {},
-        extraPorts: [opts.port],
+      sandbox: buildSandboxSpec({
+        port: opts.port,
+        appDir: opts.appDir,
+        seedFromDir: opts.seedFromDir,
         reuse: opts.sandboxId,
-      },
+      }),
     },
     opts.attempts ?? DEFAULT_RESUME_ATTEMPTS,
     opts.retryDelayMs ?? DEFAULT_RESUME_RETRY_DELAY_MS,
@@ -180,5 +209,6 @@ export async function resumeRoomSession(client: DaemonClient, opts: ResumeRoomSe
     appDir: opts.appDir,
     port: opts.port,
     reuseSandboxId: opts.sandboxId,
+    ...(opts.seedFromDir !== undefined ? { seedFromDir: opts.seedFromDir } : {}),
   })
 }
