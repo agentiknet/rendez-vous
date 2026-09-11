@@ -1,8 +1,8 @@
 import assert from "node:assert/strict"
 import { createServer, type Server } from "node:http"
-import type { AddressInfo } from "node:net"
 import { test } from "node:test"
 import { probeArtifact } from "../../src/sandbox/artifact.ts"
+import { listeningPort } from "./support.ts"
 
 async function withServer(
   handler: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => void,
@@ -79,8 +79,7 @@ test("probeArtifact reports dead on connection refused", async () => {
     server.once("error", reject)
     server.listen(0, "127.0.0.1", resolve)
   })
-  const address = server.address() as AddressInfo
-  const port = address.port
+  const port = listeningPort(server)
   await new Promise<void>((resolve, reject) => server.close(err => (err ? reject(err) : resolve())))
 
   assert.equal(await probeArtifact(`http://127.0.0.1:${port}`), "dead")

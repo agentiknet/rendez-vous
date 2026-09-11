@@ -1,10 +1,10 @@
 import assert from "node:assert/strict"
 import { createServer } from "node:http"
-import type { AddressInfo } from "node:net"
 import { test } from "node:test"
 import { DaemonClient } from "../../src/daemon/client.ts"
 import { bootRoomSession, resumeRoomSession } from "../../src/sandbox/boot.ts"
 import { startFakeDaemon } from "../daemon/fake-daemon.ts"
+import { listeningPort } from "./support.ts"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -16,7 +16,7 @@ async function closedPort(): Promise<number> {
     server.once("error", reject)
     server.listen(0, "127.0.0.1", resolve)
   })
-  const port = (server.address() as AddressInfo).port
+  const port = listeningPort(server)
   await new Promise<void>((resolve, reject) => server.close(err => (err ? reject(err) : resolve())))
   return port
 }
@@ -84,7 +84,7 @@ test("resumeRoomSession returns without re-serving when the artifact probes aliv
     artifact.once("error", reject)
     artifact.listen(0, "127.0.0.1", resolve)
   })
-  const artifactUrl = `http://127.0.0.1:${(artifact.address() as AddressInfo).port}`
+  const artifactUrl = `http://127.0.0.1:${listeningPort(artifact)}`
 
   const daemon = await startFakeDaemon({})
   try {

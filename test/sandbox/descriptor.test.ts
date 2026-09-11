@@ -19,9 +19,9 @@
 
 import assert from "node:assert/strict"
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http"
-import type { AddressInfo } from "node:net"
 import { test } from "node:test"
 import { DaemonClient } from "../../src/daemon/client.ts"
+import { listeningPort } from "./support.ts"
 
 const REAL_KILLED_SANDBOX_DESCRIPTOR = {
   id: "sess_251a34c1",
@@ -91,9 +91,9 @@ async function withServer(
     server.once("error", reject)
     server.listen(0, "127.0.0.1", resolve)
   })
-  const address = server.address() as AddressInfo
+  const port = listeningPort(server)
   try {
-    await run(`http://127.0.0.1:${address.port}`)
+    await run(`http://127.0.0.1:${port}`)
   } finally {
     await new Promise<void>((resolve, reject) => server.close(err => (err ? reject(err) : resolve())))
   }
