@@ -25,6 +25,10 @@ export interface Env {
   readonly whatsappNumber: string | undefined
   /** Telegram bot username for join links, without the leading `@`. Undefined when not configured. */
   readonly telegramBot: string | undefined
+  /** SMS number for join links (M11, Twilio via agentpush, docs/AGENTPUSH.md
+   *  §9), digits only, no leading `+`. Same validation as `whatsappNumber`.
+   *  Undefined when not configured. */
+  readonly smsNumber: string | undefined
   /**
    * Base URL of the agentpush API our own outbound transport calls directly,
    * no trailing slash. The daemon never reads an agentpush URL from its own
@@ -161,6 +165,7 @@ export function loadEnv(source: Source): Env {
     agentModel: readString(source, "RDV_AGENT_MODEL", "claude-sonnet-5"),
     whatsappNumber: readWhatsappNumber(source, "RDV_WHATSAPP_NUMBER"),
     telegramBot: readTelegramBot(source, "RDV_TELEGRAM_BOT"),
+    smsNumber: readWhatsappNumber(source, "RDV_SMS_NUMBER"),
     agentpushUrl: readOptionalUrl(source, "RDV_AGENTPUSH_URL"),
     agentpushKey: readOptionalString(source, "RDV_AGENTPUSH_KEY"),
     agentpushWebhookSecret: readOptionalString(source, "RDV_AGENTPUSH_WEBHOOK_SECRET"),

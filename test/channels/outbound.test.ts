@@ -95,6 +95,16 @@ function telegramMember(): Member {
   }
 }
 
+function smsMember(): Member {
+  return {
+    id: "mem_4",
+    displayName: "Dana",
+    tier: "messenger",
+    address: { provider: "sms", source: "sms", contactRef: "+15559876543" },
+    joinedAt: new Date().toISOString(),
+  }
+}
+
 function roomWebMember(): Member {
   return {
     id: "mem_2",
@@ -202,6 +212,45 @@ test("sendMedia uploads the png then sends it as media for a whatsapp member", a
           },
         ],
       },
+    })
+  } finally {
+    await fake.close()
+  }
+})
+
+test("send posts /tools/send_message with channel: sms for an sms member (docs/AGENTPUSH.md §9.2)", async () => {
+  const fake = await startFakeAgentpush()
+  try {
+    const transport = new AgentpushTransport({ baseUrl: fake.url, apiKey: "apk_test" })
+    await transport.send(smsMember(), { text: "hello from sms", artifactUrl: undefined })
+
+    assert.equal(fake.requests.length, 1)
+    const req = fake.requests[0]
+    assert.ok(req)
+    assert.equal(req.path, "/tools/send_message")
+    assert.deepEqual(req.body, {
+      to: { channel: "sms", address: "+15559876543" },
+      content: { text: "hello from sms" },
+    })
+  } finally {
+    await fake.close()
+  }
+})
+
+test("sendMedia is unconditionally caption-only for sms — Twilio's driver declares media: false (docs/AGENTPUSH.md §9.4)", async () => {
+  const fake = await startFakeAgentpush()
+  try {
+    const transport = new AgentpushTransport({ baseUrl: fake.url, apiKey: "apk_test" })
+    const png = Uint8Array.from([1, 2, 3])
+    await transport.sendMedia(smsMember(), png, "join the room: https://rdv.example.com/r/RDV-7F3K")
+
+    assert.equal(fake.requests.length, 1)
+    const req = fake.requests[0]
+    assert.ok(req)
+    assert.equal(req.path, "/tools/send_message")
+    assert.deepEqual(req.body, {
+      to: { channel: "sms", address: "+15559876543" },
+      content: { text: "join the room: https://rdv.example.com/r/RDV-7F3K" },
     })
   } finally {
     await fake.close()

@@ -6,6 +6,7 @@ const BASE_OPTS = {
   publicUrl: "https://rdv.example.com",
   whatsappNumber: "15551234567",
   telegramBot: "rdv_bot",
+  smsNumber: "15551234567",
 }
 
 test("joinLinks builds the web link from publicUrl and normalized code", () => {
@@ -39,6 +40,17 @@ test("joinLinks leaves whatsapp undefined when no number is configured", () => {
 test("joinLinks leaves telegram undefined when no bot is configured", () => {
   const links = joinLinks("RDV-7F3K", { ...BASE_OPTS, telegramBot: undefined })
   assert.equal(links.telegram, undefined)
+  assert.equal(links.web, "https://rdv.example.com/r/RDV-7F3K")
+})
+
+test("joinLinks builds the sms deep link with the ?&body= form", () => {
+  const links = joinLinks("RDV-7F3K", BASE_OPTS)
+  assert.equal(links.sms, "sms:+15551234567?&body=join%20RDV-7F3K")
+})
+
+test("joinLinks leaves sms undefined when no number is configured", () => {
+  const links = joinLinks("RDV-7F3K", { ...BASE_OPTS, smsNumber: undefined })
+  assert.equal(links.sms, undefined)
   assert.equal(links.web, "https://rdv.example.com/r/RDV-7F3K")
 })
 

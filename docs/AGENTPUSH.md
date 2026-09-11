@@ -450,3 +450,85 @@ service, an operator action against agentpush's own dashboard/API.
 - For the subject line to read `"Room RDV-7F3K update"` instead of the
   generic fallback, whoever creates an email member should set
   `address.source` to the room's code.
+
+## 9. SMS (a fourth surface, via Twilio) — M11
+
+**"For fun."** Same messaging-tier machinery as WhatsApp/Telegram — no new
+envelope, no new signature scheme. Ground-truthed against
+`packages/messaging/src/providers/twilio/twilio.provider.ts` and
+`apps/api/src/app.ts`.
+
+### 9.1 The channel string is `"sms"`
+
+`TwilioConfig.channel: "sms" | "rcs"` (`twilio.provider.ts:19`) — this
+milestone only wires `"sms"` (RCS is the same driver, different Twilio
+product, out of scope). `"sms"` is also already a valid `send_message`
+channel per `MAIL_DOMAIN_CHANNELS`
+(`packages/tools/src/lib/channel-alias.ts:21-27`, which despite the name
+covers every non-`contact_id` send target, not just mail).
+
+### 9.2 Outbound — identical `send_message` call, E.164 address
+
+```json
+{ "to": { "channel": "sms", "address": "+15551234567" }, "content": { "text": "..." } }
+```
+`TwilioProvider.send()` passes `recipient` straight through as the `To`
+param on Twilio's `Messages.json` (`twilio.provider.ts:86-115`) — Twilio
+requires E.164, so `address` must already be in that form; same convention
+as WhatsApp.
+
+### 9.3 Inbound — the SAME `MessagingInboundEnvelope`, `channel: "sms"`
+
+Unlike email (§8), Twilio SMS has a **live webhook**, not a poll loop:
+`POST /inbound/sms` (`apps/api/src/app.ts:1557-1615`) verifies
+`X-Twilio-Signature` (Twilio's own HMAC-SHA1-over-URL-plus-sorted-params
+scheme, `twilio.provider.ts:152-198,205-216` — irrelevant to us, agentpush
+verifies it before ever building a notify), parses Twilio's form-encoded
+webhook (`TwilioProvider.parse()`, `twilio.provider.ts:134-150`:
+`id` = `MessageSid` (or `SmsSid`), `from` = the `From` param — a bare E.164
+number, no display name — `content.text` = the `Body` param), then calls
+`push.inbound(msg, "sms", workspaceId)` →
+`fireMessagingInbound(deps, "sms", msg, workspaceId)`
+(`app.ts:1606-1612`) — **the exact same `dispatchMessagingInbound` /
+`buildMessagingInboundEnvelope` path §3 documents for WhatsApp/Telegram**,
+just with `channel: "sms"`. Same envelope shape, same
+`X-Agentpush-Signature` HMAC on the notify POST, same at-least-once
+delivery semantics. No new parsing code needed beyond accepting the
+channel value — `parseAgentpushWebhook` (`src/channels/agentpush/inbound.ts`)
+now treats `"sms"` as a third valid messenger channel alongside
+`"whatsapp"`/`"telegram"`.
+
+### 9.4 No MMS — media is unimplemented for this driver, not merely unproven
+
+`TwilioProvider.capabilities.media` is hardcoded `false`
+(`twilio.provider.ts:41-54`), and the class defines neither
+`uploadMediaFromBuffer` nor `uploadMediaFromUrl` — grepped the whole file,
+zero hits. This isn't "MMS might work, unverified" the way Telegram's media
+gap was framed in §2 — it's the driver's own capability flag disproving it.
+`AgentpushTransport.sendMedia` for `"sms"` is therefore unconditionally
+caption-only, same code path as Telegram (§2), for a stronger reason: the
+source doesn't just lack a working upload method, it actively declares
+`media: false`.
+
+### 9.5 Join link — `sms:` URI, no agentpush involvement
+
+Unlike WhatsApp/Telegram's `wa.me`/`t.me` deep links (which round-trip
+through agentpush or the provider's own app), the SMS join link is a bare
+`sms:` URI the phone's own Messages app opens directly — agentpush is
+irrelevant to *joining*, only to messages sent *after* joining. Format:
+`sms:+<number>?&body=<url-encoded "join RDV-XXXX">` — the `?&body=` form
+(question mark immediately followed by `&`) is the one shape that prefills
+the body on both iOS and Android; `?body=` alone is Android-only and iOS
+silently drops the body. Driven by `RDV_SMS_NUMBER` (env.ts), validated
+identically to `RDV_WHATSAPP_NUMBER` (E.164 digits, optional leading `+`
+stripped).
+
+### 9.6 What the service executor needs to wire
+
+- `CompositeTransport` (or wherever transports are routed by
+  `member.address.provider`) needs `"sms"` added alongside
+  `"whatsapp"`/`"telegram"` to route through the same `AgentpushTransport`
+  instance — no new transport class, `AgentpushTransport` already handles
+  all three.
+- The `joinLinks(...)` call site needs `smsNumber: env.smsNumber` added to
+  its options so the `sms` field gets populated.

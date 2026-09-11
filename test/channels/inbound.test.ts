@@ -77,6 +77,35 @@ test("valid signed telegram text becomes an envelope", () => {
   })
 })
 
+test("valid signed sms text becomes an envelope — same MessagingInboundEnvelope, channel: sms (docs/AGENTPUSH.md §9.3)", () => {
+  const body = JSON.stringify({
+    version: 1,
+    workspaceId: "acme",
+    channel: "sms",
+    from: "+15559876543",
+    conversationId: "+15559876543",
+    messageId: "SM1234567890",
+    text: "join RDV-7F3K",
+  })
+  const result = parseAgentpushWebhook({
+    rawBody: body,
+    headers: signedHeaders(body, SECRET),
+    secret: SECRET,
+  })
+  assert.deepEqual(result, {
+    ok: true,
+    envelope: {
+      provider: "sms",
+      source: "sms",
+      contactRef: "+15559876543",
+      displayName: "+15559876543",
+      text: "join RDV-7F3K",
+      messageId: "SM1234567890",
+      roomCodeHint: undefined,
+    },
+  })
+})
+
 test("bad signature is rejected with 401", () => {
   const body = JSON.stringify({ channel: "whatsapp", from: "+1", text: "hi", messageId: "m1" })
   const result = parseAgentpushWebhook({

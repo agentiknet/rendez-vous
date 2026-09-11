@@ -36,3 +36,23 @@ test("telegramBot accepts a bare username without @", () => {
   const env = loadEnv({ RDV_TELEGRAM_BOT: "rdv_bot" })
   assert.equal(env.telegramBot, "rdv_bot")
 })
+
+test("smsNumber is undefined when not configured", () => {
+  const env = loadEnv({})
+  assert.equal(env.smsNumber, undefined)
+})
+
+test("smsNumber strips a leading + and keeps digits", () => {
+  const env = loadEnv({ RDV_SMS_NUMBER: "+15551234567" })
+  assert.equal(env.smsNumber, "15551234567")
+})
+
+test("smsNumber accepts digits without a leading +", () => {
+  const env = loadEnv({ RDV_SMS_NUMBER: "15551234567" })
+  assert.equal(env.smsNumber, "15551234567")
+})
+
+test("smsNumber rejects non-digit characters", () => {
+  assert.throws(() => loadEnv({ RDV_SMS_NUMBER: "+1 555 123 4567" }))
+  assert.throws(() => loadEnv({ RDV_SMS_NUMBER: "abc123" }))
+})

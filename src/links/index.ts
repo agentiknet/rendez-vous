@@ -6,12 +6,14 @@ export interface JoinLinkOptions {
   publicUrl: string
   whatsappNumber: string | undefined
   telegramBot: string | undefined
+  smsNumber: string | undefined
 }
 
 export interface JoinLinks {
   web: string
   whatsapp: string | undefined
   telegram: string | undefined
+  sms: string | undefined
 }
 
 export function joinLinks(code: string, opts: JoinLinkOptions): JoinLinks {
@@ -26,6 +28,12 @@ export function joinLinks(code: string, opts: JoinLinkOptions): JoinLinks {
         ? undefined
         : `https://wa.me/${opts.whatsappNumber}?text=${encodeURIComponent(`join ${normalized}`)}`,
     telegram: opts.telegramBot === undefined ? undefined : `https://t.me/${opts.telegramBot}?start=${normalized}`,
+    // `?&body=` (not `?body=`) prefills the message body on both iOS and
+    // Android — `?body=` alone is silently dropped on iOS (docs/AGENTPUSH.md §9.5).
+    sms:
+      opts.smsNumber === undefined
+        ? undefined
+        : `sms:+${opts.smsNumber}?&body=${encodeURIComponent(`join ${normalized}`)}`,
   }
 }
 

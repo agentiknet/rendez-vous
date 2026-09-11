@@ -47,11 +47,14 @@
  * which agentpush itself sends unsigned.
  *
  * Deviation kept from M5, still deliberate: `provider` is narrowed to
- * `"whatsapp" | "telegram"` even though the real envelope's `channel` is an
- * unrestricted string across agentpush's whole provider set (`discord`,
- * `slack`, `sms`, `mail`, …) — Rendez-vous only supports messenger-tier
- * WhatsApp/Telegram today, so any other channel is a 400
- * (`unsupported_channel`), not a silently-accepted arbitrary source.
+ * `"whatsapp" | "telegram" | "sms"` even though the real envelope's
+ * `channel` is an unrestricted string across agentpush's whole provider set
+ * (`discord`, `slack`, `mail`, …) — Rendez-vous only supports these three
+ * messenger-tier channels today, so any other channel is a 400
+ * (`unsupported_channel`), not a silently-accepted arbitrary source. `"sms"`
+ * (M11, Twilio, docs/AGENTPUSH.md §9) flows through the identical
+ * `MessagingInboundEnvelope`/notify path as WhatsApp/Telegram — no separate
+ * parsing needed, just accepting the channel value.
  * `messageId` is still required (400 `missing_message_id` if absent),
  * matching the real type's guarantee (`ReceivedMessage.id` is always a
  * non-empty string) but re-checked defensively since an external payload is
@@ -71,7 +74,7 @@ import { isRecord, getStringField } from "../json.ts"
 import { verifyAgentpushSignature } from "./signature.ts"
 
 export interface InboundEnvelope {
-  provider: "whatsapp" | "telegram" | "email"
+  provider: "whatsapp" | "telegram" | "sms" | "email"
   source: string
   contactRef: string
   displayName: string
@@ -93,9 +96,9 @@ export interface ParseAgentpushWebhookInput {
 }
 
 const ENVELOPE_VERSION = 1
-const MESSENGER_CHANNELS: readonly string[] = ["whatsapp", "telegram"]
+const MESSENGER_CHANNELS: readonly string[] = ["whatsapp", "telegram", "sms"]
 
-function isMessengerChannel(value: string): value is "whatsapp" | "telegram" {
+function isMessengerChannel(value: string): value is "whatsapp" | "telegram" | "sms" {
   return MESSENGER_CHANNELS.includes(value)
 }
 

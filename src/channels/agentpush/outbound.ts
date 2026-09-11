@@ -32,16 +32,24 @@
  * locally-generated QR PNG has no public URL, Telegram degrades to a
  * caption-only `send_message`. This is a verified channel limitation, not a
  * hedge against an unknown contract.
+ *
+ * `"sms"` (M11, Twilio, docs/AGENTPUSH.md §9) routes through the identical
+ * `send_message` call as the other two, `channel: "sms"`. Its media
+ * fallback is unconditional, not just unverified: Twilio's driver declares
+ * `capabilities.media: false` and implements no upload method at all
+ * (`packages/messaging/src/providers/twilio/twilio.provider.ts:41-54`), so
+ * it shares Telegram's caption-only branch below rather than getting one of
+ * its own.
  */
 
 import type { OutboundMessage, Transport } from "../../fanout/types.ts"
 import type { Member } from "../../rooms/types.ts"
 import { AgentpushToolClient, type AgentpushToolClientOptions, isUploadMediaResult } from "./tools-client.ts"
 
-type MessengerProvider = "whatsapp" | "telegram"
+type MessengerProvider = "whatsapp" | "telegram" | "sms"
 
 function messengerProvider(provider: string): MessengerProvider | undefined {
-  return provider === "whatsapp" || provider === "telegram" ? provider : undefined
+  return provider === "whatsapp" || provider === "telegram" || provider === "sms" ? provider : undefined
 }
 
 export type AgentpushTransportOptions = AgentpushToolClientOptions
