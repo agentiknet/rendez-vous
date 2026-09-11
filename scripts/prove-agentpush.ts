@@ -14,6 +14,7 @@
  *   node scripts/prove-agentpush.ts
  */
 
+import { isRecord } from "../src/channels/json.ts"
 import { env } from "../src/env.ts"
 
 const TEST_CHANNEL = "whatsapp"
@@ -53,7 +54,7 @@ async function main(): Promise<void> {
   }
 
   const parsed: unknown = JSON.parse(text)
-  const status = typeof parsed === "object" && parsed !== null && "status" in parsed ? (parsed as { status: unknown }).status : undefined
+  const status = isRecord(parsed) ? parsed.status : undefined
   if (status === "blocked" || status === "failed") {
     console.error(`FAIL: agentpush did not send — status=${String(status)}`)
     process.exitCode = 1
