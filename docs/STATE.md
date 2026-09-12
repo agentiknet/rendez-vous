@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 03:05 UTC (05:05 local). Repo: this directory,
+Last updated: 2026-09-12 03:09 UTC (05:09 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -184,6 +184,8 @@ re-proven on a phone after `4e73786`.
 
 - `sess_1114ae10` rdv-up-sandbox-liveness, GLM: worktree `wt/sandbox-liveness` (upstream PR).
 - `sess_d233dc3a` rdv-up-app-serve-ui-path, GLM: worktree `wt/app-serve-ui-path` (upstream PR).
+- `sess_3051301c` rdv-polish-gaps, GLM: persist pending deliveries on the room, `send pdf to <member name>`,
+  artifactReady gates in `src/fanout/reader.ts` and the http.ts sanitize helper; owns deliverable.ts, rooms types/store, fanout/reader.ts.
 - `sess_0f657dd5` rdv-room-page, GLM: `src/web/**`, the `GET /r/:code/state` route only in
   `src/service/http.ts`, one helper in `daemon-extra.ts` if needed, `test/web/**`, `test/service/http.test.ts`.
 - `sess_b3541f0a` rdv-multimodal-ingress, GLM: `src/channels/media-ingress.ts`, channel
