@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 03:01 UTC (05:01 local). Repo: this directory,
+Last updated: 2026-09-12 03:05 UTC (05:05 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -147,9 +147,8 @@ Last updated: 2026-09-12 03:01 UTC (05:01 local). Repo: this directory,
 8. Deck — REBUILT as a pitch at `dbf938b` (13 pages: 9-slide arc problem /
    consequence / solution / it works / how / per-member credentials / work
    leaves the room / close, plus a 4-slide appendix). Both kits in `deck/out/`.
-   FORMAT FIX IN PROGRESS (executor rdv-deck-format, GLM): the pages render
-   portrait; Jeremy asked for slide format, so both kits are being re-rendered
-   as 16:9 landscape with the same content.
+   FORMAT: re-rendered as 16:9 landscape slides at `87f4623` (both kits in
+   `deck/out/`, `deck/rendez-vous.pdf` is the light kit).
    FOLLOW-UP once the deliverable-flow exercise lands: slide 8's caption in
    `deck/data.json` and the matching README note say the first live send
    bypassed the room's own commands; update them if the flow gets exercised.
