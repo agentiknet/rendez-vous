@@ -17,36 +17,40 @@ Rendez-vous
 ```
 We work together. Our AIs work in silos.
 
-AI is in your pocket, but only ever one pocket at a time. Two colleagues on the
-same task have two assistants that never talk, so you become the relay:
-screenshot, paste, repeat.
+Your AI is in your pocket. Your colleague's is in theirs. They never talk, so
+you end up being the relay: screenshot one chat, paste it into the other.
 
-Rendez-vous puts several people and several agents in one shared room. Text
-"new" to a bot and the room exists. Send the code and someone's phone is in it
-too. Nothing to install, no login to share.
+Rendez-vous is one shared room that several people and several agents work in
+at once, from the messaging app they already have open.
 
-The orchestrator is the only party that sees every thread, so it catches what a
-single-thread chatbot cannot. Julie sets a 12k budget from her phone. Tom sends
-a 16k venue from his. The agent spots the conflict and arbitrates. It solicits
-one member when only they have what it needs, and can answer privately while
-the others see that a private answer happened.
+Joining takes one message. You text "new" to a bot and the room exists. Send
+someone the code and their phone is in it. Nothing to install, nothing to sign
+up for, no login to share.
 
-The room models members, not humans, so a desktop agent joins through the same
-two endpoints as a person and is treated identically.
+The agent sees every thread at once. That is the thing a chatbot cannot do.
+Julie sets a 12k budget from her phone, Tom sends a 16k venue from his, and the
+agent catches the conflict and arbitrates it in front of both of them.
 
-Each room runs in its own e2b sandbox: real terminal, real files, public URL.
-The agent builds a PDF or puts a site online and everyone opens the same link.
-Nothing leaves the room until a member confirms the recipient and the content,
-and every send is logged with who asked and who confirmed.
+It can also talk to one person at a time. It asks Tom directly when only he has
+the photo. It can answer Julie privately, and the others see that a private
+answer happened without seeing what it said.
 
-Stack: TypeScript, no framework. Two open-source runtimes of ours do the heavy
-lifting: agentpush, our messaging unification runtime, puts Telegram, WhatsApp
-and email behind one API, inbound and outbound; agentproto, our orchestration
-layer, runs the agents and the sandboxes, consumed unmodified from npm. Plus
-OpenAI for speech, vision and voice replies, OpenRouter for the coding agents,
-e2b for the machine, and an MCP tool we expose so the agent renders on brand by
-construction. 500 tests green, and seven pull requests contributed upstream to
-agentproto during the hackathon.
+Agents join the same way people do. A desktop agent uses the same two endpoints
+as a human member, and the room cannot tell the difference.
+
+Every room gets a real machine. Its own sandbox, a real terminal, real files,
+and a public URL. The agent writes a PDF or puts a website online, and everyone
+opens the same link.
+
+Nothing leaves the room until someone says yes. The room shows the recipient
+and the document first, then waits. Every send is logged with who asked and who
+confirmed.
+
+Built on our two open-source runtimes. agentpush unifies the messaging, so
+Telegram, WhatsApp and email sit behind one API. agentproto runs the agents and
+the sandboxes, consumed unmodified from npm. Plus OpenAI for voice and vision,
+OpenRouter for the coding agents, e2b for the machine. 500 tests green, and
+seven pull requests contributed upstream to agentproto during the hackathon.
 ```
 
 ---
