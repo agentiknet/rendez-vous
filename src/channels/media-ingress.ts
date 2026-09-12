@@ -169,7 +169,23 @@ export async function normalizeInboundMedia(
     let record: IngressMediaRecord
     let line: string
 
-    if (item.size !== undefined && item.size > maxBytes) {
+    if (item.url === undefined) {
+      // No URL to fetch from — the provider sent only its own reference
+      // (every Telegram voice note and photo, see `parseMedia`). Resolving
+      // it needs that provider's credentials, which this service does not
+      // hold. Land the record and SAY SO: the member sees the turn was
+      // received and why it could not be read, instead of the silence this
+      // path used to produce.
+      const reference = item.providerMediaId ?? "no reference"
+      const reason = `no fetchable URL from the provider (reference: ${reference})`
+      record = await deps.store.saveIngress(new Uint8Array(0), {
+        kind,
+        source: item.providerMediaId ?? "",
+        mime: item.mimeType,
+        error: reason,
+      })
+      line = failureLine(kind, record.mediaId, reason)
+    } else if (item.size !== undefined && item.size > maxBytes) {
       const reason = `too large (${item.size} > ${maxBytes} bytes)`
       record = await deps.store.saveIngress(new Uint8Array(0), {
         kind,

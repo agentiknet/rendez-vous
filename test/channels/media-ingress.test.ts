@@ -80,12 +80,42 @@ test("kindForMediaType maps the free-string type to voice/image/file", () => {
   assert.equal(kindForMediaType("document"), "file")
 })
 
+test("a Telegram-shaped voice note with no url fans in a visible line instead of vanishing", async () => {
+  // The live failure of 2026-09-12: agentpush's Telegram driver sends a bare
+  // `file_id` and no url, so this item used to be dropped at parse, which
+  // emptied the array and sent the media-only message to the "ignored"
+  // path. No reply, no log line, no error anywhere. Whatever we cannot
+  // fetch, we still have to SAY.
+  const store = await freshMediaStore()
+  const result = await normalizeInboundMedia(
+    envelope({
+      provider: "telegram",
+      source: "telegram",
+      contactRef: "6371794295",
+      media: [
+        { type: "audio", providerMediaId: "AwACAgQAAx0CZ", url: undefined, mimeType: "audio/ogg", size: 8452 },
+      ],
+    }),
+    { store },
+  )
+
+  assert.equal(result.records.length, 1, "the record must land even though nothing could be fetched")
+  const record = result.records[0]
+  assert.ok(record !== undefined)
+  assert.equal(result.attributionSuffix, "voice")
+  assert.ok(result.text !== undefined, "a media-only turn must never normalize to nothing")
+  assert.match(result.text, /could not be fetched/, "the member is told the turn arrived and could not be read")
+  assert.match(result.text, /AwACAgQAAx0CZ/, "the provider reference is named, so the drop is diagnosable")
+  assert.equal(record.kind, "voice")
+  assert.equal(record.error, "no fetchable URL from the provider (reference: AwACAgQAAx0CZ)")
+})
+
 test("null providers: a voice note fans in the unavailable line and stores the record with source and mime", async () => {
   const store = await freshMediaStore()
   const host = await startProviderHost()
   const result = await normalizeInboundMedia(
     envelope({
-      media: [{ type: "audio", url: `${host}/audio.webm`, mimeType: "audio/webm", size: AUDIO_BYTES.length }],
+      media: [{ type: "audio", providerMediaId: undefined, url: `${host}/audio.webm`, mimeType: "audio/webm", size: AUDIO_BYTES.length }],
     }),
     { store },
   )
@@ -111,7 +141,7 @@ test("an image with null providers fans in the caption-unavailable line", async 
   const host = await startProviderHost()
   const result = await normalizeInboundMedia(
     envelope({
-      media: [{ type: "image", url: `${host}/img.jpg`, mimeType: "image/jpeg", size: IMAGE_BYTES.length }],
+      media: [{ type: "image", providerMediaId: undefined, url: `${host}/img.jpg`, mimeType: "image/jpeg", size: IMAGE_BYTES.length }],
     }),
     { store },
   )
@@ -129,7 +159,7 @@ test("a provider that returns text produces the transcript/caption line and fill
 
   const voice = await normalizeInboundMedia(
     envelope({
-      media: [{ type: "audio", url: `${host}/audio.webm`, mimeType: "audio/webm", size: AUDIO_BYTES.length }],
+      media: [{ type: "audio", providerMediaId: undefined, url: `${host}/audio.webm`, mimeType: "audio/webm", size: AUDIO_BYTES.length }],
     }),
     { store, stt: { transcribe: () => Promise.resolve("let's ship the blue version") } },
   )
@@ -141,7 +171,7 @@ test("a provider that returns text produces the transcript/caption line and fill
 
   const image = await normalizeInboundMedia(
     envelope({
-      media: [{ type: "image", url: `${host}/img.jpg`, mimeType: "image/jpeg", size: IMAGE_BYTES.length }],
+      media: [{ type: "image", providerMediaId: undefined, url: `${host}/img.jpg`, mimeType: "image/jpeg", size: IMAGE_BYTES.length }],
     }),
     { store, vision: { caption: () => Promise.resolve("screenshot of the error") } },
   )
@@ -158,7 +188,7 @@ test("oversize (envelope size and actual bytes both enforced) fans in a visible 
 
   const declared = await normalizeInboundMedia(
     envelope({
-      media: [{ type: "audio", url: `${host}/audio.webm`, mimeType: "audio/webm", size: 100 }],
+      media: [{ type: "audio", providerMediaId: undefined, url: `${host}/audio.webm`, mimeType: "audio/webm", size: 100 }],
     }),
     { store, maxBytes: 10 },
   )
@@ -170,7 +200,7 @@ test("oversize (envelope size and actual bytes both enforced) fans in a visible 
 
   const actual = await normalizeInboundMedia(
     envelope({
-      media: [{ type: "audio", url: `${host}/audio.webm`, mimeType: "audio/webm", size: undefined }],
+      media: [{ type: "audio", providerMediaId: undefined, url: `${host}/audio.webm`, mimeType: "audio/webm", size: undefined }],
     }),
     { store, maxBytes: 4 },
   )
@@ -183,7 +213,7 @@ test("a fetch failure (HTTP error, unreachable host) fans in a visible failure l
 
   const httpError = await normalizeInboundMedia(
     envelope({
-      media: [{ type: "audio", url: `${host}/boom`, mimeType: "audio/webm", size: undefined }],
+      media: [{ type: "audio", providerMediaId: undefined, url: `${host}/boom`, mimeType: "audio/webm", size: undefined }],
     }),
     { store },
   )
@@ -195,7 +225,7 @@ test("a fetch failure (HTTP error, unreachable host) fans in a visible failure l
 
   const unreachable = await normalizeInboundMedia(
     envelope({
-      media: [{ type: "image", url: "http://127.0.0.1:1/img.jpg", mimeType: "image/jpeg", size: undefined }],
+      media: [{ type: "image", providerMediaId: undefined, url: "http://127.0.0.1:1/img.jpg", mimeType: "image/jpeg", size: undefined }],
     }),
     { store },
   )
@@ -216,8 +246,8 @@ test("mixed kinds get the generic 'media' suffix and one line per item", async (
   const result = await normalizeInboundMedia(
     envelope({
       media: [
-        { type: "audio", url: `${host}/audio.webm`, mimeType: "audio/webm", size: undefined },
-        { type: "image", url: `${host}/img.jpg`, mimeType: "image/jpeg", size: undefined },
+        { type: "audio", providerMediaId: undefined, url: `${host}/audio.webm`, mimeType: "audio/webm", size: undefined },
+        { type: "image", providerMediaId: undefined, url: `${host}/img.jpg`, mimeType: "image/jpeg", size: undefined },
       ],
     }),
     { store },
@@ -233,7 +263,7 @@ test("a file-kind item fans in a plain file line with the media ref", async () =
   const store = await freshMediaStore()
   const result = await normalizeInboundMedia(
     envelope({
-      media: [{ type: "document", url: "https://cdn.example/x.bin", mimeType: "application/octet-stream", size: undefined }],
+      media: [{ type: "document", providerMediaId: undefined, url: "https://cdn.example/x.bin", mimeType: "application/octet-stream", size: undefined }],
     }),
     { store, fetch: () => Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)) }) },
   )
@@ -249,7 +279,7 @@ test("stored ingress records keep the source URL and mime and are readable back 
   const host = await startProviderHost()
   const result = await normalizeInboundMedia(
     envelope({
-      media: [{ type: "image", url: `${host}/img.jpg`, mimeType: "image/jpeg", size: IMAGE_BYTES.length }],
+      media: [{ type: "image", providerMediaId: undefined, url: `${host}/img.jpg`, mimeType: "image/jpeg", size: IMAGE_BYTES.length }],
     }),
     { store, vision: { caption: () => Promise.resolve("a cat") } },
   )

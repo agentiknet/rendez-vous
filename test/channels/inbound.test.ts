@@ -228,7 +228,7 @@ test("a media array rides along on a text message, parsed defensively", () => {
     messageId: "m-media-1",
     media: [
       { type: "image", url: "https://cdn.example/img.jpg", mimeType: "image/jpeg", size: 182734 },
-      { type: "garbage" }, // no url — unfetchable, skipped
+      { type: "garbage" }, // neither url nor providerMediaId — nothing to name, skipped
       "not-an-object", // skipped
     ],
   })
@@ -236,7 +236,35 @@ test("a media array rides along on a text message, parsed defensively", () => {
   assert.equal(result.ok, true)
   if (!result.ok || !("envelope" in result)) return
   assert.deepEqual(result.envelope.media, [
-    { type: "image", url: "https://cdn.example/img.jpg", mimeType: "image/jpeg", size: 182734 },
+    {
+      type: "image",
+      url: "https://cdn.example/img.jpg",
+      providerMediaId: undefined,
+      mimeType: "image/jpeg",
+      size: 182734,
+    },
+  ])
+})
+
+test("a Telegram voice note — providerMediaId and NO url — is kept, not swallowed", () => {
+  // The exact shape agentpush's Telegram driver emits: it parses the voice
+  // note correctly but sets only the raw `file_id`, because resolving a URL
+  // needs a `getFile` call that has no caller in that repo. This used to
+  // empty the media array, which with the accompanying empty text sent the
+  // whole message to the "ignored" path — a real voice note vanishing with
+  // no error on either side. Found live 2026-09-12.
+  const body = JSON.stringify({
+    channel: "telegram",
+    from: "6371794295",
+    text: "",
+    messageId: "m-media-voice",
+    media: [{ type: "audio", providerMediaId: "AwACAgQAAx0CZ", mimeType: "audio/ogg", size: 8452 }],
+  })
+  const result = parseAgentpushWebhook({ rawBody: body, headers: {}, secret: undefined })
+  assert.equal(result.ok, true)
+  if (!result.ok || !("envelope" in result)) return
+  assert.deepEqual(result.envelope.media, [
+    { type: "audio", url: undefined, providerMediaId: "AwACAgQAAx0CZ", mimeType: "audio/ogg", size: 8452 },
   ])
 })
 
@@ -253,11 +281,19 @@ test("a media-only message (empty text, media present) is an envelope with empty
   if (!result.ok || !("envelope" in result)) return
   assert.equal(result.envelope.text, "")
   assert.deepEqual(result.envelope.media, [
-    { type: "audio", url: "https://cdn.example/v.webm", mimeType: "audio/webm", size: 91021 },
+    {
+      type: "audio",
+      url: "https://cdn.example/v.webm",
+      providerMediaId: undefined,
+      mimeType: "audio/webm",
+      size: 91021,
+    },
   ])
 })
 
-test("empty text with only malformed media entries is still ignored", () => {
+test("empty text with media entries that name nothing at all is still ignored", () => {
+  // Still dropped: no url AND no providerMediaId means there is genuinely
+  // nothing to put in a failure line. This is the only remaining drop.
   const body = JSON.stringify({
     channel: "whatsapp",
     from: "+15551234567",
@@ -281,6 +317,12 @@ test("size that is not a finite non-negative number is dropped, not trusted", ()
   assert.equal(result.ok, true)
   if (!result.ok || !("envelope" in result)) return
   assert.deepEqual(result.envelope.media, [
-    { type: "image", url: "https://cdn.example/x.png", mimeType: "image/png", size: undefined },
+    {
+      type: "image",
+      url: "https://cdn.example/x.png",
+      providerMediaId: undefined,
+      mimeType: "image/png",
+      size: undefined,
+    },
   ])
 })

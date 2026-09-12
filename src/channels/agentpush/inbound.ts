@@ -78,7 +78,16 @@ export interface InboundMediaItem {
    *  `"voice"`, … (docs/AGENTPUSH.md §3). Kinded later by
    *  `kindForMediaType` (src/channels/media-ingress.ts), not here. */
   readonly type: string
-  readonly url: string
+  /** Absent for every Telegram voice note and photo — that driver sends a
+   *  `providerMediaId` and no URL (see `parseMedia`). Ingress turns an
+   *  item with no URL into a visible "could not be fetched" line rather
+   *  than dropping the turn. */
+  readonly url: string | undefined
+  /** The provider's own reference (Telegram `file_id`, …) when the envelope
+   *  carried one. Not resolvable from here — resolving a Telegram `file_id`
+   *  requires the bot token, which this service does not hold — but it
+   *  names the thing in the failure line so the drop is diagnosable. */
+  readonly providerMediaId: string | undefined
   readonly mimeType: string
   /** As sent by the provider, when present — used for an early oversize
    *  rejection before the bytes are fetched. Not trusted beyond that. */
@@ -122,22 +131,41 @@ function isMessengerChannel(value: string): value is "whatsapp" | "telegram" | "
 }
 
 /** Parse the additive `media` array (docs/AGENTPUSH.md §3:
- *  `[{ type, url, mimeType, size }]`). Entries missing `type` or `url` are
- *  unfetchable and unfetchable is unnormalizable, so they're dropped — an
- *  entry without a URL cannot even produce a failure line naming a real
- *  source. */
+ *  `[{ type, url, mimeType, size }]`).
+ *
+ *  This used to drop any entry without a `url`, reasoning that unfetchable
+ *  is unnormalizable. That reasoning was wrong in the one way that matters:
+ *  it made a real message vanish with no trace anywhere. **Telegram voice
+ *  notes and photos always arrive this way.** agentpush's Telegram driver
+ *  parses them correctly but sets only `providerMediaId` (the raw Telegram
+ *  `file_id`) and never a `url` — resolving one needs a `getFile` call that
+ *  has no caller in that repo (`packages/messaging/src/providers/telegram/
+ *  provider.ts:330-387`, `getMediaUrl` at `:235-245`, zero callers). So the
+ *  array emptied here, the accompanying text was `""`, and the message fell
+ *  to the "ignored" path: swallowed on both sides, each for a documented and
+ *  locally-reasonable cause, with no error raised anywhere. Found live
+ *  2026-09-12 when a voice note produced no reply and no log line.
+ *
+ *  An entry with a reference but no URL is now KEPT, with `url: undefined`.
+ *  Ingress turns it into a visible "could not be fetched" line naming the
+ *  reference, exactly like a failed download — the member is told, and the
+ *  turn is not lost. Only an entry with neither a URL nor a reference is
+ *  dropped: there is genuinely nothing to name. */
 function parseMedia(value: unknown): readonly InboundMediaItem[] {
   if (!Array.isArray(value)) return []
   const items: InboundMediaItem[] = []
   for (const entry of value) {
     if (!isRecord(entry)) continue
     const type = getStringField(entry, "type")
+    if (type === undefined) continue
     const url = getStringField(entry, "url")
-    if (type === undefined || url === undefined) continue
+    const providerMediaId = getStringField(entry, "providerMediaId")
+    if (url === undefined && providerMediaId === undefined) continue
     const sizeRaw = entry["size"]
     items.push({
       type,
       url,
+      providerMediaId,
       mimeType: getStringField(entry, "mimeType") ?? "application/octet-stream",
       size: typeof sizeRaw === "number" && Number.isFinite(sizeRaw) && sizeRaw >= 0 ? sizeRaw : undefined,
     })
