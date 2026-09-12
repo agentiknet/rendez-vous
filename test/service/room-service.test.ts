@@ -523,7 +523,7 @@ test("resume <code> on an active room whose session died out of band revives it,
   assert.ok(resumedRoom?.sessionId !== undefined)
 })
 
-test("a plain message from a known member fans in with queue:true and the [Name · tier] prefix", async () => {
+test("a plain message from a known member fans in with queue:true and the [Name · channel] prefix", async () => {
   const { service, daemon } = await buildHarness()
 
   const created = await service.handleInbound(alice("new"))
@@ -539,7 +539,7 @@ test("a plain message from a known member fans in with queue:true and the [Name 
   assert.ok(isRecord(body))
   if (!isRecord(body)) return
   assert.equal(body.queue, true)
-  assert.equal(body.prompt, "[Alice · messenger] what is the plan?")
+  assert.equal(body.prompt, "[Alice · whatsapp] what is the plan?")
 
   await service.stop()
 })

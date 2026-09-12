@@ -13,6 +13,14 @@ export interface Sender {
   readonly id: string
   readonly displayName: string
   readonly tier: Tier
+  /** The actual channel this member is on — `telegram`, `whatsapp`, `sms`,
+   *  `email`, `room-web`. Shown in the attribution instead of the tier when
+   *  known, because `tier` collapses Telegram and WhatsApp into the single
+   *  value `messenger`: with one human in the room on both, the agent saw
+   *  two identical `[Jeremy · messenger]` senders and had no way to tell
+   *  which surface to answer on. Optional so existing callers (and the
+   *  room-web tier, where tier and channel are the same thing) keep working. */
+  readonly channel?: string
 }
 
 /**
@@ -77,7 +85,10 @@ export function parseAudienceDirective(raw: string): AudienceDirective {
  *  silently (docs/MULTIMODAL.md, "one ingestion path stays the only path"). */
 export function attributeText(sender: Sender, raw: string, audience: ReplyAudience = "room"): string {
   const marker = audience === "sender-only" ? " · private" : ""
-  return `[${sender.displayName} · ${sender.tier}${marker}] ${raw}`
+  // Channel over tier: `messenger` is true of Telegram and WhatsApp alike, so
+  // one human present on both produced two indistinguishable senders.
+  const surface = sender.channel ?? sender.tier
+  return `[${sender.displayName} · ${surface}${marker}] ${raw}`
 }
 
 export async function fanIn(

@@ -80,9 +80,45 @@ export function parseWhisperSegments(text: string): RawSegment[] {
   return segments
 }
 
+/**
+ * Resolve a whisper target name against the room's members.
+ *
+ * Accepts either a bare display name (`Jeremy`) or a name qualified by its
+ * surface (`Jeremy · whatsapp`, also `Jeremy - whatsapp` / `Jeremy|whatsapp`).
+ *
+ * The qualified form exists because ONE HUMAN can be in the room on two
+ * channels — Telegram and WhatsApp — as two members with the same display
+ * name. A bare name then matched whichever joined first, silently: the
+ * private half of a reply went to one surface and the other saw only the
+ * "(whispered to Jeremy)" marker, with nothing anywhere saying the agent had
+ * aimed at the wrong device. Now the agent sees the channel in every
+ * attribution (`[Jeremy · whatsapp] …`, src/fanin/index.ts) and can name it
+ * back.
+ *
+ * A bare name that matches exactly one member still works, which is the
+ * common case. A bare name matching several is deliberately still the first
+ * match rather than an error — a whisper that lands on one of the human's own
+ * devices is far better than one that degrades to broadcast in front of the
+ * whole room.
+ */
 function findMember(members: Member[], name: string): Member | undefined {
-  const needle = name.toLowerCase()
-  return members.find((member) => member.displayName.toLowerCase() === needle)
+  const needle = name.trim().toLowerCase()
+
+  const exact = members.find((member) => member.displayName.toLowerCase() === needle)
+  if (exact !== undefined) return exact
+
+  // `<name> · <channel>` in any of the separators an agent is likely to emit.
+  const split = needle.split(/\s*[·|]\s*|\s+-\s+/)
+  if (split.length < 2) return undefined
+  const channel = split[split.length - 1]?.trim()
+  const bare = split.slice(0, -1).join(" · ").trim()
+  if (channel === undefined || bare.length === 0) return undefined
+
+  return members.find(
+    (member) =>
+      member.displayName.toLowerCase() === bare &&
+      (member.address.provider.toLowerCase() === channel || member.tier.toLowerCase() === channel),
+  )
 }
 
 /**

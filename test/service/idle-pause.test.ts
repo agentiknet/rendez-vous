@@ -165,7 +165,9 @@ test("a message to a paused room resumes it, and the message still fans in with 
   assert.ok(isRecord(body))
   if (!isRecord(body)) return
   assert.equal(body.queue, true)
-  assert.equal(body.prompt, "[Alice · messenger] are you still there?")
+  // Attribution names the CHANNEL, not the tier: `messenger` covers both
+  // Telegram and WhatsApp, so one human on both was indistinguishable.
+  assert.equal(body.prompt, "[Alice · whatsapp] are you still there?")
 })
 
 test("resume <code> on an active room is a no-op that replies with room status", async () => {

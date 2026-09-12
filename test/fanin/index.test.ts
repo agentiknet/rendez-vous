@@ -12,6 +12,38 @@ test("attributeText prefixes displayName and tier", () => {
   assert.equal(attributeText(bob, "hi there"), "[Bob · email] hi there")
 })
 
+// --- one human, two channels -------------------------------------------
+// `tier` is `messenger` for Telegram AND WhatsApp, so a person present on
+// both produced two identical `[Jeremy · messenger]` senders and the agent
+// had no way to tell which surface to answer on — or which device a whisper
+// would land on.
+
+test("attributeText names the CHANNEL when known, not the tier", () => {
+  const onTelegram: Sender = { id: "m1", displayName: "Jeremy", tier: "messenger", channel: "telegram" }
+  const onWhatsapp: Sender = { id: "m2", displayName: "Jeremy", tier: "messenger", channel: "whatsapp" }
+
+  assert.equal(attributeText(onTelegram, "hello"), "[Jeremy · telegram] hello")
+  assert.equal(attributeText(onWhatsapp, "hello"), "[Jeremy · whatsapp] hello")
+})
+
+test("the two surfaces of one person are distinguishable in the transcript", () => {
+  const onTelegram: Sender = { id: "m1", displayName: "Jeremy", tier: "messenger", channel: "telegram" }
+  const onWhatsapp: Sender = { id: "m2", displayName: "Jeremy", tier: "messenger", channel: "whatsapp" }
+
+  assert.notEqual(attributeText(onTelegram, "same words"), attributeText(onWhatsapp, "same words"))
+})
+
+test("the private marker still comes last, after the channel", () => {
+  const onWhatsapp: Sender = { id: "m2", displayName: "Jeremy", tier: "messenger", channel: "whatsapp" }
+
+  assert.equal(attributeText(onWhatsapp, "just me", "sender-only"), "[Jeremy · whatsapp · private] just me")
+})
+
+test("a sender with no channel falls back to its tier", () => {
+  // room-web members, and any caller that predates the field.
+  assert.equal(attributeText(alice, "hello"), "[Alice · messenger] hello")
+})
+
 // --- who the answer is for -------------------------------------------
 // The agent could always direct a reply (whisper). The member could not.
 // `room` must stay the default: a shared agent that quietly starts

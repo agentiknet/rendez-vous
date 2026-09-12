@@ -416,7 +416,10 @@ export class RoomService {
       return { kind: "no-session" }
     }
 
-    const result = await fanIn(this.client, room.sessionId, member, text)
+    // `channel` so the attribution names the SURFACE, not the tier: one
+    // human in the room on both Telegram and WhatsApp is otherwise two
+    // identical `[Name · messenger]` senders (src/fanin/index.ts).
+    const result = await fanIn(this.client, room.sessionId, { ...member, channel: member.address.provider }, text)
     await this.touchActivity(room.code)
     return { kind: "sent", member, result }
   }
@@ -594,7 +597,7 @@ export class RoomService {
       return { kind: "message", room, member }
     }
 
-    const result = await fanIn(this.client, room.sessionId, member, input.text)
+    const result = await fanIn(this.client, room.sessionId, { ...member, channel: member.address.provider }, input.text)
     await this.touchActivity(room.code)
     if (!result.ok) {
       await this.transport.send(member, {
