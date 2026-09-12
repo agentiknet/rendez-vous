@@ -1,8 +1,10 @@
 import type { RoomStore } from "../rooms/store.ts"
+import type { Ask, Member, Room } from "../rooms/types.ts"
 import { publicArtifactUrl } from "../service/artifact-proxy.ts"
 import { renderForTier } from "./render.ts"
 import type { FanoutRecord, Transport } from "./types.ts"
-import { renderWhisperForMember, resolveWhisperSegments } from "./whisper.ts"
+import { askMarkerForOthers, askTextForTarget, resolveAskSegments, type ResolvedTurnSegment } from "./ask.ts"
+import { renderWhisperForMember, resolveWhisperSegments, type ResolvedSegment } from "./whisper.ts"
 
 const INITIAL_BACKOFF_MS = 250
 const MAX_BACKOFF_MS = 5000
@@ -33,6 +35,41 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
       { once: true },
     )
   })
+}
+
+/** One pre-resolved piece of a turn: either an ask (target already matched),
+ *  or a broadcast slice whose whisper blocks are resolved once, up front, and
+ *  then rendered per member. */
+type TurnPiece =
+  | { kind: "ask"; target: Member; text: string }
+  | { kind: "text"; segments: ResolvedSegment[] }
+
+function buildTurnPieces(segments: ResolvedTurnSegment[], members: Member[]): TurnPiece[] {
+  const pieces: TurnPiece[] = []
+  for (const segment of segments) {
+    if (segment.kind === "ask") {
+      pieces.push({ kind: "ask", target: segment.target, text: segment.text })
+      continue
+    }
+    pieces.push({ kind: "text", segments: resolveWhisperSegments(segment.text, members) })
+  }
+  return pieces
+}
+
+/** The text one member should see for a turn: their own asks as a private
+ *  "(the room is waiting on you)" line, everyone else's asks collapsed to the
+ *  one-line open marker, and broadcast/whisper text rendered exactly as
+ *  before (docs/MIDDLEMAN.md §3). */
+function renderTurnForMember(pieces: TurnPiece[], member: Member): string {
+  const parts: string[] = []
+  for (const piece of pieces) {
+    if (piece.kind === "ask") {
+      parts.push(piece.target.id === member.id ? askTextForTarget(piece.text) : askMarkerForOthers(piece.target, piece.text))
+      continue
+    }
+    parts.push(renderWhisperForMember(piece.segments, member))
+  }
+  return parts.join("\n")
 }
 
 export class RoomFanout {
@@ -123,6 +160,32 @@ export class RoomFanout {
     }
   }
 
+  /** Records every newly-opened ask on the room (docs/MIDDLEMAN.md §3): ids
+   *  `a1, a2, …` per room, `toMemberId` the member id (names collide), status
+   *  `open`. Happens once, on open — later turns neither re-record these nor
+   *  re-emit their marker. Unmatched-name asks never reach here (they fell
+   *  back to broadcast in `resolveAskSegments`), so no phantom wait is ever
+   *  recorded on nobody. */
+  private async recordAsks(code: string, room: Room, segments: ResolvedTurnSegment[]): Promise<void> {
+    const existing = room.asks ?? []
+    const created: Ask[] = []
+    for (const segment of segments) {
+      if (segment.kind !== "ask") continue
+      created.push({
+        id: `a${existing.length + created.length + 1}`,
+        toMemberId: segment.target.id,
+        what: segment.text,
+        askedAt: new Date().toISOString(),
+        status: "open",
+        answeredBy: undefined,
+        answeredAt: undefined,
+        mediaId: undefined,
+      })
+    }
+    if (created.length === 0) return
+    await this.store.update(code, { asks: [...existing, ...created] })
+  }
+
   private async flush(code: string, text: string, seq: number): Promise<void> {
     const room = this.store.get(code)
     if (room === undefined) return
@@ -142,16 +205,20 @@ export class RoomFanout {
     const artifactChanged = hasSeenArtifact ? previousArtifactUrl !== artifactUrl : artifactUrl !== undefined
     this.lastArtifactUrl.set(code, artifactUrl)
 
-    // A whisper is a convention in the agent's own text, not a separate
-    // record kind (the box has no tool access to target a member directly —
-    // see architecture.md §9.3). Resolve it once per flush, then render each
-    // member's own view of the same turn: broadcast text verbatim, their own
-    // whisper in full, everyone else's collapsed to a visible marker.
-    const segments = resolveWhisperSegments(text, room.members)
+    // A whisper and an ask are both conventions in the agent's own text, not
+    // separate record kinds (the box has no tool access to target a member
+    // directly — see architecture.md §9.3). Ask blocks are extracted first
+    // (and recorded on the room below), whisper blocks are resolved on the
+    // broadcast remainder; then each member sees their own view of the same
+    // turn: broadcast text verbatim, their own whisper/ask in full, everyone
+    // else's collapsed to a visible marker (docs/MIDDLEMAN.md §3).
+    const turnSegments = resolveAskSegments(text, room.members)
+    await this.recordAsks(code, room, turnSegments)
+    const pieces = buildTurnPieces(turnSegments, room.members)
 
     await Promise.allSettled(
       room.members.map(async (member) => {
-        const memberText = renderWhisperForMember(segments, member)
+        const memberText = renderTurnForMember(pieces, member)
         const message = renderForTier(member.tier, memberText, artifactUrl, artifactChanged)
         if (message === undefined) return
         await this.transport.send(member, message)

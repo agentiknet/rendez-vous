@@ -402,6 +402,131 @@ test("artifactReady === false gates the artifact line: no URL at all until the r
   await fanout.stopAll()
 })
 
+test("one turn with two asks, a whisper, and broadcast: N asks recorded as a1..aN, targets get the waiting-on-you line, others get the marker (docs/MIDDLEMAN.md step ii)", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const alice = await store.addMember(room.code, memberInput("Alice", "messenger", "+1"))
+  const bob = await store.addMember(room.code, memberInput("Bob", "messenger", "+2"))
+  await store.update(room.code, { sessionId: "sess-1" })
+
+  const source = new FakeSource()
+  const transport = new FakeTransport()
+  const fanout = new RoomFanout({ store, transport, source: source.read() })
+
+  const reply = [
+    "Collecting pieces now.",
+    "[[whisper to Alice]]",
+    "quiet note",
+    "[[/whisper]]",
+    "[[ask Alice]]",
+    "the product shot",
+    "[[/ask]]",
+    "[[ask Bob]]",
+    "the one-line positioning",
+    "[[/ask]]",
+    "Anyone with anything else, say so.",
+  ].join("\n")
+  source.push({ seq: 1, kind: "text-delta", text: reply })
+  source.push({ seq: 2, kind: "turn-end" })
+
+  fanout.start(room.code)
+
+  await waitFor(() => transport.sends.length === 2)
+
+  const toAlice = transport.sends.find((send) => send.memberId === alice.id)
+  const toBob = transport.sends.find((send) => send.memberId === bob.id)
+  assert.equal(
+    toAlice?.text,
+    [
+      "Collecting pieces now.",
+      "(private) quiet note",
+      "(the room is waiting on you) the product shot",
+      "(waiting on Bob: the one-line positioning)",
+      "Anyone with anything else, say so.",
+    ].join("\n"),
+  )
+  assert.equal(
+    toBob?.text,
+    [
+      "Collecting pieces now.",
+      "(the agent whispered to Alice)",
+      "(waiting on Alice: the product shot)",
+      "(the room is waiting on you) the one-line positioning",
+      "Anyone with anything else, say so.",
+    ].join("\n"),
+  )
+
+  const asks = store.get(room.code)?.asks ?? []
+  assert.equal(asks.length, 2)
+  assert.equal(asks[0]?.id, "a1")
+  assert.equal(asks[0]?.toMemberId, alice.id, "toMemberId is the member id, not the name")
+  assert.equal(asks[0]?.what, "the product shot")
+  assert.equal(asks[0]?.status, "open")
+  assert.equal(asks[1]?.id, "a2")
+  assert.equal(asks[1]?.toMemberId, bob.id)
+
+  await fanout.stopAll()
+})
+
+test("the open marker is emitted once, on open only: a later plain turn does not repeat it", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const alice = await store.addMember(room.code, memberInput("Alice", "messenger", "+1"))
+  await store.update(room.code, { sessionId: "sess-1" })
+
+  const source = new FakeSource()
+  const transport = new FakeTransport()
+  const fanout = new RoomFanout({ store, transport, source: source.read() })
+
+  const reply = ["Working.", "[[ask Alice]]", "the product shot", "[[/ask]]"].join("\n")
+  source.push({ seq: 1, kind: "text-delta", text: reply })
+  source.push({ seq: 2, kind: "turn-end" })
+
+  fanout.start(room.code)
+  await waitFor(() => transport.sends.length === 1)
+  assert.equal(transport.sends[0]?.memberId, alice.id)
+  assert.equal(transport.sends[0]?.text, "Working.\n(the room is waiting on you) the product shot")
+  await waitFor(() => (store.get(room.code)?.asks ?? []).length === 1)
+
+  source.push({ seq: 3, kind: "text-delta", text: "Still collecting." })
+  source.push({ seq: 4, kind: "turn-end" })
+  await waitFor(() => transport.sends.length === 2)
+  assert.equal(transport.sends[1]?.text, "Still collecting.", "the marker must not repeat on later turns")
+  assert.equal((store.get(room.code)?.asks ?? []).length, 1, "no second ask recorded either")
+
+  await fanout.stopAll()
+})
+
+test("a malformed ask block records nothing and delivers plain broadcast text; an unmatched name records nothing and falls back visibly", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  await store.addMember(room.code, memberInput("Alice", "messenger", "+1"))
+  await store.update(room.code, { sessionId: "sess-1" })
+
+  const source = new FakeSource()
+  const transport = new FakeTransport()
+
+  const malformed = ["Before.", "[[ask Alice]]", "never closed", "still going"].join("\n")
+  source.push({ seq: 1, kind: "text-delta", text: malformed })
+  source.push({ seq: 2, kind: "turn-end" })
+  const unmatched = ["Start.", "[[ask Dave]]", "the thing", "[[/ask]]"].join("\n")
+  source.push({ seq: 3, kind: "text-delta", text: unmatched })
+  source.push({ seq: 4, kind: "turn-end" })
+
+  const fanout = new RoomFanout({ store, transport, source: source.read() })
+  fanout.start(room.code)
+  await waitFor(() => transport.sends.length === 2)
+
+  assert.equal(transport.sends[0]?.text, malformed, "malformed block folds back into broadcast text untouched")
+  assert.equal(transport.sends[1]?.text, "Start.\n(ask target not found: Dave)\nthe thing")
+  assert.equal(store.get(room.code)?.asks?.length ?? 0, 0, "neither fallback records an ask")
+
+  await fanout.stopAll()
+})
+
 test("artifact url is not repeated on a later flush when it has not changed", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)
