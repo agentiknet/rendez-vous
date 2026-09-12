@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 01:52 UTC (03:52 local). Repo: this directory,
+Last updated: 2026-09-12 01:33 UTC (03:33 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -130,8 +130,6 @@ re-proven on a phone after `4e73786`.
 - `sess_9726365f` rdv-box-liveness, sonnet: `src/service/box-liveness.ts`,
   `room-service.ts`, `booter.ts`, `src/sandbox/boot.ts`, their tests, one
   RUNBOOK section. Fenced from fanout, web, http.ts, artifact-proxy, deliverable.
-- `sess_8cfaa0a7` rdv-morning-email, sonnet: `deck/out/` renders, `scripts/send-deck-email.ts`,
-  one line in `docs/STATE.md`, a section in `docs/REHEARSAL.md`. Recipient jeremy@agentik.net only.
 - `sess_54be45ab` rdv-up-agent-prompt-queue, GLM: worktree `wt/agent-prompt-queue`.
 - `sess_c0291dc5` rdv-up-session-liveness, GLM: worktree `wt/session-liveness`.
 - `sess_452f3bc7` rdv-up-mcp-proxy-auth, GLM: worktree `wt/mcp-proxy-auth`.
