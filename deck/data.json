@@ -1,0 +1,136 @@
+[
+  {
+    "type": "title",
+    "isTitle": true,
+    "title": "Rendez-vous",
+    "subtitle": "One room, one agent, one artifact — many humans, on the surfaces they already use.",
+    "page": "1 / 11"
+  },
+  {
+    "type": "statement",
+    "isStatement": true,
+    "eyebrow": "The week",
+    "title": "The sandbox is now a commodity.",
+    "bullets": [
+      "OpenAI's Agents API: nine sandbox partners, one API call (2026-09-10).",
+      "Every one of them is single-principal — one key, one developer, one session."
+    ],
+    "highlight": "The uncontested ground isn't the sandbox. It's the room around it.",
+    "page": "2 / 11"
+  },
+  {
+    "type": "list",
+    "isList": true,
+    "eyebrow": "The primitive",
+    "title": "Room",
+    "bullets": [
+      "Code — RDV-7F3K, a durable handle",
+      "Members — many humans, many surfaces",
+      "Tiers — messenger, email, room-web",
+      "One session — the one agent turn-loop",
+      "One artifact URL — stable, public, live"
+    ],
+    "page": "3 / 11"
+  },
+  {
+    "type": "ladder",
+    "isLadder": true,
+    "eyebrow": "The fidelity ladder",
+    "title": "Three tiers, one room",
+    "ladderRows": [
+      { "tier": "1", "surface": "WhatsApp / Telegram", "sends": "plain text turns", "receives": "final reply + artifact URL, terse", "latency": "seconds" },
+      { "tier": "2", "surface": "Email", "sends": "reply-to-thread turns", "receives": "per-turn digest + artifact link", "latency": "minutes" },
+      { "tier": "3", "surface": "Laptop web room", "sends": "turns, permission answers", "receives": "full transcript + live artifact iframe", "latency": "live" }
+    ],
+    "caption": "Telegram and laptop are already two real surfaces.",
+    "page": "4 / 11"
+  },
+  {
+    "type": "timeline",
+    "isTimeline": true,
+    "eyebrow": "Run 3 — what actually happened",
+    "title": "A real phone, a real operator, one artifact",
+    "timelineItems": [
+      { "time": "0s", "label": "Alice's “new” on real Telegram — room created" },
+      { "time": "86.5s", "label": "Cold boot — session + artifact ready (4th and final boot budget)" },
+      { "time": "+~20s", "label": "Bob joins from the laptop room view" },
+      { "time": "live", "label": "Attribution confirmed in the stream: [Bob · room-web], [6371794295 · messenger]" },
+      { "time": "~33s", "label": "Agent finds and edits the artifact, unaided" }
+    ],
+    "caption": "Curl-verified at every step. Delivery to the phone: operator-confirmed.",
+    "page": "5 / 11"
+  },
+  {
+    "type": "findings",
+    "isFindings": true,
+    "eyebrow": "The strongest finding",
+    "title": "One shape, four independent bugs",
+    "findingsItems": [
+      { "n": "1", "label": "queue: true omitted → a mid-turn prompt is silently dropped" },
+      { "n": "2", "label": "the resume cursor stays frozen → every reply after a resume vanishes" },
+      { "n": "3", "label": "an account-pinned inbound route → never fires, filtered out silently" },
+      { "n": "4", "label": "the agent proposes to rebuild a Gmail capability it already held" }
+    ],
+    "highlight": "None crash. All look like working code or correct config.",
+    "caption": "This is evidence you only get by running it.",
+    "page": "6 / 11"
+  },
+  {
+    "type": "statement",
+    "isStatement": true,
+    "eyebrow": "A designed position",
+    "title": "Credentials are per-member, not per-room",
+    "bullets": [
+      "A shared room holding one key shares it with everyone who has the code.",
+      "Our position: each member attaches their own tools over rendezvous — nothing inherited.",
+      "Revocation is an unpair, not a key rotation — there was never a shared secret to rotate."
+    ],
+    "page": "7 / 11"
+  },
+  {
+    "type": "code",
+    "isCode": true,
+    "eyebrow": "Phase 2",
+    "title": "Second brain is a parameter",
+    "bullets": [
+      "Same box. Same filesystem. Same public artifact URL.",
+      "19 installed adapters, all ACP, verified via adapter_list."
+    ],
+    "code": "agent_start({\n  adapter: \"codex\",\n  model:   \"gpt-5.2-codex\",\n  sandbox: { provider: \"e2b\" },\n  appServe: { dir: \"...\", port: 3210 },\n})",
+    "caption": "Pending the codex proof — not yet run live.",
+    "page": "8 / 11"
+  },
+  {
+    "type": "statement",
+    "isStatement": true,
+    "eyebrow": "Is this a cheat?",
+    "title": "Built on our own open-source runtime",
+    "bullets": [
+      "Unmodified. Installed from npm. No fork, no vendored copy.",
+      "The room layer is every line that's new — the judged artifact.",
+      "8 upstream findings, shipped as a maintainer write-up (docs/UPSTREAM.md)."
+    ],
+    "page": "9 / 11"
+  },
+  {
+    "type": "list",
+    "isList": true,
+    "eyebrow": "Honest limits",
+    "title": "What was simulated, what was observed",
+    "bullets": [
+      "Runs 1–2: simulated inbound, no phone, no agentpush workspace. Run 3: real Telegram + web, live.",
+      "Paused e2b boxes expire in 20–60 min — the ledger keeps calling them “paused” regardless.",
+      "We share the default workspace's Telegram routing — its existing responder route can fire alongside ours on the same message, risking a double reply.",
+      "WhatsApp: not provisioned. No number, no key.",
+      "Phase 2 pairing-back: untested — box-to-broker egress, which side mints the token, post-pairing scope."
+    ],
+    "page": "10 / 11"
+  },
+  {
+    "type": "closing",
+    "isClosing": true,
+    "title": "The room is the primitive.",
+    "subtitle": "The runtime is a detail.",
+    "page": "11 / 11"
+  }
+]

@@ -1,0 +1,371 @@
+---
+template: true
+name: rendez-vous-pitch-deck
+version: 1.0.0
+description: Rendez-vous pitch deck — the room is the primitive, the runtime is a detail.
+variables:
+  title: "Rendez-vous"
+sources:
+  slides:
+    kind: file
+    path: "data.json"
+---
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>{{title}}</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      body {
+        font-family: var(--font-body-family, 'Poppins', sans-serif);
+        background: var(--color-background, #0A2447);
+        color: var(--color-ink, #FFFFFF);
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+
+      .slide {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        width: 100vw;
+        min-height: 100vh;
+        break-inside: avoid;
+        page-break-inside: avoid;
+        padding: 4.5rem 5rem;
+        box-sizing: border-box;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+
+      .slide + .slide {
+        break-before: page;
+        page-break-before: always;
+      }
+
+      .slide--center {
+        align-items: center;
+        text-align: center;
+      }
+
+      .eyebrow {
+        font-family: var(--font-label-family, 'Poppins', sans-serif);
+        font-size: var(--font-label-size, 0.75rem);
+        font-weight: var(--font-label-weight, 600);
+        letter-spacing: var(--font-label-letter-spacing, 0.06em);
+        text-transform: uppercase;
+        color: var(--color-accent, #7FA9DC);
+        margin-bottom: 1.25rem;
+      }
+
+      h1 {
+        font-family: var(--font-h1-family, 'Poppins', sans-serif);
+        font-size: var(--font-h1-size, 2.25rem);
+        font-weight: var(--font-h1-weight, 700);
+        line-height: var(--font-h1-line-height, 1.12);
+        letter-spacing: var(--font-h1-letter-spacing, -0.015em);
+        color: var(--color-ink, #FFFFFF);
+        max-width: 44rem;
+        margin-bottom: 2rem;
+      }
+
+      .slide--center h1 {
+        font-family: var(--font-display-family, 'Poppins', sans-serif);
+        font-size: var(--font-display-size, 3rem);
+        font-weight: var(--font-display-weight, 700);
+        line-height: var(--font-display-line-height, 1.08);
+        letter-spacing: var(--font-display-letter-spacing, -0.02em);
+        color: var(--color-accent, #7FA9DC);
+        max-width: 48rem;
+        margin: 0 auto 1.25rem;
+      }
+
+      .subtitle {
+        font-family: var(--font-h2-family, 'Poppins', sans-serif);
+        font-size: 1.35rem;
+        line-height: 1.5;
+        color: var(--color-ink-muted, #A9BDD6);
+        max-width: 34rem;
+        margin: 0 auto;
+      }
+
+      ul.bullets {
+        list-style: none;
+        max-width: 42rem;
+      }
+
+      ul.bullets li {
+        position: relative;
+        font-family: var(--font-body-family, 'Poppins', sans-serif);
+        font-size: 1.15rem;
+        line-height: 1.5;
+        color: var(--color-ink-muted, #A9BDD6);
+        padding-left: 1.5rem;
+        margin-bottom: 1.1rem;
+      }
+
+      ul.bullets li::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0.5em;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--color-accent, #7FA9DC);
+      }
+
+      .highlight {
+        margin-top: 1.5rem;
+        border-left: 3px solid var(--color-accent, #7FA9DC);
+        padding: 1rem 1.5rem;
+        background: var(--color-surface, #123057);
+        border-radius: 8px;
+        max-width: 42rem;
+      }
+
+      .highlight p {
+        font-family: var(--font-h2-family, 'Poppins', sans-serif);
+        font-size: 1.35rem;
+        font-weight: 600;
+        line-height: 1.4;
+        color: var(--color-ink, #FFFFFF);
+      }
+
+      table.ladder {
+        border-collapse: collapse;
+        width: 100%;
+        max-width: 52rem;
+      }
+
+      table.ladder th {
+        font-family: var(--font-label-family, 'Poppins', sans-serif);
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--color-ink-faint, #6C84A3);
+        text-align: left;
+        padding: 0 1rem 0.75rem 0;
+        border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.14));
+      }
+
+      table.ladder td {
+        font-family: var(--font-body-family, 'Poppins', sans-serif);
+        font-size: 0.95rem;
+        line-height: 1.4;
+        color: var(--color-ink-muted, #A9BDD6);
+        padding: 1rem 1rem 1rem 0;
+        border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.14));
+        vertical-align: top;
+      }
+
+      table.ladder td.tier {
+        font-family: var(--font-h2-family, 'Poppins', sans-serif);
+        font-weight: 700;
+        font-size: 1.3rem;
+        color: var(--color-accent, #7FA9DC);
+        width: 2rem;
+      }
+
+      .timeline {
+        max-width: 46rem;
+      }
+
+      .timeline-row {
+        display: flex;
+        align-items: baseline;
+        gap: 1.5rem;
+        margin-bottom: 1.1rem;
+      }
+
+      .timeline-time {
+        font-family: var(--font-mono-family, ui-monospace, monospace);
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: var(--color-accent, #7FA9DC);
+        min-width: 5rem;
+        flex-shrink: 0;
+        text-align: right;
+      }
+
+      .timeline-label {
+        font-family: var(--font-body-family, 'Poppins', sans-serif);
+        font-size: 1.05rem;
+        line-height: 1.4;
+        color: var(--color-ink-muted, #A9BDD6);
+      }
+
+      .findings {
+        max-width: 46rem;
+      }
+
+      .findings-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 1.25rem;
+        margin-bottom: 1rem;
+      }
+
+      .findings-n {
+        font-family: var(--font-display-family, 'Poppins', sans-serif);
+        font-size: 1.75rem;
+        font-weight: 700;
+        color: var(--color-accent, #7FA9DC);
+        min-width: 2rem;
+      }
+
+      .findings-label {
+        font-family: var(--font-body-family, 'Poppins', sans-serif);
+        font-size: 1.1rem;
+        line-height: 1.45;
+        color: var(--color-ink-muted, #A9BDD6);
+        padding-top: 0.15rem;
+      }
+
+      pre.code {
+        font-family: var(--font-mono-family, ui-monospace, monospace);
+        font-size: 0.95rem;
+        line-height: 1.55;
+        color: var(--color-ink, #FFFFFF);
+        background: var(--color-surface-raised, #1B3B66);
+        border: 1px solid var(--color-border, rgba(255,255,255,0.14));
+        border-radius: 8px;
+        padding: 1.25rem 1.5rem;
+        max-width: 42rem;
+        margin-top: 1rem;
+        white-space: pre;
+      }
+
+      .caption {
+        font-family: var(--font-caption-family, 'Poppins', sans-serif);
+        font-size: var(--font-caption-size, 0.8125rem);
+        color: var(--color-ink-faint, #6C84A3);
+        margin-top: 1.5rem;
+        max-width: 42rem;
+      }
+
+      .page-num {
+        position: absolute;
+        bottom: 1.6rem;
+        right: 2rem;
+        font-family: var(--font-caption-family, 'Poppins', sans-serif);
+        font-size: 0.7rem;
+        color: var(--color-ink-faint, #6C84A3);
+      }
+
+      .kicker {
+        position: absolute;
+        bottom: 1.6rem;
+        left: 2rem;
+        font-family: var(--font-label-family, 'Poppins', sans-serif);
+        font-size: 0.7rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--color-ink-faint, #6C84A3);
+      }
+    </style>
+  </head>
+  <body>
+    {{#slides}}
+    <div class="slide{{#isTitle}} slide--center{{/isTitle}}{{#isClosing}} slide--center{{/isClosing}}">
+
+      {{#isTitle}}
+      <h1>{{title}}</h1>
+      <p class="subtitle">{{subtitle}}</p>
+      {{/isTitle}}
+
+      {{#isClosing}}
+      <h1>{{title}}</h1>
+      <p class="subtitle">{{subtitle}}</p>
+      {{/isClosing}}
+
+      {{#isStatement}}
+      <div class="eyebrow">{{eyebrow}}</div>
+      <h1>{{title}}</h1>
+      <ul class="bullets">
+        {{#bullets}}<li>{{.}}</li>{{/bullets}}
+      </ul>
+      {{#highlight}}<div class="highlight"><p>{{highlight}}</p></div>{{/highlight}}
+      {{/isStatement}}
+
+      {{#isList}}
+      <div class="eyebrow">{{eyebrow}}</div>
+      <h1>{{title}}</h1>
+      <ul class="bullets">
+        {{#bullets}}<li>{{.}}</li>{{/bullets}}
+      </ul>
+      {{/isList}}
+
+      {{#isLadder}}
+      <div class="eyebrow">{{eyebrow}}</div>
+      <h1>{{title}}</h1>
+      <table class="ladder">
+        <thead>
+          <tr>
+            <th>Tier</th><th>Surface</th><th>Sends</th><th>Receives</th><th>Latency</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{#ladderRows}}
+          <tr>
+            <td class="tier">{{tier}}</td>
+            <td>{{surface}}</td>
+            <td>{{sends}}</td>
+            <td>{{receives}}</td>
+            <td>{{latency}}</td>
+          </tr>
+          {{/ladderRows}}
+        </tbody>
+      </table>
+      {{#caption}}<p class="caption">{{caption}}</p>{{/caption}}
+      {{/isLadder}}
+
+      {{#isTimeline}}
+      <div class="eyebrow">{{eyebrow}}</div>
+      <h1>{{title}}</h1>
+      <div class="timeline">
+        {{#timelineItems}}
+        <div class="timeline-row">
+          <div class="timeline-time">{{time}}</div>
+          <div class="timeline-label">{{label}}</div>
+        </div>
+        {{/timelineItems}}
+      </div>
+      {{#caption}}<p class="caption">{{caption}}</p>{{/caption}}
+      {{/isTimeline}}
+
+      {{#isFindings}}
+      <div class="eyebrow">{{eyebrow}}</div>
+      <h1>{{title}}</h1>
+      <div class="findings">
+        {{#findingsItems}}
+        <div class="findings-row">
+          <div class="findings-n">{{n}}</div>
+          <div class="findings-label">{{label}}</div>
+        </div>
+        {{/findingsItems}}
+      </div>
+      {{#highlight}}<div class="highlight"><p>{{highlight}}</p></div>{{/highlight}}
+      {{#caption}}<p class="caption">{{caption}}</p>{{/caption}}
+      {{/isFindings}}
+
+      {{#isCode}}
+      <div class="eyebrow">{{eyebrow}}</div>
+      <h1>{{title}}</h1>
+      <ul class="bullets">
+        {{#bullets}}<li>{{.}}</li>{{/bullets}}
+      </ul>
+      <pre class="code">{{code}}</pre>
+      {{#caption}}<p class="caption">{{caption}}</p>{{/caption}}
+      {{/isCode}}
+
+      <div class="kicker">Rendez-vous</div>
+      <div class="page-num">{{page}}</div>
+    </div>
+    {{/slides}}
+  </body>
+</html>
