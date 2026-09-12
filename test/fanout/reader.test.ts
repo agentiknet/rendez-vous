@@ -245,6 +245,63 @@ test("artifact url is announced on the first flush after boot when the room alre
   await fanout.stopAll()
 })
 
+test("a reader stops retrying and removes itself once isAlive reports the session gone, and a later start() attaches a fresh one", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  await store.addMember(room.code, memberInput("Alice", "messenger", "+1"))
+  await store.update(room.code, { sessionId: "sess-1" })
+
+  const source = new FakeSource()
+  source.failNext(new Error("simulated: session gone"))
+  const transport = new FakeTransport()
+  let sessionAlive = false
+  const fanout = new RoomFanout({
+    store,
+    transport,
+    source: source.read(),
+    isAlive: () => Promise.resolve(sessionAlive),
+  })
+
+  fanout.start(room.code)
+  // Give the failed read + isAlive check a moment to land and self-terminate,
+  // instead of retrying forever against a session that is confirmed gone.
+  await new Promise((resolve) => setTimeout(resolve, 50))
+
+  // The old reader must have removed itself from the readers map — prove it
+  // black-box: a fresh start() actually attaches a new reader and delivers a
+  // real turn, which would never happen if start() still thought one was running.
+  sessionAlive = true
+  fanout.start(room.code)
+  source.push({ seq: 1, kind: "text-delta", text: "back online" })
+  source.push({ seq: 2, kind: "turn-end" })
+  await waitFor(() => transport.sends.length === 1)
+  assert.equal(transport.sends[0]?.text, "back online")
+
+  await fanout.stopAll()
+})
+
+test("a reader keeps retrying with backoff when isAlive still reports the session alive after a source error", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  await store.addMember(room.code, memberInput("Alice", "messenger", "+1"))
+  await store.update(room.code, { sessionId: "sess-1" })
+
+  const source = new FakeSource()
+  source.failNext(new Error("transient connection drop"))
+  const transport = new FakeTransport()
+  const fanout = new RoomFanout({ store, transport, source: source.read(), isAlive: () => Promise.resolve(true) })
+
+  fanout.start(room.code)
+  source.push({ seq: 1, kind: "text-delta", text: "after reconnect" })
+  source.push({ seq: 2, kind: "turn-end" })
+  await waitFor(() => transport.sends.length === 1, 5000)
+  assert.equal(transport.sends[0]?.text, "after reconnect")
+
+  await fanout.stopAll()
+})
+
 test("artifact url is not repeated on a later flush when it has not changed", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)

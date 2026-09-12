@@ -61,7 +61,13 @@ async function buildServer(): Promise<{ baseUrl: string; daemon: ExtendedFakeDae
   const store = await RoomStore.open(dir)
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
-  const service = new RoomServiceCtor({ store, client, booter, transport: new MemoryTransport() })
+  const service = new RoomServiceCtor({
+    store,
+    client,
+    booter,
+    transport: new MemoryTransport(),
+    daemon: { baseUrl: daemon.url, token: undefined },
+  })
   services.push(service)
 
   const server = createHttpServer(service)

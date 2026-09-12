@@ -29,3 +29,16 @@ test("openingPrompt names the room code, explains the [Name · tier] prefix, and
     "should instruct the agent to greet with the room code in the required one-line form",
   )
 })
+
+test("openingPrompt has no artifact path when called with no appDir (LocalBooter)", () => {
+  const prompt = openingPrompt(fakeRoom("RDV-7F3K"))
+  assert.ok(!prompt.includes(".agentproto/ui/index.html"), "LocalBooter has no artifact to point at")
+})
+
+test("openingPrompt with an appDir (e2b) names the exact served-page path to edit", () => {
+  const prompt = openingPrompt(fakeRoom("RDV-7F3K"), { appDir: "/home/user/apps/rdv-hello" })
+  assert.ok(
+    prompt.includes("/home/user/apps/rdv-hello/.agentproto/ui/index.html"),
+    "should name the exact file the agent must edit to change what members see",
+  )
+})

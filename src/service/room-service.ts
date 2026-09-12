@@ -9,6 +9,7 @@ import { handleCommand, parseCommand } from "../rooms/commands.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import type { Address, Member, Room, Tier } from "../rooms/types.ts"
 import type { SessionBooter } from "./booter.ts"
+import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
 import { hasSendMedia } from "./transports.ts"
 
 export interface InboundInput {
@@ -100,6 +101,7 @@ export class RoomService {
   private readonly client: DaemonClient
   private readonly booter: SessionBooter
   private readonly transport: Transport
+  private readonly daemon: DaemonExtraOptions
   private readonly fanout: RoomFanout
   private readonly idlePauseMs: number
   private readonly idleSweepMs: number
@@ -119,17 +121,26 @@ export class RoomService {
     transport: Transport
     idlePauseMinutes?: number
     idleSweepSeconds?: number
+    /** Defaults to the same daemon connection the rest of the process uses
+     *  (`env.daemonUrl`/`env.daemonToken`) — override in tests to point at a
+     *  fake daemon instead. Needed for the out-of-band-kill liveness check
+     *  (`reviveIfSessionDied`) and the fan-out reader's own dead-session
+     *  detection, neither of which can be derived from `DaemonClient` (it
+     *  keeps its base URL/token private). */
+    daemon?: DaemonExtraOptions
   }) {
     this.store = opts.store
     this.client = opts.client
     this.booter = opts.booter
     this.transport = opts.transport
+    this.daemon = opts.daemon ?? { baseUrl: env.daemonUrl, token: env.daemonToken }
     this.idlePauseMs = (opts.idlePauseMinutes ?? env.idlePauseMinutes) * 60_000
     this.idleSweepMs = (opts.idleSweepSeconds ?? env.idleSweepSeconds) * 1000
     this.fanout = new RoomFanout({
       store: this.store,
       transport: this.transport,
       source: (sessionId, since, signal) => this.client.events(sessionId, since, signal),
+      isAlive: (sessionId) => isSessionAlive(this.daemon, sessionId),
     })
   }
 
@@ -235,6 +246,7 @@ export class RoomService {
     if (room === undefined) {
       return { kind: "unknown-code" }
     }
+    room = await this.reviveIfSessionDied(room)
     if (room.sessionId === undefined && room.state !== "paused") {
       return { kind: "no-session" }
     }
@@ -339,17 +351,21 @@ export class RoomService {
       return { kind: "unknown-code" }
     }
 
-    if (result.room.state === "active") {
+    const room = await this.reviveIfSessionDied(result.room)
+    if (room.state === "active") {
       await this.transport.send(result.member, {
-        text: activeRoomStatusText(result.room),
-        artifactUrl: result.room.artifactUrl,
+        text: activeRoomStatusText(room),
+        artifactUrl: room.artifactUrl,
       })
-      return { kind: "resumed", room: result.room, member: result.member }
+      return { kind: "resumed", room, member: result.member }
     }
 
-    const room = await this.doResume(result.room)
-    await this.transport.send(result.member, { text: welcomeText("Resumed room", room), artifactUrl: room.artifactUrl })
-    return { kind: "resumed", room, member: result.member }
+    const resumed = await this.doResume(room)
+    await this.transport.send(result.member, {
+      text: welcomeText("Resumed room", resumed),
+      artifactUrl: resumed.artifactUrl,
+    })
+    return { kind: "resumed", room: resumed, member: result.member }
   }
 
   private async handleMessage(input: InboundInput): Promise<InboundOutcome> {
@@ -362,6 +378,7 @@ export class RoomService {
     let { room } = found
     const { member } = found
 
+    room = await this.reviveIfSessionDied(room)
     if (room.state === "paused") {
       await this.transport.send(member, { text: RESUMING_TEXT, artifactUrl: room.artifactUrl })
       room = await this.doResume(room)
@@ -390,6 +407,22 @@ export class RoomService {
     await this.store.update(code, { lastActivityAt: new Date().toISOString() })
   }
 
+  /** A session that dies out of band — a daemon kill, a crash, a daemon
+   *  restart — never runs `doPause`, so the room is left `state: "active"`
+   *  pointing at a dead `sessionId` with no self-healing path: auto-resume
+   *  only fires from a `state: "paused"` room, and `resume <code>` on an
+   *  "active" room used to just reply "already active" (Rehearsal Run 1,
+   *  Finding 2). Called on every fan-in for an active room and on `resume
+   *  <code>` alike, so both surfaces detect the same out-of-band death and
+   *  fall through to the ordinary pause→resume path instead of stranding. */
+  private async reviveIfSessionDied(room: Room): Promise<Room> {
+    if (room.state !== "active" || room.sessionId === undefined) return room
+    const alive = await isSessionAlive(this.daemon, room.sessionId)
+    if (alive) return room
+    await this.fanout.stop(room.code)
+    return this.store.update(room.code, { sessionId: undefined, state: "paused" })
+  }
+
   private async doPause(room: Room): Promise<void> {
     await this.fanout.stop(room.code)
     if (room.sessionId !== undefined) {
@@ -402,6 +435,13 @@ export class RoomService {
 
   private async doResume(room: Room): Promise<Room> {
     const booted = await this.booter.resume(room)
+    // A new sessionId restarts the daemon's own seq numbering near 1, while
+    // `room.cursor` is still whatever seq the *previous* session last
+    // flushed at — the fan-out reader would then open the new session's
+    // stream at that stale `since` and nothing would ever cross it (Run 2,
+    // Finding 3). Reset only when the session actually changed: a resume
+    // that reconnects the same still-alive session must keep its cursor.
+    const sessionChanged = booted.sessionId !== room.sessionId
     const updated = await this.store.update(room.code, {
       sessionId: booted.sessionId,
       sandboxId: booted.sandboxId,
@@ -409,6 +449,7 @@ export class RoomService {
       artifactReady: booted.artifactReady,
       state: "active",
       lastActivityAt: new Date().toISOString(),
+      ...(sessionChanged ? { cursor: 0 } : {}),
     })
     this.fanout.start(updated.code)
     return updated

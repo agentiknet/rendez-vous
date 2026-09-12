@@ -51,7 +51,14 @@ async function buildHarness(idlePauseMinutes: number): Promise<Harness> {
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
   const transport = new MemoryTransport()
-  const service = new RoomService({ store, client, booter, transport, idlePauseMinutes })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    idlePauseMinutes,
+    daemon: { baseUrl: daemon.url, token: undefined },
+  })
   services.push(service)
   return { service, store, transport, daemon }
 }

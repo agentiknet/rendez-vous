@@ -8,9 +8,12 @@
  * `node -p 'require("/Volumes/SSDExternalMacStudio/Code/products/agentik/agentik-studio/.agentproto/runtime.json").token'`
  * and export it — never print it).
  *
- * With RDV_BOOTER=e2b, a third phase runs: force a pause, poll the daemon
- * until it lands, send one more message, and assert the room resumes with
- * the same artifact url. Run this with RDV_PREWARM_SANDBOX_ID set to an
+ * With RDV_BOOTER=e2b, a third phase runs: ask the agent to edit the served
+ * artifact page, force a pause, poll the daemon until it lands, send one
+ * more message, and assert both that the room resumes with the same
+ * artifact url AND that the pre-pause edit is still there (Rehearsal Run 2,
+ * Finding 3 — fan-out after resume — and Finding 4 — the artifact re-seed
+ * wiping edits). Run this with RDV_PREWARM_SANDBOX_ID set to an
  * already-paused, known-good box — reconnecting is free, a fresh boot is
  * not, and this script has no boot budget of its own.
  */
@@ -57,6 +60,31 @@ async function waitFor(check: () => boolean, timeoutMs: number, label: string): 
   }
 }
 
+async function fetchArtifactText(url: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return undefined
+    return await res.text()
+  } catch {
+    return undefined
+  }
+}
+
+async function waitForArtifactText(
+  url: string,
+  predicate: (text: string) => boolean,
+  timeoutMs: number,
+  label: string,
+): Promise<string> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    const text = await fetchArtifactText(url)
+    if (text !== undefined && predicate(text)) return text
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+  }
+  throw new Error(`timed out waiting for: ${label}`)
+}
+
 async function waitForSessionToStopRunning(
   daemonOpts: { baseUrl: string; token: string | undefined },
   sessionId: string,
@@ -94,7 +122,7 @@ async function main(): Promise<void> {
       console.log(`e2b booter active, pre-warm sandbox: ${env.prewarmSandboxId ?? "(none — this WILL boot fresh)"}`)
     }
     let transport = new MemoryTransport()
-    let service = new RoomService({ store, client, booter, transport })
+    let service = new RoomService({ store, client, booter, transport, daemon: daemonOpts })
 
     console.log("Alice sends: new")
     const created = await service.handleInbound(alice("new"))
@@ -133,7 +161,7 @@ async function main(): Promise<void> {
     await service.stop()
     store = await RoomStore.open(dir)
     transport = new MemoryTransport()
-    service = new RoomService({ store, client, booter, transport })
+    service = new RoomService({ store, client, booter, transport, daemon: daemonOpts })
     service.start()
 
     console.log("Bob sends: One more sentence please")
@@ -154,8 +182,25 @@ async function main(): Promise<void> {
     printSends(transport)
 
     if (env.booter === "e2b") {
-      console.log("e2b phase: forcing a pause...")
       const artifactBefore = store.get(code)?.artifactUrl
+      if (artifactBefore === undefined) throw new Error("expected an artifact url before the e2b phase")
+      const editMarker = `rdv-edit-marker-${code}`
+      console.log("e2b phase: asking the agent to edit the artifact page before pausing...")
+      await service.handleInbound(
+        alice(
+          `Edit your served page: set the <title> to "Rendez-vous live" and add the text ${editMarker} ` +
+            "somewhere in the body. Reply with exactly one short line once done.",
+        ),
+      )
+      await waitForArtifactText(
+        artifactBefore,
+        (html) => html.includes(editMarker),
+        TIMEOUT_MS,
+        "the artifact page to reflect the edit before pausing",
+      )
+      console.log(`  → confirmed edit landed (marker: ${editMarker})`)
+
+      console.log("e2b phase: forcing a pause...")
       await service.pauseRoom(code)
 
       const pausedSessionId = sessionId
@@ -183,6 +228,15 @@ async function main(): Promise<void> {
         throw new Error(`artifact url changed across pause/resume: ${artifactBefore} -> ${resumedRoom.artifactUrl}`)
       }
       console.log(`  → resumed, artifact url unchanged (${resumedRoom.artifactUrl ?? "(none)"})`)
+
+      // Finding 4: the pre-pause artifact edit must survive the resume — a
+      // re-seed that only writes when unseeded is what's under test here.
+      const artifactAfterResume = await fetchArtifactText(resumedRoom.artifactUrl)
+      if (artifactAfterResume === undefined || !artifactAfterResume.includes(editMarker)) {
+        throw new Error("artifact edit did not survive the resume — the seed re-ran and wiped it")
+      }
+      console.log("  → confirmed the pre-pause artifact edit survived the resume")
+
       console.log("Delivered messages (e2b phase):")
       printSends(transport)
     }

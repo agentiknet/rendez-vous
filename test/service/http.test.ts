@@ -67,7 +67,7 @@ test("GET /health reports ok, the room count, and the daemon's own health when i
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
   const transport = new MemoryTransport()
-  const service = new RoomService({ store, client, booter, transport })
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
   services.push(service)
 
   const created = await service.handleInbound({
@@ -101,7 +101,7 @@ test("GET /health reports the daemon as unreachable when it cannot be reached", 
 
   const store = await RoomStore.open(dir)
   const transport = new MemoryTransport()
-  const service = new RoomService({ store, client, booter, transport })
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: deadDaemon.url, token: undefined } })
   services.push(service)
 
   const baseUrl = await listenOnRandomPort(service)
@@ -127,7 +127,7 @@ async function newRoomHarness(): Promise<{
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
   const transport = new MemoryTransport()
-  const service = new RoomService({ store, client, booter, transport })
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
   services.push(service)
 
   const created = await service.handleInbound({
@@ -254,7 +254,13 @@ test("GET /rooms/:code/stream returns 409 when the room has no live session", as
   const store = await RoomStore.open(dir)
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
-  const service = new RoomService({ store, client, booter, transport: new MemoryTransport() })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport: new MemoryTransport(),
+    daemon: { baseUrl: daemon.url, token: undefined },
+  })
   services.push(service)
   const room = await store.create()
 

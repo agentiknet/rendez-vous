@@ -39,15 +39,28 @@ export interface SessionBooter {
   resume(room: Room): Promise<BootedSession>
 }
 
-export function openingPrompt(room: Room): string {
-  return [
+/** `opts.appDir` is the e2b-only artifact case: naming the exact served-page
+ *  path up front is what Rehearsal Run 1's Finding 1 needed a human for —
+ *  without it, the agent reported "no index.html file exists anywhere" and
+ *  asked whether to create one, instead of finding the real path at
+ *  `<appDir>/.agentproto/ui/index.html` (`src/sandbox/app-seed.ts`). Omit
+ *  `opts` for a booter with no artifact concept (`LocalBooter`) — there is
+ *  nothing true to say about a page that doesn't exist. */
+export function openingPrompt(room: Room, opts?: { appDir: string }): string {
+  const lines = [
     `You are the shared agent for Rendez-vous room ${room.code}.`,
     "Several humans drive this one session together, each from their own device — a phone, email, or a laptop.",
     'Every message you receive is prefixed with its sender, like "[Alice · messenger] ...", so you always know who is speaking.',
     "People in the room may disagree or ask for different things. When that happens, pick a reasonable path forward and say in one short sentence what you chose and why, so everyone stays in sync — do not stall waiting for consensus.",
     "Keep replies short: some members are reading you on a phone screen.",
-    `Reply to this message with exactly one short line and nothing else: "Room ${room.code} is open. Say what you want built."`,
-  ].join(" ")
+  ]
+  if (opts !== undefined) {
+    lines.push(
+      `The page members see at the artifact URL is served from ${opts.appDir}/.agentproto/ui/index.html — edit that file to change what they see, and the change is live immediately.`,
+    )
+  }
+  lines.push(`Reply to this message with exactly one short line and nothing else: "Room ${room.code} is open. Say what you want built."`)
+  return lines.join(" ")
 }
 
 function resumePrompt(room: Room): string {
@@ -129,7 +142,7 @@ export class E2bBooter implements SessionBooter {
       label,
       adapter: env.agentAdapter,
       model: env.agentModel,
-      prompt: openingPrompt(room),
+      prompt: openingPrompt(room, { appDir: env.artifactAppDir }),
       appDir: env.artifactAppDir,
       port: env.artifactPort,
       seedFromDir: ARTIFACT_SEED_DIR,

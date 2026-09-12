@@ -234,11 +234,15 @@ no re-delivery), then Bob sends one more message. Prints every delivered
 message per recipient for both rounds, then `PASS` (or `FAIL: <reason>` and
 exit 1). Kills the spawned session in a `finally`.
 
-With `RDV_BOOTER=e2b`, a third phase runs: `service.pauseRoom(code)` forces
-a pause, the script polls `GET /sessions/:id` until the daemon confirms it,
-then Bob sends one more message and the script asserts the room resumes,
-the artifact URL is unchanged, and both members receive the reply. Run this
-phase with a pre-warmed box so it costs no fresh boot:
+With `RDV_BOOTER=e2b`, a third phase runs: Alice first asks the agent to
+edit the served artifact page (a unique marker string), and the script polls
+the artifact URL until that edit is live. Then `service.pauseRoom(code)`
+forces a pause, the script polls `GET /sessions/:id` until the daemon
+confirms it, then Bob sends one more message and the script asserts the room
+resumes, the artifact URL is unchanged, both members receive the reply
+(Rehearsal Run 2, Finding 3 — the fan-out cursor reset), and the artifact
+still carries the pre-pause edit (Finding 4 — the re-seed no longer wipes it).
+Run this phase with a pre-warmed box so it costs no fresh boot:
 ```
 RDV_BOOTER=e2b RDV_PREWARM_SANDBOX_ID=<id from §3> node scripts/simulate-room.ts
 ```

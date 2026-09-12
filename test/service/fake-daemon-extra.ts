@@ -107,15 +107,26 @@ export async function startExtendedFakeDaemon(opts: FakeDaemonOptions = {}): Pro
                   if (id !== undefined) aliveSessions.add(id)
                 }
               }
-              const killMatch = /^\/sessions\/([^/]+)$/.exec(path)
-              if (killMatch !== null && req.method === "DELETE" && status < 300) {
-                const id = killMatch[1]
-                if (id !== undefined) {
-                  aliveSessions.delete(id)
-                  for (const subscriber of subscribersFor(id)) subscriber.end()
-                  subscribers.delete(id)
-                  history.delete(id)
-                }
+              const forgetMatch = /^\/sessions\/([^/]+)$/.exec(path)
+              // `POST /sessions/:id/kill` is the route that actually ends a
+              // session (real `agentSession.close()`, per DAEMON-NOTES.md);
+              // `DELETE /sessions/:id` only forgets the daemon's bookkeeping
+              // row. Both are treated as "gone" here so a test can simulate
+              // either an ordinary `RoomService.doPause` (which calls kill)
+              // or a direct, out-of-band kill (Rehearsal Run 1, Finding 2) —
+              // same daemon-side effect on `GET /sessions/:id` either way.
+              const killMatch = /^\/sessions\/([^/]+)\/kill$/.exec(path)
+              const deadSessionId =
+                forgetMatch !== null && req.method === "DELETE" && status < 300
+                  ? forgetMatch[1]
+                  : killMatch !== null && req.method === "POST" && status < 300
+                    ? killMatch[1]
+                    : undefined
+              if (deadSessionId !== undefined) {
+                aliveSessions.delete(deadSessionId)
+                for (const subscriber of subscribersFor(deadSessionId)) subscriber.end()
+                subscribers.delete(deadSessionId)
+                history.delete(deadSessionId)
               }
 
               const responseContentType = proxyRes.headers["content-type"]

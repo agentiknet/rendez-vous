@@ -7,7 +7,7 @@ import { DaemonClient } from "../../src/daemon/client.ts"
 import type { OutboundMessage, Transport } from "../../src/fanout/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import type { Address, Member, Tier } from "../../src/rooms/types.ts"
-import { LocalBooter } from "../../src/service/booter.ts"
+import { LocalBooter, type SessionBooter } from "../../src/service/booter.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport, type RecordedSend } from "../../src/service/transports.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
@@ -55,7 +55,7 @@ async function buildHarness(): Promise<Harness> {
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
   const transport = new MemoryTransport()
-  const service = new RoomService({ store, client, booter, transport })
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
   services.push(service)
   return { service, store, transport, daemon }
 }
@@ -68,7 +68,7 @@ async function buildHarnessWithTransport<T extends Transport>(
   const store = await RoomStore.open(dir)
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
-  const service = new RoomService({ store, client, booter, transport })
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
   services.push(service)
   return { service, store, transport, daemon }
 }
@@ -217,6 +217,123 @@ test("resume revives a room whose session is still alive without booting a new o
   assert.equal(spawnCallsAfter, spawnCallsBefore, "resume should not boot a fresh session when the old one is alive")
 })
 
+test("doResume resets the cursor when the session id changes, so a turn on the new session still reaches members (Finding 3)", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const store = await RoomStore.open(dir)
+  const transport = new MemoryTransport()
+
+  // A scripted booter, not LocalBooter: the shared fake daemon hands out the
+  // same fixed session id on every spawn, which can never reproduce "resume
+  // mints a new session id" on its own. This is the actual seam
+  // (`SessionBooter`) `RoomService` drives, so scripting it directly proves
+  // `doResume`'s own cursor logic without needing a fancier fake daemon.
+  const booter: SessionBooter = {
+    async boot() {
+      return { sessionId: "sess-old", sandboxId: undefined, artifactUrl: undefined, artifactReady: undefined }
+    },
+    async resume() {
+      return { sessionId: "sess-new", sandboxId: undefined, artifactUrl: undefined, artifactReady: undefined }
+    },
+  }
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  services.push(service)
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+  const code = created.room.code
+
+  // Advance the cursor well past where the new session's own numbering will
+  // restart — exactly Run 2's failure mode (`cursor` stuck at a previous
+  // session's seq, e.g. 41, forever above the new session's own numbers).
+  daemon.pushRecord("sess-old", { seq: 1, kind: "text-delta", text: "before pause" })
+  daemon.pushRecord("sess-old", { seq: 2, kind: "turn-end", reason: "completed" })
+  await waitFor(() => (store.get(code)?.cursor ?? 0) === 2)
+
+  await service.pauseRoom(code)
+  assert.equal(store.get(code)?.state, "paused")
+
+  const resumed = await service.handleInbound(alice(`resume ${code}`))
+  assert.equal(resumed.kind, "resumed")
+  const resumedRoom = store.get(code)
+  assert.equal(resumedRoom?.sessionId, "sess-new")
+  assert.equal(resumedRoom?.cursor, 0, "cursor must reset to 0 for the new session, not stay at the old session's seq")
+
+  const sendsBefore = transport.sends.length
+  daemon.pushRecord("sess-new", { seq: 1, kind: "text-delta", text: "after resume" })
+  daemon.pushRecord("sess-new", { seq: 2, kind: "turn-end", reason: "completed" })
+  await waitFor(() => transport.sends.length > sendsBefore)
+  assert.ok(transport.sends[sendsBefore]?.message.text.includes("after resume"))
+})
+
+test("a session killed out of band (bypassing doPause) is revived on the next fan-in instead of stranding the room (Finding 2a)", async () => {
+  const { service, store, transport, daemon } = await buildHarness()
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+  const code = created.room.code
+  const sessionId = created.room.sessionId
+  assert.ok(sessionId !== undefined)
+  if (sessionId === undefined) return
+
+  // Out-of-band: kill the session directly, never through
+  // `RoomService.doPause` — the store still says "active" pointing at the
+  // now-dead sessionId, exactly like a daemon crash, restart, or an
+  // operator's own recovery attempt.
+  const outOfBandClient = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  await outOfBandClient.kill(sessionId)
+  assert.equal(store.get(code)?.state, "active", "the store cannot know about an out-of-band kill by itself")
+
+  const sendsBefore = transport.sends.length
+  const outcome = await service.handleInbound(alice("are you still there?"))
+  assert.equal(outcome.kind, "message")
+
+  const revived = store.get(code)
+  assert.equal(revived?.state, "active")
+  assert.ok(revived?.sessionId !== undefined)
+
+  const resumingMessage = transport.sends[sendsBefore]
+  assert.ok(
+    resumingMessage?.message.text.includes("Resuming"),
+    "should tell the sender it is resuming, proving auto-resume fired instead of a dead-session error",
+  )
+})
+
+test("resume <code> on an active room whose session died out of band revives it, instead of replying 'already active' (Finding 2b)", async () => {
+  const { service, store, transport, daemon } = await buildHarness()
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+  const code = created.room.code
+  const sessionId = created.room.sessionId
+  assert.ok(sessionId !== undefined)
+  if (sessionId === undefined) return
+
+  const outOfBandClient = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  await outOfBandClient.kill(sessionId)
+  assert.equal(store.get(code)?.state, "active")
+
+  const spawnCallsBefore = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent").length
+  const sendsBefore = transport.sends.length
+
+  const outcome = await service.handleInbound(alice(`resume ${code}`))
+  assert.equal(outcome.kind, "resumed")
+
+  const spawnCallsAfter = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent").length
+  assert.ok(spawnCallsAfter > spawnCallsBefore, "resume must boot a fresh session instead of treating the dead one as active")
+
+  const reply = transport.sends[sendsBefore]
+  assert.ok(!(reply?.message.text.toLowerCase().includes("already active")), "must not claim the room is already active")
+
+  const resumedRoom = store.get(code)
+  assert.equal(resumedRoom?.state, "active")
+  assert.ok(resumedRoom?.sessionId !== undefined)
+})
+
 test("a plain message from a known member fans in with queue:true and the [Name · tier] prefix", async () => {
   const { service, daemon } = await buildHarness()
 
@@ -246,7 +363,7 @@ test("start() after reopening the store resumes fan-out from the persisted curso
 
   const store1 = await RoomStore.open(dir)
   const transport1 = new MemoryTransport()
-  const service1 = new RoomService({ store: store1, client, booter, transport: transport1 })
+  const service1 = new RoomService({ store: store1, client, booter, transport: transport1, daemon: { baseUrl: daemon.url, token: undefined } })
   services.push(service1)
 
   const created = await service1.handleInbound(alice("new"))
@@ -267,7 +384,7 @@ test("start() after reopening the store resumes fan-out from the persisted curso
 
   const store2 = await RoomStore.open(dir)
   const transport2 = new MemoryTransport()
-  const service2 = new RoomService({ store: store2, client, booter, transport: transport2 })
+  const service2 = new RoomService({ store: store2, client, booter, transport: transport2, daemon: { baseUrl: daemon.url, token: undefined } })
   services.push(service2)
   service2.start()
 

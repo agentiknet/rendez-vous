@@ -33,6 +33,24 @@ test("buildAppSeedScript embeds both files' exact content as heredocs", async ()
   })
 })
 
+test("buildAppSeedScript guards every file write behind an 'APP.md does not already exist' check", async () => {
+  await withAppSource("app content", "<html>ui</html>", async localDir => {
+    const script = buildAppSeedScript(localDir, "/home/user/apps/rdv-hello")
+    const guardLine = "if [ ! -e '/home/user/apps/rdv-hello/.agentproto/APP.md' ]; then"
+    const guardIndex = script.indexOf(guardLine)
+    const fiIndex = script.lastIndexOf("\nfi")
+    assert.ok(guardIndex >= 0, "script should open with the existence guard")
+    assert.ok(fiIndex > guardIndex, "script should close the guard with fi")
+
+    const mkdirIndex = script.indexOf("mkdir -p")
+    const appMdWriteIndex = script.indexOf("cat > '/home/user/apps/rdv-hello/.agentproto/APP.md'")
+    const uiHtmlWriteIndex = script.indexOf("cat > '/home/user/apps/rdv-hello/.agentproto/ui/index.html'")
+    for (const index of [mkdirIndex, appMdWriteIndex, uiHtmlWriteIndex]) {
+      assert.ok(index > guardIndex && index < fiIndex, "every write must sit inside the guard, not outside it")
+    }
+  })
+})
+
 test("buildAppSeedScript is idempotent — identical output on repeated calls", async () => {
   await withAppSource("content-a", "content-b", async localDir => {
     const first = buildAppSeedScript(localDir, "/home/user/apps/rdv-hello")

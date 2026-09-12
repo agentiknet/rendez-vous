@@ -6,6 +6,12 @@ const INITIAL_BACKOFF_MS = 250
 const MAX_BACKOFF_MS = 5000
 
 type Source = (sessionId: string, since: number, signal: AbortSignal) => AsyncIterable<FanoutRecord>
+/** Checked once the source's read loop ends (error or clean close), before
+ *  retrying against the same sessionId — lets a reader distinguish "the
+ *  connection dropped, retry" from "the session is gone for good, stop"
+ *  (Rehearsal Run 1, Finding 2c). Defaults to always-alive (retry forever)
+ *  when the caller has no daemon-liveness check to offer. */
+type IsAlive = (sessionId: string) => Promise<boolean>
 
 interface ActiveReader {
   controller: AbortController
@@ -31,14 +37,16 @@ export class RoomFanout {
   private readonly store: RoomStore
   private readonly transport: Transport
   private readonly source: Source
+  private readonly isAlive: IsAlive
   private readonly readers: Map<string, ActiveReader> = new Map()
   /** Per-room, in-process only: reset on restart, so the first flush after boot is always treated as an artifact change (see start of `flush`). */
   private readonly lastArtifactUrl: Map<string, string | undefined> = new Map()
 
-  constructor(opts: { store: RoomStore; transport: Transport; source: Source }) {
+  constructor(opts: { store: RoomStore; transport: Transport; source: Source; isAlive?: IsAlive }) {
     this.store = opts.store
     this.transport = opts.transport
     this.source = opts.source
+    this.isAlive = opts.isAlive ?? (async () => true)
   }
 
   start(code: string): void {
@@ -77,6 +85,16 @@ export class RoomFanout {
         failed = true
       }
       if (signal.aborted) return
+
+      // The source ended — either it errored, or the connection simply
+      // closed. Either way, a session that no longer exists must not be
+      // retried forever: stop this reader and let the next fan-in drive the
+      // room through the ordinary pause/resume path (RoomService), which
+      // starts a fresh reader once it has.
+      if (!(await this.isAlive(sessionId))) {
+        this.readers.delete(code)
+        return
+      }
 
       await delay(backoff, signal)
       backoff = failed ? Math.min(backoff * 2, MAX_BACKOFF_MS) : INITIAL_BACKOFF_MS
