@@ -156,6 +156,10 @@ export function parseEmailInbound(input: ParseEmailInboundInput): WebhookResult 
     text,
     messageId,
     roomCodeHint: extractRoomCodeHint(subject),
+    // The mail tier's poll-driven envelope carries no media field at all
+    // (docs/AGENTPUSH.md §8.2) — always empty here; the shared
+    // `normalizeInboundMedia` ingress call is a no-op for it.
+    media: [],
   }
 
   return { ok: true, envelope }

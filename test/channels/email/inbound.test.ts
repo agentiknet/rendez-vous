@@ -46,6 +46,7 @@ test("a bare From address becomes contactRef and displayName", () => {
       text: "just checking in",
       messageId: "18d2f",
       roomCodeHint: undefined,
+      media: [],
     },
   })
 })

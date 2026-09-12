@@ -1,6 +1,27 @@
 # Multimodal — normalize at ingress, fan out by fidelity
 
-Status: spec only. No code in this document is built.
+Status: **ingress built** (normalization, webhook wiring, media-route serving, retention).
+`normalizeInboundMedia` (src/channels/media-ingress.ts) turns each inbound `media[]` item into TEXT plus a
+durable `MediaRecord` (src/service/media-store.ts, `saveIngress`/`assignRoom`) BEFORE anything is
+enqueued; the prompt queue stays text-only; a media-only message fans in as the normalized line instead
+of being ignored; fetch/oversize/provider failures fan in as visible "(…, could not be fetched:
+<reason>, media:<id>)" lines — nothing is ever silently dropped. Records land room-less and are re-keyed
+to the sender's room once `handleInbound` resolves membership; `GET /r/:code/media/:id` serves them with
+their stored mime and never serves another room's record.
+
+**Real STT and vision providers are NOT wired tonight.** Transcription and captioning sit behind two
+injectable providers (`SttProvider.transcribe`, `VisionProvider.caption` in
+src/channels/media-ingress.ts); the shipped `NullProviders` returns `undefined`, so the fanned-in line is
+"(voice note, transcription unavailable, media:<id>)" / "(image, caption unavailable, media:<id>)". Real
+providers plug in via env later — `@agstudio/integration-speech` for STT and the image-reader pattern
+named in the spec for vision, added as `RDV_STT_*`/`RDV_VISION_*` names alongside
+`RDV_AGENTPUSH_KEY`/`RDV_AGENTPUSH_WEBHOOK_SECRET` (§ Credentials). Egress TTS rendering (§ item 4) and
+the web view's `media:<id>` resolver (§ item 5) are not built.
+
+Attribution note: `[Name · channel · voice]` rides inside the fanned-in text, because the optional
+field it would need on `RoomService.InboundInput` lives in room-service.ts — another executor's file
+this build must not touch — so the webhook handlers compose the prefix on the http.ts side instead;
+`fanIn` still prepends its own `[Name · tier]`, so the session prompt shows both prefixes.
 
 ## The principle
 

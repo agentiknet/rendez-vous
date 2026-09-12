@@ -73,6 +73,18 @@
 import { isRecord, getStringField } from "../json.ts"
 import { verifyAgentpushSignature } from "./signature.ts"
 
+export interface InboundMediaItem {
+  /** Free-string media type off the real envelope — `"image"`, `"audio"`,
+   *  `"voice"`, … (docs/AGENTPUSH.md §3). Kinded later by
+   *  `kindForMediaType` (src/channels/media-ingress.ts), not here. */
+  readonly type: string
+  readonly url: string
+  readonly mimeType: string
+  /** As sent by the provider, when present — used for an early oversize
+   *  rejection before the bytes are fetched. Not trusted beyond that. */
+  readonly size: number | undefined
+}
+
 export interface InboundEnvelope {
   provider: "whatsapp" | "telegram" | "sms" | "email"
   source: string
@@ -81,6 +93,13 @@ export interface InboundEnvelope {
   text: string
   messageId: string
   roomCodeHint: string | undefined
+  /** Additive field of the real v1 envelope (docs/AGENTPUSH.md §3,
+   *  `media: [{ type, url, mimeType, size }]`). Always present, empty when
+   *  the payload carried none or only malformed entries — malformed entries
+   *  (missing `type`/`url`, non-array `media`) are skipped here and, when
+   *  that empties the whole array, an empty-text message falls back to the
+   *  "ignored" path rather than fanning in a phantom media line. */
+  media: readonly InboundMediaItem[]
 }
 
 export type WebhookResult =
@@ -100,6 +119,30 @@ const MESSENGER_CHANNELS: readonly string[] = ["whatsapp", "telegram", "sms"]
 
 function isMessengerChannel(value: string): value is "whatsapp" | "telegram" | "sms" {
   return MESSENGER_CHANNELS.includes(value)
+}
+
+/** Parse the additive `media` array (docs/AGENTPUSH.md §3:
+ *  `[{ type, url, mimeType, size }]`). Entries missing `type` or `url` are
+ *  unfetchable and unfetchable is unnormalizable, so they're dropped — an
+ *  entry without a URL cannot even produce a failure line naming a real
+ *  source. */
+function parseMedia(value: unknown): readonly InboundMediaItem[] {
+  if (!Array.isArray(value)) return []
+  const items: InboundMediaItem[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)) continue
+    const type = getStringField(entry, "type")
+    const url = getStringField(entry, "url")
+    if (type === undefined || url === undefined) continue
+    const sizeRaw = entry["size"]
+    items.push({
+      type,
+      url,
+      mimeType: getStringField(entry, "mimeType") ?? "application/octet-stream",
+      size: typeof sizeRaw === "number" && Number.isFinite(sizeRaw) && sizeRaw >= 0 ? sizeRaw : undefined,
+    })
+  }
+  return items
 }
 
 export function parseAgentpushWebhook(input: ParseAgentpushWebhookInput): WebhookResult {
@@ -149,7 +192,8 @@ export function parseAgentpushWebhook(input: ParseAgentpushWebhookInput): Webhoo
   if (text === undefined) {
     return { ok: false, status: 400, reason: "missing_text" }
   }
-  if (text.length === 0) {
+  const media = parseMedia(envelope.media)
+  if (text.length === 0 && media.length === 0) {
     return { ok: true, ignored: "no_text" }
   }
 
@@ -163,6 +207,7 @@ export function parseAgentpushWebhook(input: ParseAgentpushWebhookInput): Webhoo
       text,
       messageId,
       roomCodeHint: undefined,
+      media,
     },
   }
 }

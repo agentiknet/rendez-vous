@@ -54,7 +54,9 @@ async function freshDir(): Promise<string> {
   return dir
 }
 
-async function buildServer(): Promise<{ baseUrl: string; daemon: ExtendedFakeDaemon }> {
+async function buildServer(
+  opts: { vision?: (bytes: Uint8Array, mime: string) => Promise<string | undefined> } = {},
+): Promise<{ baseUrl: string; daemon: ExtendedFakeDaemon }> {
   const dir = await freshDir()
   const daemon = await startExtendedFakeDaemon()
   daemons.push(daemon)
@@ -70,7 +72,12 @@ async function buildServer(): Promise<{ baseUrl: string; daemon: ExtendedFakeDae
   })
   services.push(service)
 
-  const server = createHttpServer(service)
+  const { MediaStore: MediaStoreCtor } = await import("../../src/service/media-store.ts")
+  const mediaStore = new MediaStoreCtor(dir)
+  const server = await createHttpServer(service, {
+    mediaStore,
+    ...(opts.vision !== undefined ? { vision: { caption: opts.vision } } : {}),
+  })
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const address = server.address()
   if (!isAddressInfo(address)) throw new Error("failed to bind http server")
@@ -156,4 +163,94 @@ test("POST /inbound/agentpush with a bad signature returns 401", async () => {
     body: rawBody,
   })
   assert.equal(res.status, 401)
+})
+
+// Multimodal ingress (docs/MULTIMODAL.md): a media-only webhook message is
+// normalized into text + a stored media record and fans in with the
+// [Name · channel · kind] attribution — never ignored, never dropped.
+
+async function startProviderHost(): Promise<string> {
+  const { createServer } = await import("node:http")
+  const server = createServer((req, res) => {
+    res.writeHead(req.url === "/boom" ? 500 : 200, { "content-type": req.url === "/img.jpg" ? "image/jpeg" : "text/plain" })
+    res.end(req.url === "/img.jpg" ? "IMG" : "nope")
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const address = server.address()
+  if (address === null || typeof address === "string") throw new Error("failed to bind provider host")
+  daemons.push({ close: () => new Promise<void>((resolve) => server.close(() => resolve())) } as unknown as ExtendedFakeDaemon)
+  return `http://127.0.0.1:${address.port}`
+}
+
+test("POST /inbound/agentpush fans a media-only message in as the normalized line with the [from · whatsapp · image] attribution", async () => {
+  const { baseUrl, daemon } = await buildServer({ vision: () => Promise.resolve("screenshot of the error") })
+  const providerHost = await startProviderHost()
+
+  // Become a member first, so the media message lands as a turn.
+  const joined = await fetch(`${baseUrl}/inbound/agentpush`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-agentpush-signature": sign(JSON.stringify(envelope())) },
+    body: JSON.stringify(envelope()),
+  })
+  assert.equal(joined.status, 200)
+  assert.equal((await readJson(joined)).kind, "created")
+
+  const mediaBody = JSON.stringify(
+    envelope({
+      messageId: "msg-media",
+      text: "",
+      media: [{ type: "image", url: `${providerHost}/img.jpg`, mimeType: "image/jpeg", size: 3 }],
+    }),
+  )
+  const res = await fetch(`${baseUrl}/inbound/agentpush`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-agentpush-signature": sign(mediaBody) },
+    body: mediaBody,
+  })
+  assert.equal(res.status, 200)
+  const outcome = await readJson(res)
+  assert.equal(outcome.kind, "message")
+
+  const prompts = daemon.requestsReceived.filter((r) => r.path.endsWith("/prompt"))
+  const last = prompts[prompts.length - 1]
+  assert.ok(isRecord(last?.body))
+  if (!isRecord(last.body)) return
+  const prompt = last.body.prompt
+  assert.ok(typeof prompt === "string")
+  assert.match(prompt, /\[\+15550001111 · whatsapp · image\] \(image\) screenshot of the error {2}media:/)
+  assert.equal(last.body.queue, true, "the media line rides the same queue:true path as any text")
+})
+
+test("POST /inbound/agentpush fans in a fetch-failing media item with the reason visible in the prompt", async () => {
+  const { baseUrl, daemon } = await buildServer()
+  const providerHost = await startProviderHost()
+
+  const joined = await fetch(`${baseUrl}/inbound/agentpush`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-agentpush-signature": sign(JSON.stringify(envelope())) },
+    body: JSON.stringify(envelope()),
+  })
+  assert.equal((await readJson(joined)).kind, "created")
+
+  const mediaBody = JSON.stringify(
+    envelope({
+      messageId: "msg-media-fail",
+      text: "",
+      media: [{ type: "image", url: `${providerHost}/boom`, mimeType: "image/jpeg", size: 3 }],
+    }),
+  )
+  const res = await fetch(`${baseUrl}/inbound/agentpush`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-agentpush-signature": sign(mediaBody) },
+    body: mediaBody,
+  })
+  assert.equal(res.status, 200)
+
+  const prompts = daemon.requestsReceived.filter((r) => r.path.endsWith("/prompt"))
+  const last = prompts[prompts.length - 1]
+  assert.ok(isRecord(last?.body))
+  if (!isRecord(last.body)) return
+  const prompt = last.body.prompt
+  assert.ok(typeof prompt === "string")
+  assert.match(prompt, /\(image, could not be fetched: HTTP 500, media:/)
 })

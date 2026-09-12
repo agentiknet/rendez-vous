@@ -44,6 +44,7 @@ test("valid signed whatsapp text becomes an envelope", () => {
       text: "hello from the field",
       messageId: "wamid.abc123",
       roomCodeHint: undefined,
+      media: [],
     },
   })
 })
@@ -73,6 +74,7 @@ test("valid signed telegram text becomes an envelope", () => {
       text: "ping from telegram",
       messageId: "tg-42",
       roomCodeHint: undefined,
+      media: [],
     },
   })
 })
@@ -102,6 +104,7 @@ test("valid signed sms text becomes an envelope — same MessagingInboundEnvelop
       text: "join RDV-7F3K",
       messageId: "SM1234567890",
       roomCodeHint: undefined,
+      media: [],
     },
   })
 })
@@ -211,4 +214,73 @@ test("MessageDedup evicts the oldest id once past capacity", () => {
   assert.equal(dedup.seen("c"), false) // evicts "a"
   assert.equal(dedup.seen("a"), false) // re-accepted, no longer remembered
   assert.equal(dedup.seen("c"), true) // still remembered
+})
+
+// Media — docs/AGENTPUSH.md §3's additive `media` array
+// ([{ type, url, mimeType, size }]) and the media-only message shape it
+// enables (text present but "" for a media-only message, messaging.ts:79).
+
+test("a media array rides along on a text message, parsed defensively", () => {
+  const body = JSON.stringify({
+    channel: "whatsapp",
+    from: "+15551234567",
+    text: "look at this",
+    messageId: "m-media-1",
+    media: [
+      { type: "image", url: "https://cdn.example/img.jpg", mimeType: "image/jpeg", size: 182734 },
+      { type: "garbage" }, // no url — unfetchable, skipped
+      "not-an-object", // skipped
+    ],
+  })
+  const result = parseAgentpushWebhook({ rawBody: body, headers: {}, secret: undefined })
+  assert.equal(result.ok, true)
+  if (!result.ok || !("envelope" in result)) return
+  assert.deepEqual(result.envelope.media, [
+    { type: "image", url: "https://cdn.example/img.jpg", mimeType: "image/jpeg", size: 182734 },
+  ])
+})
+
+test("a media-only message (empty text, media present) is an envelope with empty text, not ignored", () => {
+  const body = JSON.stringify({
+    channel: "whatsapp",
+    from: "+15551234567",
+    text: "",
+    messageId: "m-media-2",
+    media: [{ type: "audio", url: "https://cdn.example/v.webm", mimeType: "audio/webm", size: 91021 }],
+  })
+  const result = parseAgentpushWebhook({ rawBody: body, headers: {}, secret: undefined })
+  assert.equal(result.ok, true)
+  if (!result.ok || !("envelope" in result)) return
+  assert.equal(result.envelope.text, "")
+  assert.deepEqual(result.envelope.media, [
+    { type: "audio", url: "https://cdn.example/v.webm", mimeType: "audio/webm", size: 91021 },
+  ])
+})
+
+test("empty text with only malformed media entries is still ignored", () => {
+  const body = JSON.stringify({
+    channel: "whatsapp",
+    from: "+15551234567",
+    text: "",
+    messageId: "m-media-3",
+    media: [{ type: "no-url" }, 42],
+  })
+  const result = parseAgentpushWebhook({ rawBody: body, headers: {}, secret: undefined })
+  assert.deepEqual(result, { ok: true, ignored: "no_text" })
+})
+
+test("size that is not a finite non-negative number is dropped, not trusted", () => {
+  const body = JSON.stringify({
+    channel: "whatsapp",
+    from: "+15551234567",
+    text: "",
+    messageId: "m-media-4",
+    media: [{ type: "image", url: "https://cdn.example/x.png", mimeType: "image/png", size: "lots" }],
+  })
+  const result = parseAgentpushWebhook({ rawBody: body, headers: {}, secret: undefined })
+  assert.equal(result.ok, true)
+  if (!result.ok || !("envelope" in result)) return
+  assert.deepEqual(result.envelope.media, [
+    { type: "image", url: "https://cdn.example/x.png", mimeType: "image/png", size: undefined },
+  ])
 })

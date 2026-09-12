@@ -47,8 +47,11 @@ function isAddressInfo(value: string | AddressInfo | null): value is AddressInfo
   return value !== null && typeof value === "object"
 }
 
-async function listenOnRandomPort(service: RoomService): Promise<string> {
-  const server = createHttpServer(service)
+async function listenOnRandomPort(
+  service: RoomService,
+  stateHooks?: Parameters<typeof createHttpServer>[2],
+): Promise<string> {
+  const server = createHttpServer(service, undefined, stateHooks)
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const address = server.address()
   if (!isAddressInfo(address)) throw new Error("failed to bind http server")
@@ -145,7 +148,7 @@ async function newRoomHarness(): Promise<{
   assert.ok(sessionId !== undefined)
   if (sessionId === undefined) throw new Error("unreachable")
 
-  const baseUrl = await listenOnRandomPort(service)
+  const baseUrl = await listenOnRandomPort(service, { daemon: { baseUrl: daemon.url, token: undefined } })
   return { service, daemon, baseUrl, code: created.room.code, sessionId }
 }
 
@@ -409,7 +412,9 @@ async function startFakeArtifactUpstream(): Promise<string> {
 /** A room booted with a scripted `SessionBooter` that hands back a fixed
  *  `artifactUrl` — `LocalBooter` never sets one, so the artifact-proxy route
  *  needs its own harness (architecture.md §9.3b). */
-async function newRoomHarnessWithArtifact(artifactUrl: string): Promise<{ baseUrl: string; code: string }> {
+async function newRoomHarnessWithArtifact(
+  artifactUrl: string,
+): Promise<{ baseUrl: string; code: string; daemon: ExtendedFakeDaemon; sessionId: string }> {
   const dir = await freshDir()
   const daemon = await freshDaemon()
   const store = await RoomStore.open(dir)
@@ -436,8 +441,8 @@ async function newRoomHarnessWithArtifact(artifactUrl: string): Promise<{ baseUr
   assert.equal(created.kind, "created")
   if (created.kind !== "created") throw new Error("unreachable")
 
-  const baseUrl = await listenOnRandomPort(service)
-  return { baseUrl, code: created.room.code }
+  const baseUrl = await listenOnRandomPort(service, { daemon: { baseUrl: daemon.url, token: undefined } })
+  return { baseUrl, code: created.room.code, daemon, sessionId: booted.sessionId }
 }
 
 test("GET /r/:code/artifact/ reverse-proxies to the room's current artifactUrl", async () => {
@@ -470,4 +475,156 @@ test("GET /r/:code/artifact/ self-heals with a refreshing 503 when the room has 
   assert.equal(res.status, 503)
   assert.match(res.headers.get("content-type") ?? "", /text\/html/)
   assert.match(await res.text(), /not available yet/i)
+})
+
+// Ingress media on the media route (docs/MULTIMODAL.md): the same
+// `MediaStore` the deliverable flow uses also serves ingress records, with
+// the stored mime type, room-scoped.
+
+test("GET /r/:code/media/:id serves an ingress record with its stored mime type, and refuses another room's code", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const service = new RoomService({ store, client, booter, transport: new MemoryTransport(), daemon: { baseUrl: daemon.url, token: undefined } })
+  services.push(service)
+  const created = await service.handleInbound({
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+1" },
+    displayName: "Alice",
+    tier: "messenger",
+    text: "new",
+  })
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") throw new Error("unreachable")
+
+  const { MediaStore: MediaStoreCtor } = await import("../../src/service/media-store.ts")
+  const mediaStore = new MediaStoreCtor(dir)
+  const bytes = new Uint8Array([1, 2, 3, 4])
+  const record = await mediaStore.saveIngress(bytes, {
+    kind: "image",
+    source: "https://cdn.example/img.jpg",
+    mime: "image/jpeg",
+    caption: "screenshot of the error",
+  })
+  const assigned = await mediaStore.assignRoom(record.mediaId, created.room.code)
+  assert.ok(assigned !== undefined)
+
+  const server = createHttpServer(service, { mediaStore })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const address = server.address()
+  if (!isAddressInfo(address)) throw new Error("failed to bind http server")
+  servers.push({ close: () => new Promise<void>((resolve) => server.close(() => resolve())) })
+  const baseUrl = `http://127.0.0.1:${address.port}`
+
+  const ok = await fetch(`${baseUrl}/r/${created.room.code}/media/${record.mediaId}`)
+  assert.equal(ok.status, 200)
+  assert.equal(ok.headers.get("content-type"), "image/jpeg")
+  const served = new Uint8Array(await ok.arrayBuffer())
+  assert.deepEqual(served, bytes)
+
+  const crossRoom = await fetch(`${baseUrl}/r/RDV-ZZZZ/media/${record.mediaId}`)
+  assert.equal(crossRoom.status, 404, "a record must not be served under another room's code")
+
+  const unknownId = await fetch(`${baseUrl}/r/${created.room.code}/media/00000000-0000-4000-8000-000000000000`)
+  assert.equal(unknownId.status, 404)
+})
+
+test("GET /r/:code/state returns the full shape for an active room with a session, with busy read from the daemon descriptor", async () => {
+  const upstreamUrl = await startFakeArtifactUpstream()
+  const { baseUrl, code, daemon, sessionId } = await newRoomHarnessWithArtifact(upstreamUrl)
+  daemon.setSessionStatus(sessionId, "running")
+  daemon.setSessionBusy(sessionId, true)
+
+  const res = await fetch(`${baseUrl}/r/${code}/state`)
+  assert.equal(res.status, 200)
+  const body = await readJson(res)
+
+  assert.equal(body.code, code)
+  assert.equal(body.state, "active")
+  assert.ok(isRecord(body.artifact))
+  if (!isRecord(body.artifact)) return
+  // The member-facing proxied URL — never the raw e2b host (finding 6).
+  const artifactUrl = body.artifact.url
+  assert.equal(typeof artifactUrl, "string")
+  if (typeof artifactUrl !== "string") return
+  assert.ok(artifactUrl.endsWith(`/r/${code}/artifact/`), `unexpected artifact url: ${artifactUrl}`)
+  assert.ok(!artifactUrl.includes("e2b.app"))
+  assert.equal(body.artifact.ready, true)
+  const members = isArrayOf(body.members, isMinimalMember) ? body.members : []
+  assert.ok(members.some((m) => m.displayName === "Alice" && m.tier === "messenger"))
+  assert.ok(isRecord(body.agent))
+  if (!isRecord(body.agent)) return
+  assert.equal(body.agent.busy, true)
+  assert.equal(typeof body.agent.lastActivityAt, "string")
+  assert.equal(typeof body.updatedAt, "string")
+})
+
+test("GET /r/:code/state reports busy false again once the daemon descriptor clears it", async () => {
+  const { baseUrl, code, daemon, sessionId } = await newRoomHarnessWithArtifact(
+    await startFakeArtifactUpstream(),
+  )
+  daemon.setSessionStatus(sessionId, "running")
+  daemon.setSessionBusy(sessionId, true)
+  daemon.setSessionBusy(sessionId, false)
+
+  const body = await readJson(await fetch(`${baseUrl}/r/${code}/state`))
+  assert.ok(isRecord(body.agent))
+  if (isRecord(body.agent)) assert.equal(body.agent.busy, false)
+})
+
+test("GET /r/:code/state marks a paused room's artifact not ready and with no url", async () => {
+  const { baseUrl, service, code } = await newRoomHarness()
+  await service.pauseRoom(code)
+
+  const res = await fetch(`${baseUrl}/r/${code}/state`)
+  assert.equal(res.status, 200)
+  const body = await readJson(res)
+  assert.equal(body.state, "paused")
+  assert.ok(isRecord(body.artifact))
+  if (isRecord(body.artifact)) {
+    assert.equal(body.artifact.ready, false)
+    assert.equal(body.artifact.url, undefined)
+  }
+})
+
+test("GET /r/:code/state returns 404 JSON for an unknown room", async () => {
+  const { baseUrl } = await newRoomHarness()
+  const res = await fetch(`${baseUrl}/r/RDV-ZZZZ/state`)
+  assert.equal(res.status, 404)
+  const body = await readJson(res)
+  assert.equal(body.error, "not_found")
+})
+
+test("GET /r/:code embeds the polling state script, member badges and the artifact section while active", async () => {
+  const upstreamUrl = await startFakeArtifactUpstream()
+  const { baseUrl, code } = await newRoomHarnessWithArtifact(upstreamUrl)
+
+  const res = await fetch(`${baseUrl}/r/${code}`)
+  assert.equal(res.status, 200)
+  const html = await res.text()
+  assert.ok(html.includes("/state"), "should poll the state endpoint")
+  assert.ok(html.includes("pollState"))
+  assert.ok(html.includes("pollState, 3000"))
+  assert.ok(html.includes('class="tier-badge tier-messenger"'), "member tier badges")
+  assert.ok(html.includes("member-joined"), "member joined-at")
+  assert.ok(html.includes('id="artifact-pane"'))
+  assert.ok(html.includes(`/r/${code}/artifact/`), "artifact section wired to the proxied url")
+  assert.ok(html.includes('id="state-pill"'))
+  assert.ok(html.includes("connection lost, retrying"))
+  assert.ok(html.includes("Stay here"), "join chooser still present")
+  assert.match(html, /class="join-qr"[^>]*>\s*<svg/, "QR still present")
+})
+
+test("GET /r/:code for a paused room shows the paused pill, the paused artifact message and no clickable dead link", async () => {
+  const { baseUrl, service, code } = await newRoomHarness()
+  await service.pauseRoom(code)
+
+  const res = await fetch(`${baseUrl}/r/${code}`)
+  assert.equal(res.status, 200)
+  const html = await res.text()
+  assert.ok(html.includes(">paused</span>"))
+  assert.ok(html.includes("artifact paused, the link will come back when the room wakes"))
+  assert.ok(!html.includes(`/r/${code}/artifact/`), "no dead artifact link is rendered at all")
+  assert.match(html, /id="artifact-frame"[^>]*style="display:none"/)
 })

@@ -96,6 +96,21 @@ export interface Env {
   /** Directory rendered deliverables are stored under, one subdirectory per
    *  room code (src/service/media-store.ts). */
   readonly mediaDir: string
+  /** Operator hard limit (docs/DELIVERABLE.md): comma-separated email
+   *  addresses and messenger contact refs a deliverable may actually be sent
+   *  to. When set, `DeliverableService` refuses any target not on this list
+   *  at request/preview time — before rendering, before any agentpush call,
+   *  before a token even exists to confirm. When unset, every target is
+   *  accepted and `DeliverableService` logs a loud startup warning instead;
+   *  `confirm` is still required either way. Compared case-insensitively.
+   *  Undefined when unset or empty. */
+  readonly deliveryAllowlist: readonly string[] | undefined
+  /** Cap, in bytes, on a single inbound media item fetched at ingress
+   *  (src/channels/media-ingress.ts), from `RDV_MEDIA_MAX_MB` (a positive
+   *  integer of mebibytes). An item over the cap is never fetched/stored;
+   *  the fan-in line says so instead (docs/MULTIMODAL.md, "Failure modes
+   *  stay visible"). Default 20 MiB. */
+  readonly mediaMaxBytes: number
 }
 
 type Source = Readonly<Record<string, string | undefined>>
@@ -153,6 +168,16 @@ function readBooter(source: Source, key: string): "local" | "e2b" {
   return readOptionalString(source, key) === "e2b" ? "e2b" : "local"
 }
 
+function readAllowlist(source: Source, key: string): readonly string[] | undefined {
+  const raw = readOptionalString(source, key)
+  if (raw === undefined) return undefined
+  const entries = raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+  return entries.length > 0 ? entries : undefined
+}
+
 function readPositiveInt(source: Source, key: string, fallback: number): number {
   const raw = source[key]
   if (raw === undefined || raw.trim().length === 0) return fallback
@@ -197,6 +222,8 @@ export function loadEnv(source: Source): Env {
       "/Volumes/SSDExternalMacStudio/Code/products/agentik/agentik-studio/projects/openagentik/canvakit/packages/cli/dist/index.js",
     ),
     mediaDir: readString(source, "RDV_MEDIA_DIR", ".rdv/media"),
+    deliveryAllowlist: readAllowlist(source, "RDV_DELIVERY_ALLOWLIST"),
+    mediaMaxBytes: readPositiveInt(source, "RDV_MEDIA_MAX_MB", 20) * 1024 * 1024,
   })
 }
 

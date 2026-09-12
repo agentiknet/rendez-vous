@@ -1,12 +1,15 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
-import { MessageDedup, parseAgentpushWebhook, parseEmailInbound } from "../channels/index.ts"
+import { MessageDedup, parseAgentpushWebhook, parseEmailInbound, type InboundEnvelope } from "../channels/index.ts"
+import { NullProviders, normalizeInboundMedia, type IngressFetch, type SttProvider, type VisionProvider } from "../channels/media-ingress.ts"
 import type { TranscriptRecord } from "../daemon/records.ts"
 import { env } from "../env.ts"
 import { joinLinks } from "../links/index.ts"
 import type { Room, Tier } from "../rooms/types.ts"
 import { renderRoomNotFoundPage, renderRoomPage } from "../web/page.ts"
 import { proxyArtifact, publicArtifactUrl } from "./artifact-proxy.ts"
+import { getSessionBusy, type DaemonExtraOptions } from "./daemon-extra.ts"
 import type { RoomService } from "./room-service.ts"
+import { MediaStore, type IngressMediaRecord } from "./media-store.ts"
 
 /** The `Room` shape handed to any client-facing surface — the JSON API and
  *  the page's server-side embed alike: the raw box `artifactUrl` swapped for
@@ -68,6 +71,69 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body))
 }
 
+/** Injectable media-ingress pieces for the webhook handlers and the media
+ *  route (docs/MULTIMODAL.md). Defaults: a `MediaStore` over `env.mediaDir`
+ *  and `NullProviders` — real STT/vision providers are NOT wired tonight. */
+export interface HttpMediaHooks {
+  mediaStore?: MediaStore
+  stt?: SttProvider
+  vision?: VisionProvider
+  fetch?: IngressFetch
+  maxBytes?: number
+}
+
+interface MediaIngress {
+  readonly store: MediaStore
+  readonly stt: SttProvider
+  readonly vision: VisionProvider
+  readonly fetch: IngressFetch | undefined
+  readonly maxBytes: number | undefined
+}
+
+function resolveMediaIngress(hooks: HttpMediaHooks | undefined): MediaIngress {
+  return {
+    store: hooks?.mediaStore ?? new MediaStore(),
+    stt: hooks?.stt ?? NullProviders.stt,
+    vision: hooks?.vision ?? NullProviders.vision,
+    fetch: hooks?.fetch,
+    maxBytes: hooks?.maxBytes,
+  }
+}
+
+/** docs/MULTIMODAL.md transcript convention: a media message fans in as
+ *  `[Name · channel · kind] <normalized line>`. The suffix rides INSIDE the
+ *  text on this side because `RoomService.InboundInput` lives in
+ *  room-service.ts — another executor's file this milestone must not touch —
+ *  so there is nowhere to add the optional field `handleInbound` would need.
+ *  `fanIn` still prepends its own `[Name · tier]`, so the session prompt
+ *  shows both prefixes; nothing is dropped, only doubled. */
+function attributedMediaText(envelope: InboundEnvelope, mediaText: string, suffix: string): string {
+  const line = `[${envelope.displayName} · ${envelope.source} · ${suffix}] ${mediaText}`
+  return envelope.text.length > 0 ? `${envelope.text}\n${line}` : line
+}
+
+/** The ingress pipeline's first half: normalize media into text + stored
+ *  records BEFORE anything is enqueued, then hand back the text to fan in. */
+async function ingestEnvelopeMedia(
+  envelope: InboundEnvelope,
+  media: MediaIngress,
+): Promise<{ text: string; records: readonly IngressMediaRecord[] }> {
+  const normalized = await normalizeInboundMedia(envelope, {
+    store: media.store,
+    stt: media.stt,
+    vision: media.vision,
+    ...(media.fetch !== undefined ? { fetch: media.fetch } : {}),
+    ...(media.maxBytes !== undefined ? { maxBytes: media.maxBytes } : {}),
+  })
+  if (normalized.text === undefined || normalized.attributionSuffix === undefined) {
+    return { text: envelope.text, records: [] }
+  }
+  return {
+    text: attributedMediaText(envelope, normalized.text, normalized.attributionSuffix),
+    records: normalized.records,
+  }
+}
+
 async function handleInboundSimulated(service: RoomService, req: IncomingMessage, res: ServerResponse): Promise<void> {
   const body = await readJsonBody(req)
   if (!isRecord(body)) {
@@ -101,6 +167,64 @@ async function handleInboundSimulated(service: RoomService, req: IncomingMessage
   sendJson(res, 200, outcome)
 }
 
+/** The `GET /r/:code/state` payload — everything the room page's poll loop
+ *  patches the DOM from, one JSON snapshot: room state, the member-facing
+ *  proxied artifact fact (never the raw e2b host), the roster, and the
+ *  agent's busy/idle fact read from the daemon session descriptor. */
+export interface RoomStatePayload {
+  code: string
+  state: Room["state"]
+  artifact: { url: string | undefined; ready: boolean }
+  members: { displayName: string; tier: Tier; joinedAt: string }[]
+  agent: { busy: boolean; lastActivityAt: string }
+  updatedAt: string
+}
+
+/** One state snapshot for the page's poller. The artifact is advertised as
+ *  ready only when the room is active AND its stored URL exists AND the last
+ *  boot/liveness probe confirmed it answers — a paused room or a confirmed
+ *  dead box gets `ready: false` and no URL at all, so the page never renders
+ *  a clickable dead link (the dead-artifact finding). */
+async function roomStatePayload(
+  room: Room,
+  daemon: DaemonExtraOptions,
+  now: Date = new Date(),
+): Promise<RoomStatePayload> {
+  const artifactLive = room.state !== "paused" && room.artifactUrl !== undefined && room.artifactReady !== false
+  const busy =
+    room.sessionId !== undefined ? ((await getSessionBusy(daemon, room.sessionId)) ?? false) : false
+  return {
+    code: room.code,
+    state: room.state,
+    artifact: {
+      url: artifactLive ? publicArtifactUrl(room.code) : undefined,
+      ready: artifactLive,
+    },
+    members: room.members.map((member) => ({
+      displayName: member.displayName,
+      tier: member.tier,
+      joinedAt: member.joinedAt,
+    })),
+    agent: { busy, lastActivityAt: room.lastActivityAt },
+    updatedAt: now.toISOString(),
+  }
+}
+
+async function handleRoomState(
+  service: RoomService,
+  daemon: DaemonExtraOptions,
+  res: ServerResponse,
+  encodedCode: string,
+): Promise<void> {
+  const code = decodeURIComponent(encodedCode)
+  const room = service.getRoom(code)
+  if (room === undefined) {
+    sendJson(res, 404, { error: "not_found" })
+    return
+  }
+  sendJson(res, 200, await roomStatePayload(room, daemon))
+}
+
 function handleGetRoom(service: RoomService, res: ServerResponse, encodedCode: string): void {
   const code = decodeURIComponent(encodedCode)
   const room = service.getRoom(code)
@@ -117,7 +241,12 @@ async function handleHealth(service: RoomService, res: ServerResponse): Promise<
   sendJson(res, 200, { status: "ok", rooms, daemon })
 }
 
-function handleRoomPage(service: RoomService, res: ServerResponse, encodedCode: string): void {
+async function handleRoomPage(
+  service: RoomService,
+  daemon: DaemonExtraOptions,
+  res: ServerResponse,
+  encodedCode: string,
+): Promise<void> {
   const code = decodeURIComponent(encodedCode)
   const room = service.getRoom(code)
   if (room === undefined) {
@@ -131,8 +260,12 @@ function handleRoomPage(service: RoomService, res: ServerResponse, encodedCode: 
     telegramBot: env.telegramBot,
     smsNumber: env.smsNumber,
   })
+  // Server-render the initial agent status too, so the page is never blank
+  // or lying before the first poll lands.
+  const busy =
+    room.sessionId !== undefined ? ((await getSessionBusy(daemon, room.sessionId)) ?? false) : false
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" })
-  res.end(renderRoomPage(toPublicRoom(room), links))
+  res.end(renderRoomPage(toPublicRoom(room), links, busy))
 }
 
 /** `GET /r/:code/artifact/` and `GET /r/:code/artifact/*` — the stable,
@@ -247,17 +380,30 @@ async function handleRoomSend(
 }
 
 /** `GET /r/:code/media/:id` (docs/DELIVERABLE.md) — the link every delivery
- *  preview points at. An unknown room or media id both 404; there is
- *  nothing to self-heal toward the way a momentarily-dead artifact box is
- *  (`handleRoomArtifact`) — a rendered PDF that's gone is gone. */
+ *  preview points at, extended to also serve ingress media records
+ *  (docs/MULTIMODAL.md) with their stored mime. An unknown room or media id
+ *  both 404; because the store is keyed `roomCode/mediaId`, a record landed
+ *  in another room is not served under this code either. */
 async function handleRoomMedia(
   service: RoomService,
+  media: MediaIngress,
   res: ServerResponse,
   encodedCode: string,
   encodedId: string,
 ): Promise<void> {
   const code = decodeURIComponent(encodedCode)
   const id = decodeURIComponent(encodedId)
+  const ingressRecord = media.store.getIngress(code, id)
+  if (ingressRecord !== undefined) {
+    const data = await media.store.readIngress(code, id)
+    if (data === undefined) {
+      sendJson(res, 404, { error: "not_found" })
+      return
+    }
+    res.writeHead(200, { "content-type": ingressRecord.mime, "content-length": data.length })
+    res.end(data)
+    return
+  }
   const data = await service.readMedia(code, id)
   if (data === undefined) {
     sendJson(res, 404, { error: "not_found" })
@@ -279,6 +425,7 @@ async function handleRoomMedia(
 async function handleAgentpushWebhook(
   service: RoomService,
   dedup: MessageDedup,
+  media: MediaIngress,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
@@ -304,12 +451,25 @@ async function handleAgentpushWebhook(
     return
   }
 
+  // Normalize at ingress (docs/MULTIMODAL.md): media becomes text + a stored
+  // record BEFORE anything is enqueued. A media-only message (empty text)
+  // fans in as the normalized line instead of being ignored.
+  const ingested = await ingestEnvelopeMedia(envelope, media)
+
   const outcome = await service.handleInbound({
     address: { provider: envelope.provider, source: envelope.source, contactRef: envelope.contactRef },
     displayName: envelope.displayName,
     tier: "messenger",
-    text: envelope.text,
+    text: ingested.text,
   })
+
+  if (ingested.records.length > 0 && "room" in outcome) {
+    // Records land room-less while membership is unresolved; re-key them
+    // under the room the message actually landed in.
+    for (const record of ingested.records) {
+      await media.store.assignRoom(record.mediaId, outcome.room.code)
+    }
+  }
   sendJson(res, 200, outcome)
 }
 
@@ -325,6 +485,7 @@ async function handleAgentpushWebhook(
 async function handleAgentpushMailWebhook(
   service: RoomService,
   dedup: MessageDedup,
+  media: MediaIngress,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
@@ -350,6 +511,11 @@ async function handleAgentpushMailWebhook(
     return
   }
 
+  // Same ingress normalization as the messenger webhook — a no-op today
+  // (the mail envelope carries no media field, docs/AGENTPUSH.md §8.2), but
+  // the one ingestion path stays the one path.
+  const ingested = await ingestEnvelopeMedia(envelope, media)
+
   const address = {
     provider: envelope.provider,
     source: envelope.roomCodeHint ?? "email",
@@ -369,12 +535,25 @@ async function handleAgentpushMailWebhook(
     address,
     displayName: envelope.displayName,
     tier: "email",
-    text: envelope.text,
+    text: ingested.text,
   })
+
+  if (ingested.records.length > 0 && "room" in outcome) {
+    for (const record of ingested.records) {
+      await media.store.assignRoom(record.mediaId, outcome.room.code)
+    }
+  }
   sendJson(res, 200, outcome)
 }
 
-async function handle(service: RoomService, dedup: MessageDedup, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handle(
+  service: RoomService,
+  dedup: MessageDedup,
+  media: MediaIngress,
+  daemon: DaemonExtraOptions,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
   const url = new URL(req.url ?? "/", "http://127.0.0.1")
 
   if (url.pathname === "/health" && req.method === "GET") {
@@ -388,12 +567,12 @@ async function handle(service: RoomService, dedup: MessageDedup, req: IncomingMe
   }
 
   if (url.pathname === "/inbound/agentpush" && req.method === "POST") {
-    await handleAgentpushWebhook(service, dedup, req, res)
+    await handleAgentpushWebhook(service, dedup, media, req, res)
     return
   }
 
   if (url.pathname === "/inbound/agentpush-mail" && req.method === "POST") {
-    await handleAgentpushMailWebhook(service, dedup, req, res)
+    await handleAgentpushMailWebhook(service, dedup, media, req, res)
     return
   }
 
@@ -416,7 +595,7 @@ async function handle(service: RoomService, dedup: MessageDedup, req: IncomingMe
       sendJson(res, 400, { error: "invalid_code" })
       return
     }
-    await handleRoomMedia(service, res, encodedCode, encodedId)
+    await handleRoomMedia(service, media, res, encodedCode, encodedId)
     return
   }
 
@@ -427,7 +606,18 @@ async function handle(service: RoomService, dedup: MessageDedup, req: IncomingMe
       sendJson(res, 400, { error: "invalid_code" })
       return
     }
-    handleRoomPage(service, res, encodedCode)
+    await handleRoomPage(service, daemon, res, encodedCode)
+    return
+  }
+
+  const stateMatch = /^\/r\/([^/]+)\/state$/.exec(url.pathname)
+  if (stateMatch !== null && req.method === "GET") {
+    const encodedCode = stateMatch[1]
+    if (encodedCode === undefined) {
+      sendJson(res, 400, { error: "invalid_code" })
+      return
+    }
+    await handleRoomState(service, daemon, res, encodedCode)
     return
   }
 
@@ -467,10 +657,20 @@ async function handle(service: RoomService, dedup: MessageDedup, req: IncomingMe
   sendJson(res, 404, { error: "not_found" })
 }
 
-export function createHttpServer(service: RoomService): Server {
+/** Injectable daemon connection for the state route's busy lookup
+ *  (`GET /sessions/:id`'s `busy` field). Defaults to the process env's
+ *  daemon; tests point it at a fake daemon. */
+export interface HttpStateHooks {
+  daemon?: DaemonExtraOptions
+}
+
+export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHooks, stateHooks?: HttpStateHooks): Server {
   const dedup = new MessageDedup()
+  const media = resolveMediaIngress(mediaHooks)
+  const daemon: DaemonExtraOptions =
+    stateHooks?.daemon ?? { baseUrl: env.daemonUrl, token: env.daemonToken }
   return createServer((req, res) => {
-    handle(service, dedup, req, res).catch((error: unknown) => {
+    handle(service, dedup, media, daemon, req, res).catch((error: unknown) => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal_error", message: error instanceof Error ? error.message : String(error) })
       }
