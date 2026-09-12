@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 01:18 UTC (03:18 local). Repo: this directory,
+Last updated: 2026-09-12 01:24 UTC (03:24 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -81,8 +81,8 @@ Last updated: 2026-09-12 01:18 UTC (03:18 local). Repo: this directory,
 2. Room-scoped proxied artifact URL `GET /r/:code/artifact/*` — IN PROGRESS
    (executor rdv-artifact-proxy).
    2b. Box liveness as a second fact (probe e2b; never advertise a dead box's
-   URL; restore on a fresh box) — NOT STARTED, brief staged at
-   `/tmp/rdv-briefs/box-liveness.txt` (Sonnet), spawn on the next free slot.
+   URL; restore on a fresh box) — IN PROGRESS (executor rdv-box-liveness,
+   `sess_9726365f`, Sonnet; will spend 1 boot on its live proof).
 3. Deliverable flow: preview → member confirm → PDF via canvakit → send to
    Jeremy's messenger AND the connected mailbox, every send in the transcript,
    recipient allowlist enforced — IN PROGRESS (executor rdv-deliverable-flow).
@@ -118,7 +118,9 @@ re-proven on a phone after `4e73786`.
 - `sess_5d7b39d2` rdv-deliverable-flow, sonnet: `src/service/deliverable.ts`,
   `pdf-render.ts`, `media-store.ts`, their tests, `docs/DELIVERABLE.md`,
   minimal hooks in `room-service.ts`/`http.ts`, additive `src/env.ts`.
-- `sess_71388884` rdv-pitch-deck, sonnet: `deck/` only.
+- `sess_9726365f` rdv-box-liveness, sonnet: `src/service/box-liveness.ts`,
+  `room-service.ts`, `booter.ts`, `src/sandbox/boot.ts`, their tests, one
+  RUNBOOK section. Fenced from fanout, web, http.ts, artifact-proxy, deliverable.
 - `sess_aa2f4908` rdv-middleman-spec, GLM: `docs/MIDDLEMAN.md`, architecture §2.5.
 - `sess_54be45ab` rdv-up-agent-prompt-queue, GLM: worktree `wt/agent-prompt-queue`.
 - `sess_c0291dc5` rdv-up-session-liveness, GLM: worktree `wt/session-liveness`.
