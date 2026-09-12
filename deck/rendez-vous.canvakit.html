@@ -218,6 +218,20 @@ sources:
         min-width: 2rem;
       }
 
+      .findings-tag {
+        display: inline-block;
+        font-family: var(--font-label-family, 'Poppins', sans-serif);
+        font-size: 0.65rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--color-warning-fg, #0A2447);
+        background: var(--color-warning, #D9932B);
+        border-radius: 4px;
+        padding: 0.15rem 0.45rem;
+        margin-bottom: 0.35rem;
+      }
+
       .findings-label {
         font-family: var(--font-body-family, 'Poppins', sans-serif);
         font-size: 1.1rem;
@@ -345,7 +359,7 @@ sources:
         {{#findingsItems}}
         <div class="findings-row">
           <div class="findings-n">{{n}}</div>
-          <div class="findings-label">{{label}}</div>
+          <div class="findings-label">{{#tag}}<span class="findings-tag">{{tag}}</span><br>{{/tag}}{{label}}</div>
         </div>
         {{/findingsItems}}
       </div>

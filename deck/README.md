@@ -37,3 +37,14 @@ node /Volumes/SSDExternalMacStudio/Code/products/agentik/agentik-studio/projects
   (the demo runs on the shared `default` workspace, not a dedicated one).
 - No slide required an "ASK" placeholder — every number traced to
   `docs/REHEARSAL.md` or `docs/ARCHITECTURE.md`.
+- Slide 6's fifth finding (the liveness check reading `res.ok` instead of
+  `status`) is sourced from `src/service/daemon-extra.ts`'s own doc comment
+  on `isSessionAlive`, operator-reported as found live on a real phone
+  during the Run 3 continuation; not yet written up in `docs/UPSTREAM.md`.
+- Slide 10's dead-artifact-link line (box `i7jos61ixgkcfrekmi1vl` expiring
+  mid-rehearsal) is operator-reported, confirming the risk
+  `docs/ARCHITECTURE.md` §9.3b predicted. As of this render,
+  `docs/REHEARSAL.md`'s Run 3 continuation is still marked "WAITING" on the
+  resume-after-kill check, so the slide and script call the fix "fixed
+  after rehearsal, re-proof pending" rather than claiming it's verified —
+  update that framing once `docs/REHEARSAL.md` records a completed re-test.

@@ -64,12 +64,13 @@
     "type": "findings",
     "isFindings": true,
     "eyebrow": "The strongest finding",
-    "title": "One shape, four independent bugs",
+    "title": "One shape, five independent bugs",
     "findingsItems": [
-      { "n": "1", "label": "queue: true omitted → a mid-turn prompt is silently dropped" },
-      { "n": "2", "label": "the resume cursor stays frozen → every reply after a resume vanishes" },
-      { "n": "3", "label": "an account-pinned inbound route → never fires, filtered out silently" },
-      { "n": "4", "label": "the agent proposes to rebuild a Gmail capability it already held" }
+      { "n": "1", "tag": "found live, tonight", "label": "the liveness check reads res.ok, not status — a killed session still answers 200, so resume reports success in 0.7s having resumed nothing" },
+      { "n": "2", "label": "queue: true omitted → a mid-turn prompt is silently dropped" },
+      { "n": "3", "label": "the resume cursor stays frozen → every reply after a resume vanishes" },
+      { "n": "4", "label": "an account-pinned inbound route → never fires, filtered out silently" },
+      { "n": "5", "label": "the agent proposes to rebuild a Gmail capability it already held" }
     ],
     "highlight": "None crash. All look like working code or correct config.",
     "caption": "This is evidence you only get by running it.",
@@ -119,7 +120,8 @@
     "title": "What was simulated, what was observed",
     "bullets": [
       "Runs 1–2: simulated inbound, no phone, no agentpush workspace. Run 3: real Telegram + web, live.",
-      "Paused e2b boxes expire in 20–60 min — the ledger keeps calling them “paused” regardless.",
+      "Paused e2b boxes expire in 20–60 min — and tonight it happened live: box i7jos61ixgkcfrekmi1vl expired mid-rehearsal, and the room kept advertising its now-dead artifact URL.",
+      "Resume-after-kill and the dead artifact link: fixed after rehearsal, re-proof pending. A room-scoped, proxied artifact URL is now being built — ahead of whisper and multimodal.",
       "We share the default workspace's Telegram routing — its existing responder route can fire alongside ours on the same message, risking a double reply.",
       "WhatsApp: not provisioned. No number, no key.",
       "Phase 2 pairing-back: untested — box-to-broker egress, which side mints the token, post-pairing scope."
