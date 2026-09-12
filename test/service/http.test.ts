@@ -337,6 +337,49 @@ test("POST /rooms/:code/send treats new/join/resume as plain text, not commands"
   assert.equal(spawnCalls, 1, "no second room should have been created")
 })
 
+test("POST /rooms/:code/send moves a web member registered in another room, so the same rule applies to every tier", async () => {
+  const { baseUrl, service, daemon, sessionId, code } = await newRoomHarness()
+
+  const otherCreated = await service.handleInbound({
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+2" },
+    displayName: "Bob",
+    tier: "messenger",
+    text: "new",
+  })
+  assert.equal(otherCreated.kind, "created")
+  if (otherCreated.kind !== "created") throw new Error("unreachable")
+  const otherCode = otherCreated.room.code
+
+  const sendTo = async (roomCode: string): Promise<void> => {
+    const res = await fetch(`${baseUrl}/rooms/${roomCode}/send`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ displayName: "Chloe", text: "hi" }),
+    })
+    assert.equal(res.status, 200)
+  }
+
+  const promptsBefore = daemon.requestsReceived.filter((r) => r.path === `/sessions/${sessionId}/prompt`).length
+  await sendTo(otherCode)
+  await sendTo(code)
+
+  const otherRoomBody = await readJson(await fetch(`${baseUrl}/rooms/${otherCode}`))
+  const otherMembers = isArrayOf(otherRoomBody.members, isMinimalMember) ? otherRoomBody.members : []
+  assert.equal(
+    otherMembers.filter((m) => m.displayName === "Chloe").length,
+    0,
+    "Chloe is no longer a member of the room she first sent from",
+  )
+
+  const roomBody = await readJson(await fetch(`${baseUrl}/rooms/${code}`))
+  const members = isArrayOf(roomBody.members, isMinimalMember) ? roomBody.members : []
+  const chloes = members.filter((m) => m.displayName === "Chloe" && m.tier === "room-web")
+  assert.equal(chloes.length, 1, "Chloe is now a member of the room she moved to")
+
+  const promptsAfter = daemon.requestsReceived.filter((r) => r.path === `/sessions/${sessionId}/prompt`).length
+  assert.equal(promptsAfter - promptsBefore, 2, "both sends still landed as turns, on top of whichever session backs each room")
+})
+
 test("POST /rooms/:code/send returns 404 for an unknown room", async () => {
   const { baseUrl } = await newRoomHarness()
   const res = await fetch(`${baseUrl}/rooms/RDV-ZZZZ/send`, {

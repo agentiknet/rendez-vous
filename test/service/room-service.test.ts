@@ -172,6 +172,84 @@ test("join adds a second member to an existing room and replies with a welcome t
   assert.ok(joinReplyText.includes("Bob"))
 })
 
+test("join moves a member already in another room, updating both rosters and replying with the move", async () => {
+  const { service, transport } = await buildHarness()
+
+  const createdA = await service.handleInbound(alice("new"))
+  assert.ok(createdA.kind === "created")
+  if (createdA.kind !== "created") return
+
+  const createdB = await service.handleInbound(bob("new"))
+  assert.ok(createdB.kind === "created")
+  if (createdB.kind !== "created") return
+
+  const moved = await service.handleInbound(alice(`join ${createdB.room.code}`))
+  assert.equal(moved.kind, "moved")
+  if (moved.kind !== "moved") return
+  assert.equal(moved.from, createdA.room.code)
+  assert.equal(moved.room.code, createdB.room.code)
+
+  const roomA = service.getRoom(createdA.room.code)
+  assert.equal(roomA?.members.length, 0, "alice's old room no longer lists her")
+  const roomB = service.getRoom(createdB.room.code)
+  assert.equal(roomB?.members.length, 2, "bob is untouched, alice is added")
+  assert.ok(roomB?.members.some((m) => m.displayName === "Alice"))
+
+  const lastSend = transport.sends[transport.sends.length - 1]
+  assert.equal(lastSend?.member.displayName, "Alice")
+  assert.ok(lastSend?.message.text.includes(createdA.room.code))
+  assert.ok(lastSend?.message.text.includes(createdB.room.code))
+})
+
+test("join on the room a member is already in is a no-op, replying with the roster rather than a move", async () => {
+  const { service, transport } = await buildHarness()
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+
+  const rejoined = await service.handleInbound(alice(`join ${created.room.code}`))
+  assert.equal(rejoined.kind, "joined")
+  if (rejoined.kind !== "joined") return
+  assert.equal(rejoined.room.members.length, 1)
+
+  const lastSend = transport.sends[transport.sends.length - 1]
+  assert.ok(lastSend?.message.text.includes(created.room.code))
+})
+
+test("leave removes the sender from their room and replies confirming it, without killing the session", async () => {
+  const { service, store, transport, daemon } = await buildHarness()
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+
+  const left = await service.handleInbound(alice("leave"))
+  assert.equal(left.kind, "left")
+  if (left.kind !== "left") return
+  assert.equal(left.room.code, created.room.code)
+
+  assert.equal(store.get(created.room.code)?.members.length, 0)
+  assert.equal(store.get(created.room.code)?.state, "active", "leaving does not pause the room")
+
+  const lastSend = transport.sends[transport.sends.length - 1]
+  assert.equal(lastSend?.member.displayName, "Alice")
+  assert.ok(lastSend?.message.text.includes(created.room.code))
+  assert.match(lastSend?.message.text ?? "", /left/i)
+
+  const killCalls = daemon.requestsReceived.filter((r) => r.path.includes("/kill"))
+  assert.equal(killCalls.length, 0, "leaving one member must not kill the room's session")
+})
+
+test("leave for a sender in no room replies with guidance instead of throwing", async () => {
+  const { service, transport } = await buildHarness()
+
+  const outcome = await service.handleInbound(alice("leave"))
+  assert.deepEqual(outcome, { kind: "not-in-room" })
+  assert.equal(transport.sends.length, 1)
+  assert.match(transport.sends[0]?.message.text ?? "", /not in a room/i)
+})
+
 test("join on an unknown code replies with guidance and returns a typed error", async () => {
   const { service, transport } = await buildHarness()
 

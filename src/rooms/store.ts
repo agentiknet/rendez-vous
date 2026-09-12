@@ -237,6 +237,29 @@ export class RoomStore {
     return member
   }
 
+  /** Idempotent: removing a member id that isn't (or is no longer) in the
+   *  room returns `undefined` instead of throwing, so a duplicate `leave` or
+   *  a `join`-triggered move racing another removal is safe to retry. */
+  async removeMember(code: string, memberId: string): Promise<Member | undefined> {
+    const normalized = normalizeCode(code)
+    if (normalized === undefined) {
+      throw new Error(`invalid room code: ${code}`)
+    }
+    const room = this.rooms.get(normalized)
+    if (room === undefined) {
+      throw new Error(`unknown room: ${normalized}`)
+    }
+
+    const index = room.members.findIndex((member) => member.id === memberId)
+    if (index === -1) {
+      return undefined
+    }
+    const [removed] = room.members.splice(index, 1)
+    room.updatedAt = new Date().toISOString()
+    await this.enqueueWrite()
+    return removed
+  }
+
   async update(
     code: string,
     patch: Partial<

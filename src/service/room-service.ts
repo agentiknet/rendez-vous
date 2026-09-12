@@ -5,7 +5,7 @@ import { fanIn } from "../fanin/index.ts"
 import { RoomFanout } from "../fanout/reader.ts"
 import type { Transport } from "../fanout/types.ts"
 import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
-import { handleCommand, parseCommand } from "../rooms/commands.ts"
+import { ensureMembership, handleCommand, parseCommand } from "../rooms/commands.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import type { Address, Member, Room, Tier } from "../rooms/types.ts"
 import type { SessionBooter } from "./booter.ts"
@@ -22,8 +22,11 @@ export interface InboundInput {
 export type InboundOutcome =
   | { kind: "created"; room: Room; member: Member }
   | { kind: "joined"; room: Room; member: Member }
+  | { kind: "moved"; room: Room; member: Member; from: string }
   | { kind: "resumed"; room: Room; member: Member }
   | { kind: "message"; room: Room; member: Member }
+  | { kind: "left"; room: Room; member: Member }
+  | { kind: "not-in-room" }
   | { kind: "unknown-code" }
   | { kind: "unknown-sender" }
 
@@ -84,9 +87,11 @@ function joinRoomReplyText(room: Room): string {
 }
 
 /** Stable, deterministic contact ref for a room-web guest: the same
- *  displayName in the same room always resolves to the same member, which
- *  is what makes `store.addMember`'s idempotency actually kick in here —
- *  there is no browser/session id to key on instead. */
+ *  displayName always resolves to the same member, wherever they're
+ *  currently registered — there is no browser/session id to key on
+ *  instead, so a name typed into a different room's page is treated as
+ *  that guest moving rooms, same rule `join` applies to a phone number or
+ *  email address. */
 function slugify(displayName: string): string {
   const slug = displayName
     .trim()
@@ -251,10 +256,10 @@ export class RoomService {
       return { kind: "no-session" }
     }
 
-    const member = await this.store.addMember(code, {
+    const { member } = await ensureMembership(this.store, room.code, {
       displayName,
       tier: "room-web",
-      address: { provider: "room-web", source: code, contactRef: slugify(displayName) },
+      address: { provider: "room-web", source: "room-web", contactRef: slugify(displayName) },
     })
 
     if (room.state === "paused") {
@@ -282,6 +287,8 @@ export class RoomService {
           return this.handleJoin(command.code, sender, input)
         case "resume":
           return this.handleResume(command.code, sender, input)
+        case "leave":
+          return this.handleLeave(sender, input)
       }
     }
 
@@ -324,11 +331,33 @@ export class RoomService {
     }
     this.fanout.start(result.room.code)
     await this.touchActivity(result.room.code)
+
+    if (result.movedFrom !== undefined) {
+      await this.transport.send(result.member, {
+        text: `Moved from ${result.movedFrom} to ${result.room.code}.`,
+        artifactUrl: result.room.artifactUrl,
+      })
+      return { kind: "moved", room: result.room, member: result.member, from: result.movedFrom }
+    }
+
     await this.transport.send(result.member, {
       text: joinRoomReplyText(result.room),
       artifactUrl: result.room.artifactUrl,
     })
     return { kind: "joined", room: result.room, member: result.member }
+  }
+
+  private async handleLeave(sender: Omit<Member, "id" | "joinedAt">, input: InboundInput): Promise<InboundOutcome> {
+    const result = await handleCommand(this.store, { kind: "leave" }, sender)
+    if (!result.ok) {
+      await this.replyGuidance(input, "You're not in a room. Send `new` or `join RDV-XXXX`.")
+      return { kind: "not-in-room" }
+    }
+    await this.transport.send(result.member, {
+      text: `You left ${result.room.code}. Send \`new\` or \`join RDV-XXXX\`.`,
+      artifactUrl: undefined,
+    })
+    return { kind: "left", room: result.room, member: result.member }
   }
 
   /** Only when the transport can actually deliver an image (R6-adjacent: the

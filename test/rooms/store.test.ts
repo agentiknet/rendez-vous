@@ -103,6 +103,39 @@ test("addMember throws on unknown room code", async () => {
   await assert.rejects(() => store.addMember("RDV-ZZZZ", aliceInput()))
 })
 
+test("removeMember removes a known member and persists the change", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const alice = await store.addMember(room.code, aliceInput())
+
+  const removed = await store.removeMember(room.code, alice.id)
+  assert.equal(removed?.id, alice.id)
+  assert.equal(store.get(room.code)?.members.length, 0)
+
+  const reopened = await RoomStore.open(dir)
+  assert.equal(reopened.get(room.code)?.members.length, 0)
+})
+
+test("removeMember is idempotent: removing an absent member id is a no-op, not a throw", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const alice = await store.addMember(room.code, aliceInput())
+
+  const first = await store.removeMember(room.code, alice.id)
+  assert.equal(first?.id, alice.id)
+  const second = await store.removeMember(room.code, alice.id)
+  assert.equal(second, undefined)
+  assert.equal(store.get(room.code)?.members.length, 0)
+})
+
+test("removeMember throws on unknown room code", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  await assert.rejects(() => store.removeMember("RDV-ZZZZ", "some-id"))
+})
+
 test("update patches only the given fields and bumps updatedAt", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)

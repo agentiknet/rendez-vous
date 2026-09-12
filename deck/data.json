@@ -72,8 +72,8 @@
       { "n": "4", "label": "an account-pinned inbound route → never fires, filtered out silently" },
       { "n": "5", "label": "the agent proposes to rebuild a Gmail capability it already held" }
     ],
-    "highlight": "None crash. All look like working code or correct config.",
-    "caption": "This is evidence you only get by running it.",
+    "highlight": "The first four lost data quietly. The fifth reported success while doing nothing — the correct field was already parsed one function over.",
+    "caption": "None crash. All look like working code or correct config. This is evidence you only get by running it.",
     "page": "6 / 11"
   },
   {

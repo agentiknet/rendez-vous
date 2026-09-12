@@ -89,6 +89,22 @@ curl -s http://127.0.0.1:8790/inbound/simulated \
 Returns the `InboundOutcome` JSON (`{"kind":"created", "room": {...}, "member": {...}}`
 for a `new`, `{"kind":"unknown-code"}` for a bad `join`/`resume`, etc.).
 
+Commands, matched case-insensitively against `text`: `new` (creates a room),
+`join <code>`, `resume <code>`, and `leave`. A member is bound to exactly one
+room at a time. `join <code>` for someone already in a different room moves
+them — removes them from the old room, adds them to the new one, and replies
+`Moved from RDV-AAAA to RDV-BBBB.` (`{"kind":"moved", "from":"RDV-AAAA", ...}`).
+`join <code>` on the room they're already in is a no-op that just replies
+with the roster (`{"kind":"joined", ...}`). `leave` removes the sender from
+their current room and replies `You left RDV-XXXX. Send \`new\` or \`join
+RDV-XXXX\`.` (`{"kind":"left", ...}`) without touching the room's session —
+it keeps running for whoever's left, and idle-pause (§3) reclaims it if that
+was the last member. `leave` from a sender in no room replies with guidance
+instead (`{"kind":"not-in-room"}`). The same move rule applies to the
+room-web tier: `POST /rooms/:code/send` (below) registers/looks up its
+member by display name only, so sending from a different room's page moves
+that name there too.
+
 ### `GET /rooms/:code`
 
 ```
@@ -171,6 +187,15 @@ message from a known member — or an explicit `resume <code>` — reconnects
 it automatically, telling the sender "Resuming room, one moment…" first.
 `resume <code>` on a room that's still active is a no-op status reply, not
 a reboot.
+
+**Recovery from an out-of-band kill:** idle-pause isn't the only way a
+session dies — a daemon-side `agent_kill`, a crash, or a daemon restart ends
+it without ever running Rendez-vous's own pause path, leaving the room
+`state: "active"` pointing at a session the daemon no longer runs. This is
+now detected on the very next message to that room (a plain fan-in or an
+explicit `resume <code>` alike) and revived the same way as an idle pause:
+the sender sees "Resuming room, one moment…" and the room comes back active
+on a fresh session.
 
 **Pre-warming for a demo:** boot budget is the scarce resource (each fresh
 e2b boot costs real time and money; reconnecting to a paused box is free).

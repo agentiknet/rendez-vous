@@ -45,16 +45,19 @@ tonight, live, on a real phone. Our own liveness check tested whether the
 HTTP call succeeded, not whether the session was still alive: a killed
 session still answers 200. So resume reported success in seven tenths of a
 second having resumed nothing, and a message to the room was accepted,
-then failed later, on the phone. It passes review, it passes tests, and it
-only fails when something dies out of band — which never happens in a test
-suite and always happens on stage. The other four are quieter versions of
-the same shape: omit queue: true and a mid-turn message vanishes; resume a
-session and the fan-out cursor freezes, so every reply after it vanishes
-too; pin an inbound route to one account and it silently never fires; ask
-the agent for Gmail access it already effectively has, and it confidently
-proposes rebuilding it from scratch. None of these crash. All five look
-like working code or correct configuration. This is evidence you only get
-by running it."
+then failed later, on the phone. Here's the distinction that matters: the
+other four bugs lost data quietly. This one is worse — it reported success
+while doing nothing. And the fix was sitting right there: the correct
+field was already being parsed by the function next to it; this one just
+never looked. It passes review, it passes tests, and it only fails when
+something dies out of band — which never happens in a test suite and
+always happens on stage. The other four: omit queue: true and a mid-turn
+message vanishes; resume a session and the fan-out cursor freezes, so
+every reply after it vanishes too; pin an inbound route to one account and
+it silently never fires; ask the agent for Gmail access it already
+effectively has, and it confidently proposes rebuilding it from scratch.
+None of these five crash. All look like working code or correct
+configuration. This is evidence you only get by running it."
 
 ## 2:35 — Slide 7: Credentials per-member
 
