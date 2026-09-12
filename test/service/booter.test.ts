@@ -45,11 +45,22 @@ test("openingPrompt explains the whisper syntax and its visibility rule", () => 
   )
 })
 
-test("openingPrompt with an appDir (e2b) names the exact served-page path to edit", () => {
+test("openingPrompt with an appDir (e2b) tells the agent it has the render_artifact tool", () => {
   const prompt = openingPrompt(fakeRoom("RDV-7F3K"), { appDir: "/home/user/apps/rdv-hello" })
-  assert.ok(
-    prompt.includes("/home/user/apps/rdv-hello/.agentproto/ui/index.html"),
-    "should name the exact file the agent must edit to change what members see",
+  assert.match(
+    prompt,
+    /render_artifact MCP tool/,
+    "the agent must know the artifact is rendered by calling its tool, not by editing a file",
+  )
+  assert.match(
+    prompt,
+    /is how members see anything/i,
+    "the tool call must be framed as the only way members see output",
+  )
+  assert.match(
+    prompt,
+    /fix the data, call/i,
+    "on failure the agent must retry with corrected data, not ask a human",
   )
 })
 
@@ -90,12 +101,13 @@ test("resumePrompt keeps the whisper protocol a fresh boot gets", () => {
   assert.ok(prompt.includes("[[/whisper]]"), "should include the closing marker too")
 })
 
-test("resumePrompt with an appDir names the served-page path, so a resumed agent can still edit the artifact", () => {
+test("resumePrompt with an appDir keeps the render_artifact tool, so a resumed agent can still publish", () => {
   const prompt = resumePrompt(fakeRoom("RDV-7F3K"), { appDir: "/home/user/apps/rdv-hello" })
 
-  assert.ok(
-    prompt.includes("/home/user/apps/rdv-hello/.agentproto/ui/index.html"),
-    "without this the resumed agent does not know which file backs the artifact",
+  assert.match(
+    prompt,
+    /render_artifact MCP tool/,
+    "without this the resumed agent does not know how members see anything",
   )
 })
 
@@ -129,7 +141,7 @@ test("resumePrompt carries the same capability lines as openingPrompt", () => {
     "do not stall waiting for consensus",
     "[[ask <their display name>]]",
     "Keep replies short",
-    "/home/user/apps/rdv-hello/.agentproto/ui/index.html",
+    "render_artifact MCP tool",
   ]) {
     assert.ok(opening.includes(line), `opening prompt should contain: ${line}`)
     assert.ok(resumed.includes(line), `resume prompt should contain the same capability line: ${line}`)

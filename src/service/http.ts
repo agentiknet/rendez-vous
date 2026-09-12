@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { MessageDedup, parseAgentpushWebhook, parseEmailInbound, type InboundEnvelope } from "../channels/index.ts"
+import { resolveDisplayName } from "../channels/display-name.ts"
 import {
   NullProviders,
   normalizeInboundMedia,
@@ -16,6 +17,8 @@ import { joinLinks } from "../links/index.ts"
 import type { Room, Tier } from "../rooms/types.ts"
 import { renderRoomNotFoundPage, renderRoomPage } from "../web/page.ts"
 import { proxyArtifact, publicArtifactUrl } from "./artifact-proxy.ts"
+import { ArtifactRenderStore } from "./artifact-renders.ts"
+import { createMcpCanvakitHandler, defaultMcpCanvakitDeps } from "./mcp-canvakit.ts"
 import { getSessionBusy, type DaemonExtraOptions } from "./daemon-extra.ts"
 import type { RoomService } from "./room-service.ts"
 import { MediaStore, type IngressMediaRecord } from "./media-store.ts"
@@ -25,12 +28,16 @@ import { MediaStore, type IngressMediaRecord } from "./media-store.ts"
  *  the stable, room-code-keyed proxy URL, so the raw e2b URL never reaches a
  *  browser (architecture.md §9.3b; mirrors `RoomService`'s own
  *  `memberFacingArtifactUrl` for messenger/email replies). */
-function toPublicRoom(room: Room): Room {
+function toPublicRoom(room: Room, hasStoredRender: boolean): Room {
   // A box last confirmed dead (`artifactReady === false`, the idle sweep's
   // probe) advertises no URL at all — the page shows its paused/self-heal
   // state instead of a clickable dead link (the dead-artifact finding).
-  if (room.artifactReady === false) return { ...room, artifactUrl: undefined }
-  if (room.artifactUrl === undefined) return room
+  // Exception: a STORED render is servable by this service itself, box or
+  // no box, so the URL stays alive while the render exists.
+  if (room.artifactReady === false && !hasStoredRender) return { ...room, artifactUrl: undefined }
+  if (room.artifactUrl === undefined) {
+    return hasStoredRender ? { ...room, artifactUrl: publicArtifactUrl(room.code) } : room
+  }
   return { ...room, artifactUrl: publicArtifactUrl(room.code) }
 }
 
@@ -89,6 +96,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  *  and each is upgraded only when the matching credential is configured. */
 export interface HttpMediaHooks {
   mediaStore?: MediaStore
+  renders?: ArtifactRenderStore
   stt?: SttProvider
   vision?: VisionProvider
   fetch?: IngressFetch
@@ -98,6 +106,7 @@ export interface HttpMediaHooks {
 
 interface MediaIngress {
   readonly store: MediaStore
+  readonly renders: ArtifactRenderStore
   readonly stt: SttProvider
   readonly vision: VisionProvider
   readonly fetch: IngressFetch | undefined
@@ -121,6 +130,7 @@ function resolveMediaIngress(hooks: HttpMediaHooks | undefined): MediaIngress {
   const telegramToken = env.telegramBotToken
   return {
     store: hooks?.mediaStore ?? new MediaStore(),
+    renders: hooks?.renders ?? new ArtifactRenderStore(),
     stt: hooks?.stt ?? (openaiKey !== undefined ? new OpenAiSttProvider(openaiKey) : NullProviders.stt),
     vision: hooks?.vision ?? (openaiKey !== undefined ? new OpenAiVisionProvider(openaiKey) : NullProviders.vision),
     fetch: hooks?.fetch,
@@ -222,9 +232,13 @@ export interface RoomStatePayload {
 async function roomStatePayload(
   room: Room,
   daemon: DaemonExtraOptions,
+  hasStoredRender: (code: string) => Promise<boolean>,
   now: Date = new Date(),
 ): Promise<RoomStatePayload> {
-  const artifactLive = room.state !== "paused" && room.artifactUrl !== undefined && room.artifactReady !== false
+  const storedRender = await hasStoredRender(room.code)
+  const artifactLive =
+    (room.state !== "paused" && room.artifactUrl !== undefined && room.artifactReady !== false) ||
+    storedRender
   const busy =
     room.sessionId !== undefined ? ((await getSessionBusy(daemon, room.sessionId)) ?? false) : false
   return {
@@ -247,6 +261,7 @@ async function roomStatePayload(
 async function handleRoomState(
   service: RoomService,
   daemon: DaemonExtraOptions,
+  hasStoredRender: (code: string) => Promise<boolean>,
   res: ServerResponse,
   encodedCode: string,
 ): Promise<void> {
@@ -256,17 +271,22 @@ async function handleRoomState(
     sendJson(res, 404, { error: "not_found" })
     return
   }
-  sendJson(res, 200, await roomStatePayload(room, daemon))
+  sendJson(res, 200, await roomStatePayload(room, daemon, hasStoredRender))
 }
 
-function handleGetRoom(service: RoomService, res: ServerResponse, encodedCode: string): void {
+async function handleGetRoom(
+  service: RoomService,
+  hasStoredRender: (code: string) => Promise<boolean>,
+  res: ServerResponse,
+  encodedCode: string,
+): Promise<void> {
   const code = decodeURIComponent(encodedCode)
   const room = service.getRoom(code)
   if (room === undefined) {
     sendJson(res, 404, { error: "not_found" })
     return
   }
-  sendJson(res, 200, toPublicRoom(room))
+  sendJson(res, 200, toPublicRoom(room, await hasStoredRender(code)))
 }
 
 async function handleHealth(service: RoomService, res: ServerResponse): Promise<void> {
@@ -278,6 +298,7 @@ async function handleHealth(service: RoomService, res: ServerResponse): Promise<
 async function handleRoomPage(
   service: RoomService,
   daemon: DaemonExtraOptions,
+  hasStoredRender: (code: string) => Promise<boolean>,
   res: ServerResponse,
   encodedCode: string,
 ): Promise<void> {
@@ -299,18 +320,22 @@ async function handleRoomPage(
   const busy =
     room.sessionId !== undefined ? ((await getSessionBusy(daemon, room.sessionId)) ?? false) : false
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" })
-  res.end(renderRoomPage(toPublicRoom(room), links, busy))
+  res.end(renderRoomPage(toPublicRoom(room, await hasStoredRender(code)), links, busy))
 }
 
 /** `GET /r/:code/artifact/` and `GET /r/:code/artifact/*` — the stable,
  *  room-code-keyed URL members are actually given (architecture.md §9.3b,
- *  `publicArtifactUrl`). A room with no `artifactUrl` yet is handed to
- *  `proxyArtifact` the same as an unreachable upstream: both self-heal with
- *  the same refreshing 503 page, so this route never needs its own 404 for
- *  "no artifact". An unknown room code, though, is a 404 — there is nothing
- *  to self-heal toward. */
+ *  `publicArtifactUrl`). When the room has a stored canvakit render, the
+ *  INDEX is served from that render (the box cannot produce the branded
+ *  page; this service already has it) while every other path proxies to the
+ *  box. A room with no `artifactUrl` yet is handed to `proxyArtifact` the
+ *  same as an unreachable upstream: both self-heal with the same refreshing
+ *  503 page, so this route never needs its own 404 for "no artifact". An
+ *  unknown room code, though, is a 404 — there is nothing to self-heal
+ *  toward. */
 async function handleRoomArtifact(
   service: RoomService,
+  renders: ArtifactRenderStore,
   req: IncomingMessage,
   res: ServerResponse,
   encodedCode: string,
@@ -323,7 +348,17 @@ async function handleRoomArtifact(
     sendJson(res, 404, { error: "not_found" })
     return
   }
-  await proxyArtifact({ artifactUrl: room.artifactUrl, method: req.method, subPath, search }, res)
+  const renderedIndex = (await renders.hasOrLoad(code)) ? await renders.readHtml(code) : undefined
+  await proxyArtifact(
+    {
+      artifactUrl: room.artifactUrl,
+      method: req.method,
+      subPath,
+      search,
+      ...(renderedIndex !== undefined ? { renderedIndex } : {}),
+    },
+    res,
+  )
 }
 
 function parseSince(raw: string | null): number {
@@ -490,9 +525,15 @@ async function handleAgentpushWebhook(
   // fans in as the normalized line instead of being ignored.
   const ingested = await ingestEnvelopeMedia(envelope, media)
 
+  // agentpush's envelope has no name field, so `displayName` arrives as the
+  // contact ref itself — members would see each other as `8876379006` and the
+  // agent would address them that way. Resolve a real name where we can
+  // (src/channels/display-name.ts); never fatal, falls back to the ref.
+  const displayName = await resolveDisplayName(envelope.provider, envelope.contactRef)
+
   const outcome = await service.handleInbound({
     address: { provider: envelope.provider, source: envelope.source, contactRef: envelope.contactRef },
-    displayName: envelope.displayName,
+    displayName,
     tier: "messenger",
     text: ingested.text,
   })
@@ -580,11 +621,44 @@ async function handleAgentpushMailWebhook(
   sendJson(res, 200, outcome)
 }
 
+/** `POST /mcp/canvakit` — the MCP-over-HTTP endpoint the sandbox agents'
+ *  `render_artifact` tool calls through the tunnel (src/service/mcp-canvakit.ts).
+ *  Per-room bearer auth is enforced inside the handler (the token binds to
+ *  the room code in the payload), after the body is parsed — so the handler
+ *  function stays directly testable. */
+async function handleMcpCanvakit(
+  handler: ReturnType<typeof createMcpCanvakitHandler>,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  let body: unknown
+  try {
+    body = await readJsonBody(req)
+  } catch {
+    sendJson(res, 200, {
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "invalid JSON" },
+    })
+    return
+  }
+  const authorization = req.headers.authorization
+  const mcpResponse = await handler(body, Array.isArray(authorization) ? authorization[0] : authorization)
+  if (mcpResponse.status === 202) {
+    res.writeHead(202)
+    res.end()
+    return
+  }
+  sendJson(res, mcpResponse.status, mcpResponse.body)
+}
+
 async function handle(
   service: RoomService,
   dedup: MessageDedup,
   media: MediaIngress,
   daemon: DaemonExtraOptions,
+  mcpCanvakit: ReturnType<typeof createMcpCanvakitHandler>,
+  hasStoredRender: (code: string) => Promise<boolean>,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
@@ -592,6 +666,11 @@ async function handle(
 
   if (url.pathname === "/health" && req.method === "GET") {
     await handleHealth(service, res)
+    return
+  }
+
+  if (url.pathname === "/mcp/canvakit" && req.method === "POST") {
+    await handleMcpCanvakit(mcpCanvakit, req, res)
     return
   }
 
@@ -617,7 +696,7 @@ async function handle(
       sendJson(res, 400, { error: "invalid_code" })
       return
     }
-    await handleRoomArtifact(service, req, res, encodedCode, artifactMatch[2] ?? "", url.search)
+    await handleRoomArtifact(service, media.renders, req, res, encodedCode, artifactMatch[2] ?? "", url.search)
     return
   }
 
@@ -640,7 +719,7 @@ async function handle(
       sendJson(res, 400, { error: "invalid_code" })
       return
     }
-    await handleRoomPage(service, daemon, res, encodedCode)
+    await handleRoomPage(service, daemon, hasStoredRender, res, encodedCode)
     return
   }
 
@@ -651,7 +730,7 @@ async function handle(
       sendJson(res, 400, { error: "invalid_code" })
       return
     }
-    await handleRoomState(service, daemon, res, encodedCode)
+    await handleRoomState(service, daemon, hasStoredRender, res, encodedCode)
     return
   }
 
@@ -684,7 +763,7 @@ async function handle(
       sendJson(res, 400, { error: "invalid_code" })
       return
     }
-    handleGetRoom(service, res, encodedCode)
+    handleGetRoom(service, hasStoredRender, res, encodedCode)
     return
   }
 
@@ -703,8 +782,13 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
   const media = resolveMediaIngress(mediaHooks)
   const daemon: DaemonExtraOptions =
     stateHooks?.daemon ?? { baseUrl: env.daemonUrl, token: env.daemonToken }
+  const hasStoredRender = (code: string) => media.renders.hasOrLoad(code)
+  const mcpCanvakit = createMcpCanvakitHandler({
+    ...defaultMcpCanvakitDeps(media.renders),
+    roomExists: (code) => service.getRoom(code) !== undefined,
+  })
   return createServer((req, res) => {
-    handle(service, dedup, media, daemon, req, res).catch((error: unknown) => {
+    handle(service, dedup, media, daemon, mcpCanvakit, hasStoredRender, req, res).catch((error: unknown) => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal_error", message: error instanceof Error ? error.message : String(error) })
       }

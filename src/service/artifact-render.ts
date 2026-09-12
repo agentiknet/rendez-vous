@@ -18,12 +18,30 @@ import { copyFile, mkdtemp, mkdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { promisify } from "node:util"
 import { env } from "../env.ts"
 
-const execFileAsync = promisify(execFile)
-
 const PDF_SIGNATURE = "%PDF-"
+
+/**
+ * Run the canvakit CLI via `execFile` with the callback form (not the
+ * promisified one): the promisified wrapper rejects with a generic
+ * "Command failed" message and buries stderr on properties TypeScript
+ * doesn't know about. The `render_artifact` tool's whole point is that the
+ * agent can READ what went wrong and retry, so the error text must carry
+ * canvakit's own stderr verbatim, not a paraphrase.
+ */
+function execCanvakit(args: readonly string[], cwd: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile("node", [...args], { cwd }, (error, _stdout, stderrText) => {
+      if (error === null || error === undefined) {
+        resolve()
+        return
+      }
+      const trimmed = stderrText.trim()
+      reject(new Error(trimmed.length > 0 ? `${error.message}\n${trimmed}` : error.message))
+    })
+  })
+}
 
 /**
  * The demo client's designkit: Ternwood, the fictional ~30-person company the
@@ -113,8 +131,7 @@ async function renderArtifact(
     await copyFile(templatePath, join(workDir, templateName))
     await copyFile(dataPath, join(workDir, "data.json"))
     const start = Date.now()
-    await execFileAsync(
-      "node",
+    await execCanvakit(
       [
         cliPath,
         "export",
@@ -126,7 +143,7 @@ async function renderArtifact(
         "--output",
         outPath,
       ],
-      { cwd: workDir },
+      workDir,
     )
     const renderMs = Date.now() - start
     const buffer = await readFile(outPath)
@@ -145,7 +162,7 @@ async function renderArtifact(
 /**
  * Renders the template+data to an on-brand HTML page at `outPath` (the live
  * site artifact). The output is self-contained apart from the Google-Fonts
- * `<link>` canvakit emits for the kit's Poppins stack.
+ * `<link>` canvakit emits for the kit's font stack.
  */
 export async function renderArtifactHtml(
   templatePath: string,

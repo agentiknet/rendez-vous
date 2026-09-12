@@ -101,9 +101,21 @@ export interface ProxyArtifactRequest {
   readonly subPath: string
   /** The request's own query string, including its leading `?`, or `""`. */
   readonly search: string
+  /** The room's stored canvakit render (the `render_artifact` tool's output,
+   *  `ArtifactRenderStore`), when one exists. When set and the request is for
+   *  the index (no sub-path), it is served directly instead of proxying — the
+   *  box cannot produce the branded page, this service already has it. Every
+   *  other path still proxies to the box, so the app's own assets keep
+   *  working. */
+  readonly renderedIndex?: Buffer
   /** Upstream fetch timeout in ms. Defaults to 15s (the brief's number);
    *  overridable so a test can prove the timeout path without a real 15s wait. */
   readonly timeoutMs?: number
+}
+
+/** The index paths a browser hits when opening the artifact URL. */
+function isIndexPath(subPath: string): boolean {
+  return subPath === "" || subPath === "/"
 }
 
 /**
@@ -114,11 +126,27 @@ export interface ProxyArtifactRequest {
  * upstream both self-heal the same way: a 503 page that refreshes itself,
  * so a momentarily dead box (mid-resume, mid-boot) never needs a human to
  * reload.
+ *
+ * Index exception: when the room has a stored render, the index comes from
+ * this service, not the box — so members see the branded page even before
+ * the box is serving, and after its box has died (the render outlives the
+ * box; the dead-box gating for the LINK lives in http.ts's
+ * `toPublicRoom`/`roomStatePayload`, which only advertise the URL when
+ * something is actually servable).
  */
 export async function proxyArtifact(req: ProxyArtifactRequest, res: ServerResponse): Promise<void> {
   if (req.method !== "GET" && req.method !== "HEAD") {
     res.writeHead(405, { allow: "GET, HEAD" })
     res.end()
+    return
+  }
+
+  if (req.renderedIndex !== undefined && isIndexPath(req.subPath)) {
+    res.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "content-length": req.renderedIndex.length,
+    })
+    res.end(req.method === "HEAD" ? undefined : req.renderedIndex)
     return
   }
 

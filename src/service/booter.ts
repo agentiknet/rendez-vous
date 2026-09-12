@@ -5,8 +5,8 @@ import type { RoomStore } from "../rooms/store.ts"
 import type { Room } from "../rooms/types.ts"
 import { bootRoomSession, isSandboxNotFoundError, resumeRoomSession, type OrphanSandboxKiller } from "../sandbox/boot.ts"
 import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
+import { canvakitMcpServer } from "./mcp-canvakit.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
-
 /** Local (this host's) path to the artifact app source the sandbox executor
  *  maintains, seeded into the box on every boot/resume (src/sandbox/boot.ts's
  *  `seedFromDir`). Computed from this file's own location so it doesn't
@@ -55,15 +55,13 @@ export interface SessionBooter {
 }
 
 /** The capability half of both prompts — how attribution arrives, how to
- *  whisper, where the served page lives.
+ *  whisper, how the artifact gets rendered and served.
  *
- *  `opts.appDir` is the e2b-only artifact case: naming the exact served-page
- *  path up front is what Rehearsal Run 1's Finding 1 needed a human for —
- *  without it, the agent reported "no index.html file exists anywhere" and
- *  asked whether to create one, instead of finding the real path at
- *  `<appDir>/.agentproto/ui/index.html` (`src/sandbox/app-seed.ts`). Omit
- *  `opts` for a booter with no artifact concept (`LocalBooter`) — there is
- *  nothing true to say about a page that doesn't exist.
+ *  `opts.appDir` is the e2b-only artifact case: the artifact lines (the
+ *  render_artifact tool, `[[attach]]`) only make sense when the room has a
+ *  served artifact app and an MCP mount. Omit `opts` for a booter with no
+ *  artifact concept (`LocalBooter`) — there is nothing true to say about a
+ *  page that doesn't exist.
  *
  *  Shared between boot and resume because a RESUMED agent needs every one of
  *  these just as much as a fresh one. The resume prompt used to inline its
@@ -85,7 +83,7 @@ function capabilityLines(opts?: { appDir: string }): string[] {
   ]
   if (opts !== undefined) {
     lines.push(
-      `The page members see at the artifact URL is served from ${opts.appDir}/.agentproto/ui/index.html — edit that file to change what they see, and the change is live immediately.`,
+      `Members see the room's artifact page at the artifact URL. You have a render_artifact MCP tool: call it with the document data (a list of typed blocks — the tool's inputSchema shows the shape) and it renders the branded live page every member can open AND the deliverable PDF in one go. Calling render_artifact is how members see anything you produce; if it returns an error, the canvakit message is verbatim — read it, fix the data, call it again.`,
     )
     lines.push(
       `To SEND someone a file — a PDF, an image, a chart, an audio clip — write it into ${opts.appDir}/.agentproto/ui/ and then put "[[attach <filename> <optional one-line caption>]]" on its own line in your reply. Everyone in the room receives it as a real attachment, not a link. The filename must have no spaces and no directory traversal. Use this whenever someone asks you for a document or a picture: do not paste a long URL and do not claim you cannot send files.`,
@@ -271,6 +269,10 @@ export class E2bBooter implements SessionBooter {
       appDir: env.artifactAppDir,
       port: env.artifactPort,
       seedFromDir: ARTIFACT_SEED_DIR,
+      // The render tool, mounted on the agent session for THIS room — the
+      // mount carries the room's own bearer token, and only the e2b booter
+      // builds one (LocalBooter gets nothing).
+      mcpServers: [canvakitMcpServer(room.code)],
       ...(reuseSandboxId !== undefined ? { reuseSandboxId } : {}),
       ...(this.killOrphanSandbox !== undefined ? { killOrphanSandbox: this.killOrphanSandbox } : {}),
     })
@@ -323,6 +325,7 @@ export class E2bBooter implements SessionBooter {
         sandboxId: room.sandboxId,
         artifactUrl: room.artifactUrl,
         seedFromDir: ARTIFACT_SEED_DIR,
+        mcpServers: [canvakitMcpServer(room.code)],
         ...(this.killOrphanSandbox !== undefined ? { killOrphanSandbox: this.killOrphanSandbox } : {}),
       })
     } catch (err) {

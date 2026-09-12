@@ -133,6 +133,23 @@ export interface Env {
    *  when unset — every path degrades to a visible "unavailable" line rather
    *  than failing. */
   readonly openaiApiKey: string | undefined
+  /**
+   * HMAC secret for the per-room `render_artifact` bearer tokens the
+   * canvakit MCP endpoint (`POST /mcp/canvakit`) requires before it will
+   * render anything a room's members can see. From `RDV_ROOM_TOKEN_SECRET`;
+   * when unset, a random secret is generated once per process — safe by
+   * default (nothing outside this process can forge a token) at the cost of
+   * old sessions' mounts going stale across a service restart, which the
+   * next resume re-mounts anyway. Set it in production so a restart keeps
+   * already-booted boxes' tokens valid.
+   */
+  readonly roomTokenSecret: string
+  /** Operator-supplied display names, from `RDV_MEMBER_NAMES`:
+   *  `"6371794295=Jeremy,33679942048=Alain"`. Wins over any provider lookup
+   *  (src/channels/display-name.ts) — the escape hatch for a channel with no
+   *  name API (WhatsApp, SMS, email), a wrong name, or a demo that wants
+   *  specific labels. Undefined when unset. */
+  readonly memberNames: string | undefined
 }
 
 type Source = Readonly<Record<string, string | undefined>>
@@ -210,6 +227,8 @@ function readPositiveInt(source: Source, key: string, fallback: number): number 
   return n
 }
 
+import { randomUUID } from "node:crypto"
+
 /**
  * Build an `Env` from an arbitrary source map. Exported so tests can pass a
  * literal instead of mutating `process.env`.
@@ -248,6 +267,8 @@ export function loadEnv(source: Source): Env {
     mediaMaxBytes: readPositiveInt(source, "RDV_MEDIA_MAX_MB", 20) * 1024 * 1024,
     telegramBotToken: readOptionalString(source, "RDV_TELEGRAM_BOT_TOKEN"),
     openaiApiKey: readOptionalString(source, "RDV_OPENAI_API_KEY"),
+    memberNames: readOptionalString(source, "RDV_MEMBER_NAMES"),
+    roomTokenSecret: readOptionalString(source, "RDV_ROOM_TOKEN_SECRET") ?? randomUUID(),
   })
 }
 

@@ -62,6 +62,20 @@ export interface SpawnAgentInput {
   readonly prompt?: string
   readonly sandbox?: string | SandboxSpecInput
   readonly appServe?: AppServeSpecInput
+  /** MCP servers mounted on the spawned session. The shape the daemon
+   *  accepts on `POST /sessions/agent`'s `mcpServers` field — an
+   *  http-transport server is `{ name, transport, ref, headers }`
+   *  (src/service/mcp-canvakit.ts's `McpServerMount`). Omit for none. */
+  readonly mcpServers?: readonly McpServerMount[]
+}
+
+/** One MCP server mount — re-declared here rather than imported from
+ *  `mcp-canvakit.ts` so the daemon client stays dependency-free. */
+export interface McpServerMount {
+  readonly name: string
+  readonly transport: "http"
+  readonly ref: string
+  readonly headers: Readonly<Record<string, string>>
 }
 
 export interface SpawnAgentResult {
@@ -180,6 +194,7 @@ export class DaemonClient {
         ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
         ...(input.sandbox !== undefined ? { sandbox: input.sandbox } : {}),
         ...(input.appServe !== undefined ? { appServe: input.appServe } : {}),
+        ...(input.mcpServers !== undefined ? { mcpServers: input.mcpServers } : {}),
       }),
     })
     const body: unknown = await res.json()

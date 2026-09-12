@@ -49,6 +49,7 @@ process.env.RDV_PREWARM_SANDBOX_ID = PREWARM_ID
 const { DaemonClient } = await import("../../src/daemon/client.ts")
 const { RoomStore } = await import("../../src/rooms/store.ts")
 const { E2bBooter } = await import("../../src/service/booter.ts")
+const { canvakitMcpServer } = await import("../../src/service/mcp-canvakit.ts")
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -108,6 +109,18 @@ test("E2bBooter.boot sends the sandbox spec, appServe and the pre-warm reuse id 
   if (!isRecord(body.appServe)) return
   assert.equal(body.appServe.dir, "/home/user/apps/rdv-hello")
   assert.equal(body.appServe.port, 3210)
+
+  // The render tool is mounted on the session, carrying THIS room's bearer
+  // token — the agent renders the artifact through it, over the tunnel.
+  assert.deepEqual(body.mcpServers, [canvakitMcpServer(room.code)])
+  const mount = Array.isArray(body.mcpServers) ? body.mcpServers[0] : undefined
+  assert.ok(isRecord(mount))
+  if (!isRecord(mount)) return
+  assert.equal(mount.transport, "http")
+  assert.match(String(mount.ref), /\/mcp\/canvakit$/)
+  assert.ok(isRecord(mount.headers), "the mount must carry its auth headers")
+  if (!isRecord(mount.headers)) return
+  assert.match(String(mount.headers.authorization), /^Bearer [0-9a-f]{40}$/)
 })
 
 test("E2bBooter consumes the pre-warm sandbox id at most once across rooms", async () => {
@@ -217,9 +230,34 @@ test("E2bBooter.resume reconnects normally when the box probes alive", async () 
     assert.ok(isRecord(body) && isRecord(body.sandbox))
     if (!isRecord(body) || !isRecord(body.sandbox)) return
     assert.equal(body.sandbox.reuse, "live-box", "a live box should be reconnected to, not replaced")
+
+    // The mount survives the resume: a reconnected agent must keep the
+    // render tool or the room silently loses its artifact after a pause.
+    assert.deepEqual(body.mcpServers, [canvakitMcpServer(room.code)])
   } finally {
     await artifact.close()
   }
+})
+
+test("E2bBooter.resume keeps the mcp mount on the fresh re-serve branch too", async () => {
+  const dir = await freshDir()
+  // A box confirmed GONE: resume boots fresh (no reuse) — and that fresh
+  // spawn must carry the mount exactly like an ordinary boot would.
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new E2bBooter(client, { baseUrl: daemon.url, token: undefined }, store, async () => "gone")
+  const room = await roomWithBox(store, "gone-box", "https://gone.example")
+
+  const result = await booter.resume(room)
+
+  assert.equal(result.boxWasGone, true)
+  const spawnRequests = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent")
+  assert.equal(spawnRequests.length, 1)
+  const body = spawnRequests[0]?.body
+  assert.ok(isRecord(body))
+  if (!isRecord(body)) return
+  assert.deepEqual(body.mcpServers, [canvakitMcpServer(room.code)])
 })
 
 test("E2bBooter.resume reconnects normally when the box probes paused, not gone", async () => {

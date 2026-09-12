@@ -34,6 +34,7 @@ interface StartProxyOpts {
   artifactUrl: string | undefined
   prefix?: string
   timeoutMs?: number
+  renderedIndex?: Buffer
 }
 
 /** Wires `proxyArtifact` behind a real HTTP server the same way `http.ts`
@@ -51,6 +52,7 @@ async function startProxy(opts: StartProxyOpts): Promise<string> {
         subPath,
         search: url.search,
         ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+        ...(opts.renderedIndex !== undefined ? { renderedIndex: opts.renderedIndex } : {}),
       },
       res,
     ).catch((error: unknown) => {
@@ -222,4 +224,59 @@ test("times out and self-heals when the upstream never responds", async () => {
 
   const res = await fetch(`${proxyUrl}/artifact/`)
   assert.equal(res.status, 503)
+})
+
+// --- stored render (the render_artifact tool's output) -------------------
+
+const RENDERED = Buffer.from("<!doctype html><html><body>Ternwood render</body></html>")
+
+test("with a stored render the index is served from the render, not the box", async () => {
+  let upstreamHit = false
+  const upstreamUrl = await startUpstream((_req, res) => {
+    upstreamHit = true
+    res.writeHead(200, { "content-type": "text/plain" })
+    res.end("from the box")
+  })
+  const proxyUrl = await startProxy({ artifactUrl: upstreamUrl, renderedIndex: RENDERED })
+
+  const res = await fetch(`${proxyUrl}/artifact/`)
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get("content-type"), "text/html; charset=utf-8")
+  assert.equal(await res.text(), RENDERED.toString())
+  assert.equal(upstreamHit, false, "the index must not touch the box when a stored render exists")
+})
+
+test("with a stored render every non-index path still proxies to the box", async () => {
+  const upstreamUrl = await startUpstream((_req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" })
+    res.end("asset from the box")
+  })
+  const proxyUrl = await startProxy({ artifactUrl: upstreamUrl, renderedIndex: RENDERED })
+
+  const res = await fetch(`${proxyUrl}/artifact/assets/app.js`)
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get("content-type"), "text/plain")
+  assert.equal(await res.text(), "asset from the box")
+})
+
+test("a stored render serves the index even with no live box, while other paths stay dead-boxed", async () => {
+  // No artifactUrl at all: the pre-render situation. The render makes the
+  // INDEX servable; everything else keeps the self-healing 503.
+  const proxyUrl = await startProxy({ artifactUrl: undefined, renderedIndex: RENDERED })
+
+  const index = await fetch(`${proxyUrl}/artifact/`)
+  assert.equal(index.status, 200)
+  assert.equal(await index.text(), RENDERED.toString())
+
+  const other = await fetch(`${proxyUrl}/artifact/anything`)
+  assert.equal(other.status, 503)
+  assert.match(await other.text(), /not available yet/i)
+})
+
+test("without a stored render the dead-box behaviour is unchanged", async () => {
+  const proxyUrl = await startProxy({ artifactUrl: undefined })
+
+  const res = await fetch(`${proxyUrl}/artifact/`)
+  assert.equal(res.status, 503)
+  assert.match(await res.text(), /not available yet/i)
 })

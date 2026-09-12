@@ -15,7 +15,7 @@
  * docs/UPSTREAM.md for the two-spawn approach this replaced.
  */
 
-import type { DaemonClient, SandboxSpecInput, SpawnAgentInput, SpawnAgentResult } from "../daemon/client.ts"
+import type { DaemonClient, McpServerMount, SandboxSpecInput, SpawnAgentInput, SpawnAgentResult } from "../daemon/client.ts"
 import { isRecordKind } from "../daemon/records.ts"
 import { buildAppSeedScript } from "./app-seed.ts"
 import { probeArtifact } from "./artifact.ts"
@@ -274,6 +274,11 @@ export interface BootRoomSessionOpts {
    *  common single-adapter case; the daemon already auto-injects the spawned
    *  adapter's own package for a sandboxed spawn. */
   readonly installAdapters?: readonly string[]
+  /** MCP servers mounted on the spawned session, passed straight through to
+   *  `POST /sessions/agent`'s `mcpServers` field. The SERVICE builds the
+   *  list (it owns the room token and the public URL) — nothing here
+   *  constructs mounts. Omit for none. */
+  readonly mcpServers?: readonly McpServerMount[]
   /** Injectable for tests; defaults to the real e2b API call. See
    *  `killE2bSandboxDirect`'s doc. */
   readonly killOrphanSandbox?: OrphanSandboxKiller
@@ -298,6 +303,7 @@ export async function bootRoomSession(client: DaemonClient, opts: BootRoomSessio
           installAdapters: opts.installAdapters,
         }),
         appServe: { dir: opts.appDir, port: opts.port },
+        ...(opts.mcpServers !== undefined ? { mcpServers: opts.mcpServers } : {}),
       }),
   )
   return {
@@ -342,6 +348,10 @@ export interface ResumeRoomSessionOpts {
   /** Same as `BootRoomSessionOpts.installAdapters` — included on the bare
    *  reconnect too and forwarded to the re-serve fallback below. */
   readonly installAdapters?: readonly string[]
+  /** Same as `BootRoomSessionOpts.mcpServers` — included on the bare
+   *  reconnect too and forwarded to the re-serve fallback below, so a
+   *  resumed session keeps its mounts. */
+  readonly mcpServers?: readonly McpServerMount[]
   /** Injectable for tests; defaults to the real e2b API call. Also forwarded
    *  to the re-serve fallback's `bootRoomSession` call below. */
   readonly killOrphanSandbox?: OrphanSandboxKiller
@@ -372,6 +382,7 @@ export async function resumeRoomSession(client: DaemonClient, opts: ResumeRoomSe
           reuse: opts.sandboxId,
           installAdapters: opts.installAdapters,
         }),
+        ...(opts.mcpServers !== undefined ? { mcpServers: opts.mcpServers } : {}),
       },
       opts.attempts ?? DEFAULT_RESUME_ATTEMPTS,
       opts.retryDelayMs ?? DEFAULT_RESUME_RETRY_DELAY_MS,
@@ -402,5 +413,6 @@ export async function resumeRoomSession(client: DaemonClient, opts: ResumeRoomSe
     killOrphanSandbox,
     ...(opts.seedFromDir !== undefined ? { seedFromDir: opts.seedFromDir } : {}),
     ...(opts.installAdapters !== undefined ? { installAdapters: opts.installAdapters } : {}),
+    ...(opts.mcpServers !== undefined ? { mcpServers: opts.mcpServers } : {}),
   })
 }
