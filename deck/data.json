@@ -16,9 +16,16 @@
   {
     "type": "ladder",
     "isLadder": true,
-    "eyebrow": "The room",
-    "title": "Four members. Four surfaces. One session.",
-    "ladderHead": ["Member", "Surface", "Sends", "Receives", "Joined by"],
+    "eyebrow": "How it works — and how you get in",
+    "title": "Text a bot. Share a code. That's the whole onboarding.",
+    "illustration": "Telegram thread: “new” → the room code + QR reply, then a second phone joining with “join RDV-7F3K”. Shot from two real phones side by side.",
+    "ladderHead": [
+      "Member",
+      "Surface",
+      "Sends",
+      "Receives",
+      "Joined by"
+    ],
     "ladderRows": [
       {
         "tier": "Julie",
@@ -49,7 +56,7 @@
         "latency": "replying once"
       }
     ],
-    "caption": "Julie and Tom are organising the company offsite. Neither installed anything, neither shares a login, and Atlas — an agent on the company Mac — opens the room because it noticed the deadline. The room models members, not humans, which is why a machine joins the way a person does.",
+    "caption": "You text “new” to a bot and the room exists. You send anyone the code or the QR, and they are in — from a phone, a browser, or by replying to an email. No install, no shared login, no new app. And because the room models members rather than humans, a machine joins by running one script and is treated exactly like a person.",
     "page": "2 / 6"
   },
   {
@@ -58,31 +65,54 @@
     "eyebrow": "It works — live, on real surfaces",
     "title": "Not a mock. A real phone, a real thread, a real artifact.",
     "timelineItems": [
-      { "time": "0s", "label": "A real phone types “new” on Telegram — the room exists" },
-      { "time": "86.5s", "label": "Cold boot: agent session and shared artifact both ready" },
-      { "time": "attributed", "label": "A laptop joins; one agent reply reaches both surfaces, each message tagged with who sent it and from where" },
-      { "time": "live edit", "label": "The agent edits the shared artifact on request — confirmed on the URL while the phone thread continues" },
-      { "time": "delivered", "label": "A PDF previewed, confirmed with a token, rendered — and byte-matched in the inbox" },
-      { "time": "survived", "label": "The sandbox deleted out from under the room; the sweep caught it and the next message revived it" },
-      { "time": "— shown in the video —", "label": "voice in · photo in · a private “@me” answer · a voice reply · real files attached · a desktop agent joining as a member · resume replaying the prior transcript" }
+      {
+        "time": "0s",
+        "label": "A real phone types “new” on Telegram — the room exists"
+      },
+      {
+        "time": "86.5s",
+        "label": "Cold boot: agent session and shared artifact both ready"
+      },
+      {
+        "time": "attributed",
+        "label": "A laptop joins; one agent reply reaches both surfaces, each message tagged with who sent it and from where"
+      },
+      {
+        "time": "live edit",
+        "label": "The agent edits the shared artifact on request — confirmed on the URL while the phone thread continues"
+      },
+      {
+        "time": "delivered",
+        "label": "A PDF previewed, confirmed with a token, rendered — and byte-matched in the inbox"
+      },
+      {
+        "time": "survived",
+        "label": "The sandbox deleted out from under the room; the sweep caught it and the next message revived it"
+      },
+      {
+        "time": "— shown in the video —",
+        "label": "voice in · photo in · a private “@me” answer · a voice reply · real files attached · a desktop agent joining as a member · resume replaying the prior transcript"
+      }
     ],
     "caption": "The rows above the line are in the rehearsal log with timestamps. The row below it is built and tested, and you watch it happen — real screens, one take. We keep the two apart on purpose.",
-    "page": "3 / 6"
+    "page": "3 / 6",
+    "illustration": "The 4-up demo frame: Julie's phone, Tom's phone, the room web view with transcript + live artifact, and the Atlas terminal strip. One clock across the top."
   },
   {
     "type": "code",
     "isCode": true,
-    "eyebrow": "The stack, and what it cost to trust it",
-    "title": "Eight silent failures. Seven pull requests upstream.",
+    "eyebrow": "The stack",
+    "title": "A shared room on top of a real machine.",
     "bullets": [
-      "A killed session still answers 200 — resume reported success in 0.7s having resumed nothing.",
-      "Omit one flag and a message arriving mid-turn is lost; the sender sees it sent.",
-      "A paused sandbox expires and the room keeps handing people its dead link.",
-      "None crash. Four lost data quietly. All look like working code or correct config."
+      "agentpush — every channel behind one API, in and out. The room never learns a provider's quirks.",
+      "Rendez-vous — the room: members, attribution, fan-out by presence tier, the authority to send.",
+      "agentproto — our own open-source agent runtime. Unmodified, straight from npm.",
+      "e2b — one sandbox per room: nobody's laptop, an isolated environment everyone can trust."
     ],
-    "code": "Telegram · Email · Web · a desktop agent\n        ↓\n  [ agentpush ]     every channel behind one API, in and out\n        ↓\n [ RENDEZ-VOUS ]    members · attribution · fan-out · authority\n        ↓\n  [ agentproto ]    our runtime — unmodified, from npm\n        ↓\n     [ e2b ]        one sandbox, one artifact URL",
-    "highlight": "Day-one rule: never fork, never vendor, never patch the runtime. Eight findings later it held — every fix went upstream with a test that reproduces the failure first.",
-    "page": "4 / 6"
+    "code": "Telegram · Email · Web · a desktop agent\n        ↓\n  [ agentpush ]     every channel behind one API, in and out\n        ↓\n [ RENDEZ-VOUS ]    members · attribution · fan-out · authority\n        ↓\n  [ agentproto ]    our runtime — unmodified, from npm\n        ↓\n     [ e2b ]        a real terminal, a real machine, a public URL",
+    "highlight": "Not an API behind a chat box — a full harness. A real terminal, a real machine, and a public URL: when the agent builds a PDF or a site, everyone sees the same thing at the same address, and can change it.",
+    "page": "4 / 6",
+    "illustration": "The room web page on a laptop: attributed transcript on the left, the artifact updating live on the right — plus the served artifact URL in the browser bar."
   },
   {
     "type": "findings",
@@ -90,13 +120,27 @@
     "eyebrow": "Work leaves the room — on purpose",
     "title": "A room with a notion of authority, not a relay.",
     "findingsItems": [
-      { "n": "1", "label": "A member asks the room for the deliverable — a PDF of what everyone just built" },
-      { "n": "2", "tag": "the confirmation gate", "label": "the room previews it first: recipient, channel, subject, the rendered document — and sends nothing until a member explicitly confirms" },
-      { "n": "3", "label": "it lands on a phone as a real PDF and in an inbox — recipient, subject and contents exactly as previewed" },
-      { "n": "4", "label": "the send is written into the shared transcript: who asked, who confirmed, what, to whom" }
+      {
+        "n": "1",
+        "label": "A member asks the room for the deliverable — a PDF of what everyone just built"
+      },
+      {
+        "n": "2",
+        "tag": "the confirmation gate",
+        "label": "the room previews it first: recipient, channel, subject, the rendered document — and sends nothing until a member explicitly confirms"
+      },
+      {
+        "n": "3",
+        "label": "it lands on a phone as a real PDF and in an inbox — recipient, subject and contents exactly as previewed"
+      },
+      {
+        "n": "4",
+        "label": "the send is written into the shared transcript: who asked, who confirmed, what, to whom"
+      }
     ],
     "highlight": "Every other capability keeps work inside the room. This one lets it leave — under the members' control, on the record.",
-    "page": "5 / 6"
+    "page": "5 / 6",
+    "illustration": "The Ternwood PDF and the live employee site side by side, both rendered from the same data.json through the same design kit — and the phone showing the confirm gate."
   },
   {
     "type": "closing",
@@ -111,11 +155,31 @@
     "eyebrow": "Appendix — the findings in full",
     "title": "Eight findings, and where each fix landed.",
     "findingsItems": [
-      { "n": "1", "tag": "PR 1274 · PR 1273", "label": "a mid-turn prompt is lost without queue: true, and a killed session still answers 200 so resume reports success doing nothing" },
-      { "n": "2", "tag": "PR 1279 · PR 1278 · PR 1286", "label": "sandbox liveness unreported; orphaned boxes never reaped; a failed reconnect leaves the box running and billing" },
-      { "n": "3", "tag": "PR 1281 · PR 1277", "label": "app serve ignores the declared UI path; a mutating proxy route had no auth gate" },
-      { "n": "4", "tag": "fixed in the room", "label": "the fan-out cursor froze on resume, the artifact link outlived its box, and a recap fix shipped dead on arrival — each now has a regression test" },
-      { "n": "5", "tag": "documented", "label": "an account-pinned inbound route never fires; the agent proposes rebuilding a capability the workspace already brokered" }
+      {
+        "n": "1",
+        "tag": "PR 1274 · PR 1273",
+        "label": "a mid-turn prompt is lost without queue: true, and a killed session still answers 200 so resume reports success doing nothing"
+      },
+      {
+        "n": "2",
+        "tag": "PR 1279 · PR 1278 · PR 1286",
+        "label": "sandbox liveness unreported; orphaned boxes never reaped; a failed reconnect leaves the box running and billing"
+      },
+      {
+        "n": "3",
+        "tag": "PR 1281 · PR 1277",
+        "label": "app serve ignores the declared UI path; a mutating proxy route had no auth gate"
+      },
+      {
+        "n": "4",
+        "tag": "fixed in the room",
+        "label": "the fan-out cursor froze on resume, the artifact link outlived its box, and a recap fix shipped dead on arrival — each now has a regression test"
+      },
+      {
+        "n": "5",
+        "tag": "documented",
+        "label": "an account-pinned inbound route never fires; the agent proposes rebuilding a capability the workspace already brokered"
+      }
     ],
     "highlight": "The recap fix is the one worth telling: its first version never ran, hid behind a reply that looked exactly like success, and 443 passing tests never caught it. A local harness did.",
     "caption": "This is why the room records who asked, who confirmed, and what was sent. Where failure is silent, the transcript is the only thing checkable afterwards.",

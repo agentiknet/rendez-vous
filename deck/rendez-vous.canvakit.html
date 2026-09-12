@@ -265,6 +265,37 @@ page:
         max-width: 42rem;
       }
 
+      /* Reserved space for a screenshot that does not exist yet. Sits on the
+         right half, which every layout in this deck leaves empty. */
+      .illo {
+        position: absolute;
+        right: 4.5rem;
+        top: 10rem;
+        width: 40rem;
+        height: 26rem;
+        border: 2px dashed var(--color-border-strong, rgba(10, 36, 71, 0.24));
+        border-radius: 12px;
+        background: var(--color-surface, #F5F8FC);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 0.75rem;
+        padding: 2rem;
+      }
+      .illo-tag {
+        font-family: var(--font-caption-family, 'Poppins', sans-serif);
+        font-size: 0.6875rem;
+        letter-spacing: 0.12em;
+        font-weight: 700;
+        color: var(--color-accent, #5586C8);
+      }
+      .illo-text {
+        font-family: var(--font-caption-family, 'Poppins', sans-serif);
+        font-size: 0.9375rem;
+        line-height: 1.5;
+        color: var(--color-ink-muted, #3E5B80);
+      }
+
       .page-num {
         position: absolute;
         bottom: 1.6rem;
@@ -384,6 +415,18 @@ page:
       {{#highlight}}<div class="highlight"><p>{{highlight}}</p></div>{{/highlight}}
       {{#caption}}<p class="caption">{{caption}}</p>{{/caption}}
       {{/isCode}}
+
+      <!-- Illustration slot. Every page that will carry a screenshot declares
+           `illustration` in data.json and renders a labelled placeholder until
+           the real image exists, so the layout is already reserved and nobody
+           discovers at export time that the page has no room for it. Swap the
+           placeholder for an <img> once the take is shot. -->
+      {{#illustration}}
+      <div class="illo">
+        <div class="illo-tag">ILLUSTRATION</div>
+        <div class="illo-text">{{illustration}}</div>
+      </div>
+      {{/illustration}}
 
       <div class="kicker">Rendez-vous</div>
       <div class="page-num">{{page}}</div>
