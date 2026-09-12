@@ -15,65 +15,39 @@ Rendez-vous
 ## Project Description
 
 ```
-Rendez-vous turns any messaging app into a shared agent room. Several people,
-and other agents, drive one agent session and one live document together, from
-whatever app they already have open.
+We work together. Our AIs work in silos.
 
-THE PROBLEM. AI is already in your pocket, but it is only ever in one pocket at
-a time. Two colleagues working on the same thing have two separate assistants
-that never talk to each other. So the human becomes the integration layer:
-screenshot one chat, paste it into the other, relay what was agreed. The second
-person never sees the context, and the deliverable dies inside one private
-thread.
+AI is in your pocket, but only ever one pocket at a time. Two colleagues on the
+same task have two assistants that never talk, so you become the relay:
+screenshot, paste, repeat.
 
-THE ENVIRONMENT IS THE POINT. You text "new" to a Telegram bot and a room
-exists. You send someone the code or a QR and their phone is in the room too.
-Nothing to install, no account to create, no login to share. The agent comes to
-where people already are instead of asking them to move.
+Rendez-vous puts several people and several agents in one shared room. Text
+"new" to a bot and the room exists. Send the code and someone's phone is in it
+too. Nothing to install, no login to share.
 
-WHAT ONLY A ROOM CAN DO. The orchestrator agent is the only party that sees
-every thread, so it can do things no single-thread chatbot can. In our demo
-Julie sets a 12k budget from her phone while Tom sends a photo of a 16k venue
-from his; the agent detects the conflict, says so out loud, and arbitrates
-until they converge. It addresses members individually when only one of them
-has what it needs. It can answer one member privately while the others see that
-a private answer happened, but not what it said. Every message carries who sent
-it and from where.
+The orchestrator is the only party that sees every thread, so it catches what a
+single-thread chatbot cannot. Julie sets a 12k budget from her phone. Tom sends
+a 16k venue from his. The agent spots the conflict and arbitrates. It solicits
+one member when only they have what it needs, and can answer privately while
+the others see that a private answer happened.
 
-MEMBERS, NOT HUMANS. The room models members, so a local desktop agent joins
-through the same two HTTP endpoints as a person and is treated identically. The
-room cannot tell the difference, because there is no difference to tell.
+The room models members, not humans, so a desktop agent joins through the same
+two endpoints as a person and is treated identically.
 
-A REAL MACHINE, NOT AN API. Each room gets its own e2b sandbox: nobody's
-laptop, a real terminal, a real filesystem, and a public URL. When the agent
-builds a PDF or puts a website online, everyone opens the same link and can
-change what they see. The agent renders through an MCP tool we expose, so the
-design system is enforced by construction rather than by asking a model to stay
-on brand.
+Each room runs in its own e2b sandbox: real terminal, real files, public URL.
+The agent builds a PDF or puts a site online and everyone opens the same link.
+Nothing leaves the room until a member confirms the recipient and the content,
+and every send is logged with who asked and who confirmed.
 
-WORK LEAVES THE ROOM, UNDER CONTROL. Before anything is sent outside, the room
-previews the recipient, the channel, the subject and the rendered document, and
-waits for a member to confirm. The send is written into the shared transcript:
-who asked, who confirmed, what, to whom.
+Stack: TypeScript, no framework. agentpush puts Telegram, WhatsApp and email
+behind one API. Our open-source agentproto runtime is consumed unmodified from
+npm. OpenAI for speech, vision and voice replies; OpenRouter for the coding
+agents; e2b for the machine; an MCP tool we expose so the agent renders on
+brand by construction. 500 tests green.
 
-TECHNICAL EXECUTION. TypeScript on Node 20, no framework, native fetch and
-native SSE. agentpush (our messaging layer) puts Telegram, WhatsApp, email and
-SMS behind one API, inbound and outbound. agentproto, our own open-source agent
-runtime, is consumed unmodified from npm: a hard constraint from day one, never
-fork, never vendor, never patch. e2b provides the sandbox. OpenAI does
-speech-to-text, vision and text-to-speech; OpenRouter ran the GLM 5.3 executors
-that wrote much of the code. Fan-in attributes every inbound message and posts
-it with queue:true, which is load-bearing: without it a message arriving
-mid-turn is silently dropped. Fan-out holds one SSE reader per room and renders
-one agent turn three ways, terse on a phone, a digest in an inbox, full
-transcript beside the live document on a laptop. 500 tests, all green.
-
-WHAT WE FOUND ALONG THE WAY. Eight failures, every one of them silent. A killed
-session still answers 200, so resume reported success in 0.7s having resumed
-nothing. A paused sandbox expires while the room keeps handing people its dead
-link. We did not work around them locally: seven pull requests are open against
-our own open-source runtime, each carrying a test that reproduces the failure
-before fixing it.
+We hit eight silent failures on the way. A killed session still answers 200, so
+resume reported success in 0.7s having resumed nothing. We opened seven pull
+requests upstream instead of patching around them.
 ```
 
 ---
@@ -96,16 +70,15 @@ z-ai GLM 5.3 via OpenRouter
 ## Team Contributions
 
 ```
-Jeremy ANDRE (lead): everything in the Rendez-vous repo. Architecture and the
-room model (members, presence tiers, attributed fan-in, tier-aware fan-out).
-The agentpush integration for Telegram inbound and outbound, including a fix
-upstream in agentpush so inbound Telegram media can be read at all. The e2b
-sandbox boot, artifact serving and liveness handling. The MCP endpoint that
-gives the sandboxed agent a render tool. Multimodal in and out through the
-OpenAI API: Whisper for voice notes, vision for photos, TTS for spoken replies.
-The deliverable flow and its confirmation gate. Seven pull requests upstream to
-agentproto. Orchestration of GLM 5.3 coding agents over OpenRouter for parts of
-the implementation, with every result verified by hand before it landed.
+Jeremy ANDRE (lead): all of it. The room model (members, presence tiers,
+attributed fan-in, tier-aware fan-out). Telegram in and out through agentpush,
+including a fix landed upstream in agentpush so inbound Telegram media can be
+read at all. e2b sandbox boot, artifact serving, liveness. The MCP endpoint
+that gives the sandboxed agent a render tool. Voice and vision in, voice and
+files out, through the OpenAI API. The deliverable flow and its confirmation
+gate. Seven pull requests upstream to agentproto. GLM 5.3 coding agents
+orchestrated over OpenRouter wrote parts of the implementation; every result
+was verified by hand before it landed.
 ```
 
 ---
@@ -115,22 +88,15 @@ the implementation, with every result verified by hand before it landed.
 State this plainly. It is the honest answer and judges reward it.
 
 ```
-Three components pre-date the hackathon and were used as dependencies, not
-built during it:
+Three of ours pre-date the hackathon and were used as dependencies: agentproto
+(our open-source agent runtime, consumed unmodified from npm), agentpush (our
+messaging layer) and canvakit (our template renderer).
 
-- agentproto, our open-source agent runtime, consumed unmodified from npm. We
-  did not fork or patch it. The eight bugs we hit were written up with repros
-  and fixed via seven pull requests opened upstream during the hackathon.
-- agentpush, our messaging layer. One fix landed in it during the hackathon:
-  Telegram inbound media could not be read by any consumer, because the
-  provider never implemented attachment fetch.
-- canvakit, our template and design-kit renderer, used to produce the PDF and
-  the live site from one data file.
-
-Everything else was built during the hackathon: the entire Rendez-vous room
-service, the multimodal ingress and egress, the private-reply and solicitation
-protocols, the deliverable flow with its confirmation gate, the room web view,
-the MCP render tool, the desktop-agent bridge, and the 500-test suite.
+Built during the hackathon: the entire Rendez-vous room service, multimodal in
+and out, the private-reply and solicitation protocols, the deliverable flow and
+its confirmation gate, the room web view, the MCP render tool, the
+desktop-agent bridge, the 500-test suite, seven pull requests to agentproto and
+one fix to agentpush.
 ```
 
 ---
@@ -166,30 +132,29 @@ Thanks @AITinkerers @CopilotKit @exaailabs @auth0 @ambiguousio @triggerdotdev
 LinkedIn version, company names instead of handles:
 
 ```
-AI is already in your pocket. It is just only ever in one pocket at a time.
+We work together. Our AIs work in silos.
 
-Two colleagues working on the same thing have two separate assistants that
-never talk. So the human becomes the relay: screenshot one chat, paste it into
-the other, carry the context by hand.
+AI is in your pocket, but only ever one pocket at a time. Two colleagues on the
+same task have two assistants that never talk, so you become the relay:
+screenshot, paste, repeat.
 
-For Agents, Everywhere we built Rendez-vous. You text "new" to a bot and a
-shared room exists. Send someone the code and their phone is in it too. Nothing
-to install, no account to share. Several people and several agents drive one
-session and one live document together.
+For Agents, Everywhere we built Rendez-vous. Text "new" to a bot and a shared
+room exists. Send the code and someone's phone is in it too. Nothing to
+install, no login to share. Several people and several agents drive one session
+and one live document together.
 
-The part we did not expect: because the orchestrator is the only one that sees
-every thread, it can catch what no single-thread chatbot can. Julie sets a 12k
-budget from her phone. Tom sends a photo of a 16k venue from his. The agent
-spots the conflict and arbitrates.
+The part we did not expect: the orchestrator is the only one that sees every
+thread, so it catches what no single-thread chatbot can. Julie sets a 12k
+budget from her phone. Tom sends a 16k venue from his. The agent spots the
+conflict and arbitrates.
 
-Each room runs in its own isolated sandbox with a real terminal and a public
-URL, so when it builds a PDF or puts a site online, everyone opens the same
-link. Nothing leaves the room until a member confirms what is being sent and to
-whom.
+Each room runs in its own sandbox with a real terminal and a public URL. Build
+a PDF or a site, everyone opens the same link. Nothing leaves until someone
+confirms.
 
-Built with OpenAI, OpenRouter, e2b, and our own open-source agent runtime,
-consumed unmodified. We hit eight silent failures on the way and opened seven
-pull requests upstream rather than patching around them.
+Built with OpenAI, OpenRouter, e2b and our own open-source runtime, consumed
+unmodified. We hit eight silent failures and opened seven pull requests
+upstream rather than patching around them.
 
 Thanks to AI Tinkerers, OpenAI, CopilotKit, OpenRouter, Exa, Auth0, Ambiguous
 AI, Trigger.dev, Mozilla.ai and Google Cloud.
