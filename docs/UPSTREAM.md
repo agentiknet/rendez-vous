@@ -21,22 +21,26 @@ self-contained without them.
 | 5 | A spawn already in flight server-side keeps running after the requesting client disconnects | Low — operational/budgeting | Documented |
 | 6 | Rendez-vous's own `E2bBooter` sent the HOST's `cwd` into the box's `agent_start`, not a path valid inside it | High — every e2b room boot 500'd | Fixed in this repo |
 | 7 | A just-unpaused box's first turn can error near-instantly with no detail, invisible to the reconnect-retry contract | Medium — silent stall on resume | Documented |
+| 8 | `mcp_import` is blind to brokers the agent already holds | Medium — confidently wrong plan, not a crash | Documented |
 
 ---
 
 ## The pattern: plausible config, silent drop, no error anywhere
 
-Three of the cases below read like three unrelated bugs — a missing flag, a
-stale cursor, a filtered account id. They are the same class: a config or
-piece of state that is completely reasonable in isolation, checked by
-nothing, and the system routes around it without a stack trace, a non-2xx,
-or a log line. The only symptom is a human noticing a reply never came back.
+Four of the cases below read like four unrelated bugs — a missing flag, a
+stale cursor, a filtered account id, a capability the agent already had.
+They are the same class: a config or piece of state that is completely
+reasonable in isolation, checked by nothing, and the system routes around it
+without a stack trace, a non-2xx, or a log line. The only symptom is a human
+noticing a reply never came back, or a plan that quietly rebuilds something
+already sitting there.
 
 | Case | Plausible config | Silent drop |
 | --- | --- | --- |
 | Daemon prompt path (finding 1) | Caller omits `queue: true` on a mid-turn prompt | Both the built-in inbound router and the MCP `agent_prompt` tool never pass it either, so a mid-turn message is rejected with no error delivered to any sender |
 | Resume cursor (`docs/REHEARSAL.md` finding 3, fixed in `b58de3d`) | Our fan-out reader keeps its cursor across a resume | A new session's stream renumbers from near 1; the reader waits at the old session's stale seq, so every reply after a resume vanishes |
 | agentpush account-pinned inbound route | Route created with `provider_account_id` set, matching the per-account setup the provider UI encourages | `listEnabledMessagingRoutes` filters `provider_account_id IS NULL` (`packages/core/src/domain/inbound-route/repository.ts:335`, in the read-only agentpush checkout) — the route never fires; the comment above it says so: "account-pinned routes can't be honoured yet (Phase 3)" |
+| `mcp_import` discovery (finding 8) | Workspace already brokers Gmail via agentpush; user asks the room agent to add Gmail access | `mcp_import` only ever matches against locally discovered MCP servers (`session-tools.ts:1400-1403`), with no notion of a broker the agent already has — it confidently proposes registering a fresh OAuth client instead of reporting the access it already has |
 
 The hard part of multiplayer agents is not the model. It is that every one
 of these fails quietly.
@@ -396,3 +400,53 @@ Caller-side mitigation in the meantime: `resumeRoomSession` reconnects
 cleanly but this class of failure needs a turn-level retry, not a
 spawn-level one — out of scope for this fix; tracked here for whoever picks
 it up next.
+
+---
+
+## 8. `mcp_import` is blind to brokers the agent already holds
+
+**Summary.** Asked, from the phone during run 3, to give the room agent
+Gmail access, the room agent's plan was to register a new Google Cloud OAuth
+client and walk the user through consent — a fresh third-party integration
+built from scratch. But the workspace the agent was already running in
+brokers Gmail through agentpush's mailbox surface (`docs/AGENTPUSH.md` §8),
+a capability the agent's own tool surface already had a path to. `mcp_import`
+only ever snapshots locally discovered MCP servers — servers already
+configured in a local client like Claude Desktop or Cursor — and has no
+notion of a broker the agent already has access to. So the agent, asked for
+something it effectively already had, confidently proposed rebuilding it
+from zero. Not a crash — a confidently wrong plan.
+
+**Anchors.**
+- `packages/runtime/src/mcp-imports.ts:1-13` — the module's own doc comment:
+  the imported set is "the user's curated set of discovered MCPs they want
+  the daemon to know about," sourced only from local discovery; "today, 'I
+  see you have chrome-devtools in claude' is read-only" — there is no
+  broker-awareness concept anywhere in this file's model.
+- `packages/runtime/src/session-tools.ts:1400-1403` — the `mcp_import` tool
+  handler: `const discovered = await discoverMcps(); const snapshot =
+  discovered.find(d => d.id === input.sourceMcpId)`. The only source of
+  truth for "what can be imported" is local discovery; nothing here or in
+  `discoverMcps` consults a workspace's own brokered/granted capabilities.
+
+**Repro.** Ground-truthed live on the phone during run 3 (2026-09-11): asked
+the room agent to enable Gmail, it proposed registering a Google Cloud OAuth
+client and walking the user through consent, while the same workspace was
+already running with Gmail reachable via agentpush's mailbox surface
+(`docs/AGENTPUSH.md` §8, Gmail OAuth connect + poll-driven inbound already
+documented there). The agent had no way to discover that existing path
+through `mcp_discovered_list`/`mcp_import`, since neither surface is aware
+of brokered capabilities, only locally-configured MCP servers.
+
+**Impact.** Any workspace whose tool access arrives through a broker rather
+than a locally-discovered MCP server is invisible to `mcp_import`'s
+discovery pass. An agent asked for a capability it already effectively has
+will propose rebuilding it from scratch rather than reporting "you already
+have this." Worse than a stall, because nothing signals the mismatch — the
+agent's answer is plausible and confidently stated, not an error.
+
+**Suggested fix.** Let a host declare brokered capabilities the agent can
+discover before planning — e.g. a surface alongside `mcp_discovered_list`
+that a host process can register non-MCP, already-granted capabilities
+into, so discovery isn't limited to "what a local client config already
+has."

@@ -183,6 +183,13 @@ mint N offers, splice N laptops, all to the same daemon and therefore the same
 sandbox. Rendezvous is the *transport for one tier-3 peer*. Room is the
 *membership layer above it*. Keep the name; scope the dependency.
 
+**Two distinct roles, not a contradiction.** The above is about message
+fan-in/fan-out (§3, §5) — rendezvous is not that primitive, unchanged. But
+the same broker is also the substrate a second job reaches for: pairing a
+room's box back to a member's own daemon so a tool call resolves under that
+member's credentials, not the room's. See §9.3, "Tool grants without a
+shared credential." One primitive, two independent jobs.
+
 ---
 
 ## 3. The decisive finding: no fork required
@@ -682,7 +689,49 @@ hand the whole workspace mailbox to anyone who has the room code, not just the
 member who connected it. The email presence tier itself never needs this:
 inbound mail becomes a room turn through the `rendez-vous-mail` route
 (docs/AGENTPUSH.md §8.3), which is routing a message in, not granting mailbox
-access. Per-member tool scoping is phase 2, not implemented.
+access. Per-member tool scoping is phase 2; sketched next.
+
+**Tool grants without a shared credential — pair the box back to the
+member.** Don't scope the credential harder inside the box — keep it out of
+the box entirely. Invert pairing's usual direction: tier 3b (§2.2, §6) is a
+laptop pairing *into* a room's daemon. Here the box pairs *out*: the
+**member's own daemon** mints the offer as `side=daemon` (`pair_offer`,
+`pairing-tools.ts:45-83`; URL built `side=daemon&t=<token>`,
+`pairing-registry.ts:600`), and the **box** is the `side=client` accepting
+that offer — the broker caps nothing per-daemon, only per-token (`offers`
+map `pairing-registry.ts:243`, `channels` set `:247`, independent loop per
+token `:462`, cited in §2.2). Spliced, the room reaches that member's tools
+through that member's own daemon. No Gmail credential, no agentpush key, no
+token for that member ever enters the box.
+
+Properties:
+- **Per-member by construction.** Alice attaches her daemon and the room
+  reaches her Gmail as Alice; Bob attaches his, reaches his tools as Bob.
+  Neither inherits the other's — there is no shared credential to inherit.
+- **Revocation is an unpair, not a key rotation.** `pair_revoke` drops the
+  splice and blocks reconnection (`pairing-tools.ts:104-121`); nothing to
+  rotate because nothing was ever copied into the box.
+- **Same argument as device-auth above, aimed at tools not models.** The
+  secret never leaves the member's machine, because that machine is where
+  the tool call actually executes.
+- **Answers "a stranger has your room code" with a design, not a caveat.**
+  A stranger who joins gets the room — transcript, artifact, typing. They
+  get no one's tools; no member's daemon has paired with them.
+
+**Untested by us — what would have to be verified:** network egress from a
+sandboxed box out to the broker (providers may restrict outbound WS); which
+side mints the token in this topology (the code fixes the offering party as
+`side=daemon`, `pairing-registry.ts:600`, so the member offers and the box
+accepts — never driven with a sandboxed box as the accepting client, only a
+human laptop); what the box's own daemon exposes to the room agent after
+pairing (the seam from "box holds a live pairing" to "room agent can call a
+member's tool through it" is not built); and what scope the paired daemon
+grants — per this doc's own R6, a paired client gets the **entire** daemon
+surface today, owner bearer injected, `authorize: req => req`
+(`tunnel-serve.ts:62-67`, `:167-169`). Pairing back solves *whose* credential
+is used, not *how much* the room can do with it — per-tool narrowing still
+has to happen on the member's side; this relocates the R6 gap, it doesn't
+close it.
 
 **One consequence worth designing around:** subscription auth gates the model
 list. The `codex-local` profile allows only `gpt-5.6-luna | sol | terra` — the
