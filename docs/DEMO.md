@@ -19,17 +19,47 @@ and `web` were **not** redeployed: a dirty-tree guard blocked that deploy.
 a real regression; not independently re-verified against the live service
 for this checklist.
 
-**Not provisioned:** no agentpush workspace with a connected WhatsApp
-number, no agentpush API key minted, no inbound routes created. WhatsApp,
-Telegram, SMS and email are **not reachable** on stage until an operator
-completes docs/AGENTPUSH.md §3 (and §8 for mail).
+**Provisioned as of Run 3 (2026-09-12):** the demo runs on the **existing
+connected agentpush workspace, on Telegram** — a real bot, a real API key
+in the gitignored `.env.local`, and inbound routes pointing at
+`https://rdv.clipgen.co`. **Not provisioned:** WhatsApp and SMS — no
+WhatsApp number, no Twilio number. **Email:** unconfirmed as of this
+writing whether a mailbox is connected to the workspace; treat it as a
+slide, not a live tier, until that's confirmed cheap to add (see the email
+subsection below) — no rehearsal time was spent on it.
 
 **Must be up before the first message can be sent:** the agentproto daemon
-and the Rendez-vous service, always. The tunnel, only if a real channel
-(WhatsApp/Telegram/email, via agentpush) is being used — a tier-3 rehearsal
-against `127.0.0.1:8790` directly needs no tunnel. An e2b account (env var
+and the Rendez-vous service, always. The tunnel, whenever a real channel
+(Telegram, via agentpush) is being used — a tier-3-only rehearsal against
+`127.0.0.1:8790` directly needs no tunnel. An e2b account (env var
 `E2B_API_KEY`), only if `RDV_BOOTER=e2b` — otherwise `LocalBooter` needs
 none of it, at the cost of no sandbox and no artifact.
+
+## Why Telegram + laptop is the full thesis
+
+The pitch was never "every channel" — it's several *humans*, on the
+surfaces they already live in, driving one session and one artifact
+together (architecture.md §1.3). Telegram plus the laptop room-web view is
+already **two real, distinct surfaces** — a phone app the operator already
+has installed, and a browser tab — reachable with **zero extra
+provisioning** beyond what agentpush already had connected. The room itself
+doesn't know or care which channel a member is on; it's channel-agnostic by
+construction (`Member.tier` is `messenger | email | room-web`, and
+`messenger` covers WhatsApp and Telegram identically). That's the line worth
+saying on stage: not "we didn't get WhatsApp working," but "the room doesn't
+care which surface you're on — here it is on two of them at once, and adding
+a third is a config change, not new code."
+
+### Email tier
+
+The provisioning executor's report on whether a mailbox is connected to the
+agentpush workspace didn't arrive before this rehearsal closed. Per the
+operator's own instruction: absent that confirmation, **email stays a
+slide**, described from architecture.md §4.2 R11 and docs/AGENTPUSH.md §8,
+not demoed live. If it later turns out a mailbox is connected and cheap to
+wire in, the addition is: point `RDV_EMAIL_WEBHOOK_SECRET` at a real route
+and rehearse one more member joining by replying to a room's digest email
+— not attempted here.
 
 ## 1. Pre-warm one e2b box
 
@@ -156,11 +186,13 @@ A `room.code` in the reply means fan-in, session spawn, and (if
 
 ## 8. The on-stage script
 
-1. Alice sends `new` on WhatsApp.
-2. She scans the QR code shown on the laptop room page to hand Bob the link.
-3. Bob joins from Telegram with `join RDV-XXXX`.
-4. Alice and Bob argue about what the agent should build, at the same time.
-5. The laptop shows the live transcript and the artifact `<iframe>` update
+1. Alice (the operator) sends `new` on Telegram.
+2. Bob (the laptop) opens `https://rdv.clipgen.co/r/RDV-XXXX` — the room web
+   view — either from the code Alice reports back or by scanning the QR on
+   that page to hand a second phone the link (architecture.md §5.3).
+3. Alice and Bob argue about what the agent should build, at the same time
+   — Alice on Telegram, Bob typing in the room's send box.
+4. The laptop shows the live transcript and the artifact `<iframe>` update
    as they go.
 
 ## 9. Recovery moves
@@ -172,6 +204,30 @@ A `room.code` in the reply means fan-in, session spawn, and (if
 - **Tunnel died** → rerun `scripts/tunnel.sh --named rendez-vous`. The
   hostname (`rdv.clipgen.co`) is stable across restarts, so `RDV_PUBLIC_URL`
   and the agentpush routes from step 5 stay valid — no re-export, no rerun.
+
+### Fallback if Telegram fails on the day
+
+Simulated channels via `POST /inbound/simulated` are an acceptable
+**fallback only** — not a first choice, and not something to reach for just
+because the network is flaky for a few seconds. Switch only if Telegram is
+genuinely down (bot unresponsive, agentpush outage) and the demo can't wait.
+
+```
+curl -s $RDV_PUBLIC_URL/inbound/simulated \
+  -H 'content-type: application/json' \
+  -d '{"provider":"telegram","source":"agentpush","contactRef":"+operator-phone",
+       "displayName":"Alice","tier":"messenger","text":"new"}'
+```
+Use `displayName: "Alice"` for the operator's own turn and keep `Bob` for
+whoever is on the laptop room view, same as the real run — don't invent new
+names mid-demo, it breaks the roster continuity on screen.
+
+**What to say on stage:** name it plainly — *"Telegram's not cooperating
+right now, so I'm going to prove the same round trip by injecting the
+message directly at the layer our webhook would otherwise call — the room
+itself doesn't know the difference."* That's honest and still lands the
+point (§ "Why Telegram + laptop is the full thesis" above): the room is
+channel-agnostic, so the fallback IS the proof, not an apology.
 
 ## 10. Venue network
 

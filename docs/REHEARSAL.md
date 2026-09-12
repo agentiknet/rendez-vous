@@ -209,15 +209,99 @@ logic bugs, cheap to fix, unfixed as of this rehearsal.
 | 2 | Run 1 cold `new` | `iey100qt7uu4jwon04uls` | 23:47:23 (paused by kill; later confirmed dead, 502) |
 | 3 | Run 2 pre-warm, reused by Run 2 `new` | `i5dlwxgv0eea9csomeizd` | **00:03:22 — final good box, left paused** |
 
-4th boot budget unused. Confirmed via `GET https://api.e2b.dev/sandboxes?state=running`
-right after that `i5dlwxgv0eea9csomeizd` no longer appears. The e2b API has
-no way to list *paused* boxes at all (an unfiltered `GET /sandboxes` also
-returns running-only) — a paused box's survival can only be checked by
-trying to reconnect, which is why box #3's fate tomorrow can't be
-pre-verified from here.
+4th boot budget held in reserve for Run 3 (below) — confirmed via
+`GET https://api.e2b.dev/sandboxes?state=running` right after Run 2 that
+`i5dlwxgv0eea9csomeizd` no longer appears. The e2b API has no way to list
+*paused* boxes at all (an unfiltered `GET /sandboxes` also returns
+running-only) — a paused box's survival can only be checked by trying to
+reconnect, which is why box #3's fate for Run 3 couldn't be pre-verified.
 
 Two other boxes (`ieiezgxwhmmky6y3gh0nl`, `i22hnlgr5cj0wesd6x2as`) ran
-throughout both runs — the concurrent `rdv-e2b-boot-fix` work, not this
+throughout Runs 1–2 — the concurrent `rdv-e2b-boot-fix` work, not this
 rehearsal's; left untouched. Both tunnel processes and both `serve`
-processes were stopped explicitly at the end of their runs; confirmed via
-`ps -p <pid>` returning no match.
+processes from Runs 1–2 were stopped explicitly at the end of their runs;
+confirmed via `ps -p <pid>` returning no match.
+
+## Run 3 — real Telegram + web: COMPLETED live
+
+Live infra, not simulated: the provisioning executor wrote `.env.local`
+(gitignored, confirmed present) and created the agentpush inbound routes
+pointing at `rdv.clipgen.co`. Started with `set -a; source .env.local; set
++a; node src/cli.ts serve` at 00:09:42Z, named tunnel up at 00:09:29Z, health
+confirmed through `rdv.clipgen.co` with `transport: agentpush
+(whatsapp/telegram/sms) + email + console fallback`. Polled for the first
+inbound for 15 minutes (00:10:48Z–00:26:02Z) with nothing yet — then, after
+this write-up was already drafted as "waiting," **the operator's real `new`
+landed at 00:27:15.982Z**, real Telegram contact `6371794295`.
+
+| Step | Time (UTC) | Seconds |
+| --- | --- | --- |
+| Alice `new` on real Telegram → room created | 00:27:15.982 | — |
+| Cold boot (no pre-warm; 4th and final budget boot) → session+artifact ready | → 00:28:42.451 | 86.5 |
+| artifact fetch #1 | 00:28:4x | 200, 9039 bytes, `<title>Rendez-vous room artifact</title>` |
+| Bob joins via `POST /rooms/RDV-NG7F/send` (room-web) | 00:29:03 | — |
+| attribution confirmed in SSE: `[Bob · room-web] ...` and later `[6371794295 · messenger] ...` | 00:29:03–00:31:56 | — |
+| operator drives a real multi-turn conversation (asked what the agent is, whether it's sandboxed, has MCP, has mail — all answered correctly) | 00:29–00:32 | — |
+| operator asks the agent to find and edit the artifact; agent explores with `ls`/`find` **on its own** (no path hint needed this time) and edits `index.html` | 00:30:29–00:31:02 | ~33 |
+| artifact fetch confirms the live edit | 00:32:38 | 200, contains `<p><em>Test edit applied.</em></p>` |
+
+### What broke, surprised, or needed a human
+
+- **This time the agent found the artifact file without a path hint.**
+  Unlike Runs 1–2 (where a bare "edit index.html" made the agent claim no
+  such file existed), here the operator asked more open-endedly ("can you
+  update the webpage?" → agent asked which one → operator replied "Rendez-vous
+  room artifact" → agent ran `ls`/`find` itself and located
+  `/home/user/apps/rdv-hello/.agentproto/ui/index.html` unaided. Suggests the
+  Run 1/2 failure was prompt-phrasing-sensitive, not a hard blocker — worth
+  keeping in mind for the on-stage phrasing ("update the room's page", not
+  "edit index.html").
+- **Real Telegram members show up with their numeric contact id as
+  `displayName`**, not a friendly name (`"6371794295"` throughout the
+  transcript) — agentpush's Telegram inbound doesn't appear to pass a
+  display name through in this payload shape. Cosmetic, but worth knowing
+  before pointing a room's transcript at an audience: introduce yourself in
+  the first message if a name matters on screen.
+- **The `node src/cli.ts serve` process was silently replaced mid-run.**
+  Noticed at 00:34: the PID recorded at start (bash wrapper) was gone;
+  a *different*, freshly-started `node src/cli.ts serve` (PID 84514,
+  started 00:32:17Z, `PPID=1`, same repo `cwd`) now owned port 8790.
+  Fan-out and the room store were unaffected — `.rdv/rooms.json` is
+  disk-persisted and the new process picked the same file back up with no
+  gap or duplicate delivery (cursor kept advancing correctly, 113→121). Root
+  cause not confirmed — most likely explanation is the concurrent
+  `rdv-e2b-boot-fix` work also running `node src/cli.ts serve` from the same
+  checkout (same default `.rdv` data dir, same port) and colliding with this
+  one. Not investigated further to avoid disrupting the live operator
+  session. **Risk worth flagging: two people running this service from the
+  same checkout without a distinct `RDV_DATA_DIR`/port can silently swap
+  which process is answering.**
+- Confirms the fan-out send call gives no success log — `service.log`
+  never printed a `send_message`/200 line for the real Telegram replies;
+  absence of a `[channels/agentpush] ... failed/blocked/error` line was the
+  only signal available from here. The operator's own phone is the actual
+  proof; not independently confirmed by this session beyond that inference.
+
+### Artifact verification
+
+```
+$ curl -s https://3210-i7jos61ixgkcfrekmi1vl.e2b.app
+HTTP_STATUS:200 BYTES:9039
+<title>Rendez-vous room artifact</title>
+
+# after the operator's real edit request, confirmed live:
+$ curl -s https://3210-i7jos61ixgkcfrekmi1vl.e2b.app | grep -i "test edit applied"
+    <p><em>Test edit applied.</em></p>
+```
+
+### Current state — left running, deliberately
+
+As of this write-up the room (`RDV-NG7F`), its session, its e2b box
+(`i7jos61ixgkcfrekmi1vl`), the named tunnel, and the service are all **left
+running** — a real human is mid-session; tearing any of it down now would
+cut off the operator's own live use, not just a rehearsal artifact. This is
+a deliberate deviation from the "leave nothing running" rule that governed
+Runs 1–2 (which were pure rehearsal); flagged explicitly rather than
+assumed. Boot budget: **4 of 4 used** — this run's cold boot was the last
+one; no more fresh boots available without operator/owner sign-off on going
+over budget.
