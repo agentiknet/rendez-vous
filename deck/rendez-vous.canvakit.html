@@ -265,6 +265,56 @@ page:
         max-width: 42rem;
       }
 
+      /* The architecture slide. Boxes and arrows, drawn in CSS — an
+         architecture slide a jury reads in four seconds, not a paragraph
+         about an architecture. Full width: this layout has no illustration. */
+      .dg { margin-top: 2.5rem; width: 100%; max-width: 68rem; }
+      .dg-row { display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap; }
+      .dg-pill {
+        font-family: var(--font-caption-family, 'Poppins', sans-serif);
+        font-size: 1.0625rem;
+        font-weight: 600;
+        color: var(--color-ink, #0A2447);
+        background: var(--color-surface, #F5F8FC);
+        border: 1px solid var(--color-border, rgba(10, 36, 71, 0.12));
+        border-radius: 999px;
+        padding: 0.7rem 1.5rem;
+      }
+      .dg-pill--out {
+        background: var(--color-accent, #5586C8);
+        border-color: var(--color-accent, #5586C8);
+        color: var(--color-accent-fg, #FFFFFF);
+      }
+      .dg-arrow {
+        text-align: center;
+        color: var(--color-ink-faint, #7B93B2);
+        font-size: 1.25rem;
+        line-height: 1;
+        margin: 0.6rem 0;
+      }
+      .dg-box {
+        font-family: var(--font-display-family, 'Poppins', sans-serif);
+        font-weight: 700;
+        font-size: 1.5rem;
+        color: var(--color-ink, #0A2447);
+        background: var(--color-surface-raised, #EAF0F8);
+        border: 2px solid var(--color-accent, #5586C8);
+        border-radius: 14px;
+        padding: 1.1rem 1.5rem;
+        text-align: center;
+        margin: 0 auto;
+        max-width: 46rem;
+      }
+      .dg-box--wide { max-width: 100%; }
+      .dg-box span {
+        display: block;
+        font-family: var(--font-caption-family, 'Poppins', sans-serif);
+        font-weight: 400;
+        font-size: 0.9375rem;
+        color: var(--color-ink-muted, #3E5B80);
+        margin-top: 0.35rem;
+      }
+
       /* Reserved space for a screenshot that does not exist yet. Sits on the
          right half, which every layout in this deck leaves empty. */
       .illo {
@@ -415,6 +465,26 @@ page:
       {{#highlight}}<div class="highlight"><p>{{highlight}}</p></div>{{/highlight}}
       {{#caption}}<p class="caption">{{caption}}</p>{{/caption}}
       {{/isCode}}
+
+      {{#isDiagram}}
+      <div class="eyebrow">{{eyebrow}}</div>
+      <h1>{{title}}</h1>
+      <div class="dg">
+        <div class="dg-row">
+          {{#dgIn}}<div class="dg-pill">{{.}}</div>{{/dgIn}}
+        </div>
+        <div class="dg-arrow">▼</div>
+        <div class="dg-box dg-box--wide">{{dgRoom}}<span>{{dgRoomSub}}</span></div>
+        <div class="dg-arrow">▼</div>
+        <div class="dg-box">{{dgAgent}}<span>{{dgAgentSub}}</span></div>
+        <div class="dg-arrow">▼</div>
+        <div class="dg-row">
+          {{#dgOut}}<div class="dg-pill dg-pill--out">{{.}}</div>{{/dgOut}}
+        </div>
+      </div>
+      {{#highlight}}<div class="highlight"><p>{{highlight}}</p></div>{{/highlight}}
+      {{#caption}}<p class="caption">{{caption}}</p>{{/caption}}
+      {{/isDiagram}}
 
       <!-- Illustration slot. Every page that will carry a screenshot declares
            `illustration` in data.json and renders a labelled placeholder until

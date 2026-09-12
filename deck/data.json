@@ -46,36 +46,27 @@
     "page": "4 / 6"
   },
   {
-    "type": "findings",
-    "isFindings": true,
-    "eyebrow": "How it actually works",
-    "title": "From a text message to something everyone can open.",
-    "findingsItems": [
-      {
-        "n": "1",
-        "label": "You send a message — WhatsApp, Telegram, or an email reply. Nothing to install."
-      },
-      {
-        "n": "2",
-        "label": "It lands in the room with your name on it, so everyone sees who said what."
-      },
-      {
-        "n": "3",
-        "label": "One agent reads everything everyone has said — not just your side of it."
-      },
-      {
-        "n": "4",
-        "label": "It works on a real computer in the cloud: it writes the files, builds the document, puts the site online."
-      },
-      {
-        "n": "5",
-        "tag": "nothing leaves without a yes",
-        "label": "It shows you what it is about to send and to whom, and waits for one of you to confirm."
-      }
+    "type": "diagram",
+    "isDiagram": true,
+    "eyebrow": "How it works",
+    "title": "One conversation. One agent. One link.",
+    "dgIn": [
+      "Julie · phone",
+      "Tom · phone",
+      "the boss · email",
+      "Atlas · an agent"
     ],
-    "highlight": "Everyone gets the reply on their own app, and the same link to the same document. Change it, and it changes for everyone.",
-    "caption": "Built on agentpush for the messaging, our open-source agentproto runtime for the agent, and an e2b sandbox for the machine.",
-    "illustration": "The live site open in a browser with the URL visible, next to the finished PDF on a phone.",
+    "dgRoom": "THE ROOM",
+    "dgRoomSub": "one conversation — every message carries who sent it, and from where",
+    "dgAgent": "ONE AGENT, on a real computer in the cloud",
+    "dgAgentSub": "reads what everyone said · writes the files · puts the site online",
+    "dgOut": [
+      "a PDF",
+      "a website",
+      "one link for everyone"
+    ],
+    "highlight": "Nothing leaves the room until one of you confirms what is being sent, and to whom.",
+    "caption": "Messaging by agentpush · the agent runs on our open-source agentproto · the machine is an e2b sandbox.",
     "page": "5 / 6"
   },
   {
