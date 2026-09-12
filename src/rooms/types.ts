@@ -66,6 +66,22 @@ export interface Ask {
 export interface Room {
   code: string
   sessionId: string | undefined
+  /** The session id this room had before it was paused or its session died.
+   *
+   *  Pausing clears `sessionId` (`doPause`, `reviveIfSessionDied`), which is
+   *  correct — a paused room has no live session. But the daemon keeps that
+   *  session's transcript readable after it is killed, and replaying it is
+   *  the whole of `src/service/recap.ts`. Without somewhere to keep the id,
+   *  the resume path had nothing to read: it looked at `room.sessionId`,
+   *  found `undefined` because pausing had already cleared it, and every
+   *  resume silently took the no-history branch. Proven that way in a local
+   *  harness on 2026-09-12 — the honest "I've lost the earlier thread" reply
+   *  fired every single time, so the bug hid behind a message that looked
+   *  exactly like the feature working.
+   *
+   *  Optional key, absent on rooms that predate the field — same JSON
+   *  round-trip rule as `pendingDeliveries` and `asks`. */
+  lastSessionId?: string
   sandboxId: string | undefined
   artifactUrl: string | undefined
   /** Whether the daemon's own readiness probe confirmed `artifactUrl` was

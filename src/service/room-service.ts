@@ -625,7 +625,14 @@ export class RoomService {
     const alive = await isSessionAlive(this.daemon, room.sessionId)
     if (alive) return room
     await this.fanout.stop(room.code)
-    return this.store.update(room.code, { sessionId: undefined, state: "paused" })
+    // Keep the id: the daemon can still serve this dead session's transcript,
+    // and `performResume` needs it to replay the room's history into the
+    // fresh session (src/service/recap.ts).
+    return this.store.update(room.code, {
+      sessionId: undefined,
+      lastSessionId: room.sessionId,
+      state: "paused",
+    })
   }
 
   private async doPause(room: Room, extra: Partial<Pick<Room, "artifactReady">> = {}): Promise<void> {
@@ -635,7 +642,14 @@ export class RoomService {
         console.error(`failed to kill session for room ${room.code}: ${error instanceof Error ? error.message : String(error)}`)
       })
     }
-    await this.store.update(room.code, { sessionId: undefined, state: "paused", ...extra })
+    // Same as `reviveIfSessionDied`: the session is killed, but its
+    // transcript outlives it on the daemon and the resume replays it.
+    await this.store.update(room.code, {
+      sessionId: undefined,
+      ...(room.sessionId !== undefined ? { lastSessionId: room.sessionId } : {}),
+      state: "paused",
+      ...extra,
+    })
   }
 
   /** Serializes `performResume` per room code (docs/UPSTREAM.md #10 territory
@@ -679,13 +693,16 @@ export class RoomService {
   }
 
   private async performResume(room: Room): Promise<Room> {
-    // Read the OUTGOING session's transcript before `booter.resume` mints a
-    // new one — `room.sessionId` is still the old id here, and this is the
-    // last moment it exists anywhere (the `store.update` below overwrites
-    // it). `buildSessionRecap` is bounded and never throws: a resume that
-    // loses the history is a working resume, a resume that hangs is not.
-    const recap =
-      room.sessionId === undefined ? undefined : await buildSessionRecap(this.client, room.sessionId)
+    // Which session's transcript to replay. Usually `lastSessionId`: by the
+    // time a resume runs, pausing has already cleared `sessionId` — that
+    // ordering is what made the first version of this dead on arrival, since
+    // it only looked at `sessionId` and always found `undefined`.
+    // `sessionId` is still checked first for the case where a resume is
+    // triggered on a room that was never paused.
+    // `buildSessionRecap` is bounded and never throws: a resume that loses
+    // the history is a working resume, a resume that hangs is not.
+    const priorSessionId = room.sessionId ?? room.lastSessionId
+    const recap = priorSessionId === undefined ? undefined : await buildSessionRecap(this.client, priorSessionId)
     const booted = await this.booter.resume(room, recap !== undefined ? { recap } : {})
     // A new sessionId restarts the daemon's own seq numbering near 1, while
     // `room.cursor` is still whatever seq the *previous* session last

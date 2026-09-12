@@ -144,6 +144,7 @@ function isRoom(value: unknown): value is Room {
     return false
   }
   const sessionId = "sessionId" in value ? value.sessionId : undefined
+  const lastSessionId = "lastSessionId" in value ? value.lastSessionId : undefined
   const sandboxId = "sandboxId" in value ? value.sandboxId : undefined
   const artifactUrl = "artifactUrl" in value ? value.artifactUrl : undefined
   const artifactReady = "artifactReady" in value ? value.artifactReady : undefined
@@ -152,6 +153,7 @@ function isRoom(value: unknown): value is Room {
   return (
     isString(value.code) &&
     isStringOrUndefined(sessionId) &&
+    isStringOrUndefined(lastSessionId) &&
     isStringOrUndefined(sandboxId) &&
     isStringOrUndefined(artifactUrl) &&
     isBooleanOrUndefined(artifactReady) &&
@@ -337,6 +339,7 @@ export class RoomStore {
       Pick<
         Room,
         | "sessionId"
+        | "lastSessionId"
         | "sandboxId"
         | "artifactUrl"
         | "artifactReady"
