@@ -1,6 +1,8 @@
 # Rendez-vous pitch deck
 
-13 slides, dark kit, one idea per slide. Every number is sourced from
+13 slides — 9-slide pitch arc (problem, consequence, solution, how we built
+it, the product working, the designed call, work leaves the room, close)
+plus a 4-slide appendix for Q&A. Every number is sourced from
 `docs/REHEARSAL.md` or `docs/ARCHITECTURE.md` (see `SCRIPT.md` for the
 speaker read and shot list).
 
@@ -12,7 +14,8 @@ directory because `kit:` refs resolve relative to the CWD.
 
 - `rendez-vous.canvakit.html` — the template
 - `data.json` — the 13 slides' content
-- `rendez-vous.pdf` — rendered output (13 pages)
+- `rendez-vous.pdf` — rendered output, light kit (13 pages)
+- `out/rendez-vous-light.pdf`, `out/rendez-vous-dark.pdf` — both kits rendered
 - `SCRIPT.md` — ~4 minute speaker script + shot list for the recording
 
 ## Render command
@@ -22,39 +25,61 @@ From this directory:
 ```sh
 node /Volumes/SSDExternalMacStudio/Code/products/agentik/agentik-studio/projects/openagentik/canvakit/packages/cli/dist/index.js \
   export rendez-vous.canvakit.html --format pdf --fonts embed \
+  --design kit:agentik \
+  --output out/rendez-vous-light.pdf
+
+node /Volumes/SSDExternalMacStudio/Code/products/agentik/agentik-studio/projects/openagentik/canvakit/packages/cli/dist/index.js \
+  export rendez-vous.canvakit.html --format pdf --fonts embed \
   --design kit:agentik-dark \
-  --output rendez-vous.pdf
+  --output out/rendez-vous-dark.pdf
 ```
+
+`rendez-vous.pdf` at the top level is a copy of the light render, kept for
+whatever pulls that path directly (e.g. the deliverable-flow send).
 
 ## Notes on content sourcing
 
-- Slide 8 ("Why a room, not two people and one bot") — the middleman arc —
-  is operator-specified directly, no doc anchor yet. Marked "specced, not
-  yet built" on-slide per the same rule as slides 9 and 12.
-- Slide 9 ("The swap needs a login first") reflects `docs/CODEX-FLIP.md`'s
+- Slides 1–9 are the pitch arc: problem → consequence → solution → the
+  product working (Run 3, real Telegram + web) → how it's built → the
+  credential design → the deliverable flow → close. Slides 10–13 are
+  appendix, each headed "Appendix", held for Q&A.
+- Slide 5 ("The product working") is Run 3's real Telegram + web session,
+  reframed as an observed product fact, not a test report: real phone,
+  cold boot at 86.5s, a second member from the laptop, attribution on
+  every message, the agent finding and editing the artifact unaided,
+  delivery confirmed on the phone (`docs/REHEARSAL.md`, "Run 3 — real
+  Telegram + web: COMPLETED live").
+- Slide 8 ("Work leaves the room") keeps the substance of the deliverable
+  flow (`docs/DELIVERABLE.md`): preview, explicit member confirm, PDF to
+  messenger and mail, every send in the transcript. Caption reflects
+  `docs/REHEARSAL.md`'s "Deliverable flow, first real exercise": the code
+  is done and tested, but the first real send went by a one-off script,
+  not the room's own `send pdf to`/`confirm` flow — update the caption
+  once that's exercised live.
+- Appendix slide 10 (the five findings) orders the liveness-by-existence
+  bug first — it's `docs/UPSTREAM.md` finding 9, found live on a real
+  phone during the Run 3 continuation — then the other four in the order
+  they were found: `queue: true`, the resume cursor, account-pinned
+  routes, and broker-blind planning (the Gmail rebuild proposal).
+- Appendix slide 11 (honest limits) sources the resume-after-kill status
+  from `docs/REHEARSAL.md`'s Run 3 continuation, "Step 3 — resume-after-
+  kill: FAILED, root cause identified" — the fix has since landed
+  (`4e73786`) but a fresh re-proof on a phone is still pending; the
+  paused-sandbox expiry and the dead-artifact-link risk are
+  `docs/ARCHITECTURE.md` §9.3b, confirmed live when box
+  `i7jos61ixgkcfrekmi1vl` expired mid-rehearsal; the routing risk is
+  `docs/AGENTPUSH.md` ("Do not pin a route to a bot account") plus
+  `docs/WORKSPACE-OPTION.md` (the demo runs on the shared `default`
+  workspace).
+- Appendix slide 12 (the codex verdict) reflects `docs/CODEX-FLIP.md`'s
   verdict: the one-parameter claim does not hold as stated — a fresh box
   has no codex credentials, `installAdapters` installs the binary not the
-  login, and the tested boot failed at the auth gate before the mechanical
-  swap could be observed. Framed as the credential model (§9.3,
-  device-auth) being the real second-brain work, not the adapter swap.
-- Slide 11's "responder double reply" risk is sourced from
-  `docs/AGENTPUSH.md` ("Do not pin a route to a bot account" — routes
-  evaluate independently, not first-match-wins) and `docs/WORKSPACE-OPTION.md`
-  (the demo runs on the shared `default` workspace, not a dedicated one).
+  login, and the tested boot failed at the auth gate before the
+  mechanical swap could be observed. Framed as the credential model
+  (architecture.md §9.3, device-auth) being the real second-brain work,
+  not the adapter swap.
+- Appendix slide 13 (the middleman arc) is operator-specified directly, no
+  doc anchor yet beyond `docs/ARCHITECTURE.md` §2.5 and `docs/MIDDLEMAN.md`.
+  Marked "specced, not yet built" on-slide.
 - No slide required an "ASK" placeholder — every number traced to
   `docs/REHEARSAL.md` or `docs/ARCHITECTURE.md`.
-- Slide 6's fifth finding (the liveness check reading `res.ok` instead of
-  `status`) is `docs/UPSTREAM.md` finding 9, "A liveness check that tests
-  existence reports success against a corpse" — found live on a real phone
-  during the Run 3 continuation.
-- Slide 11's dead-artifact-link line (box `i7jos61ixgkcfrekmi1vl` expiring
-  mid-rehearsal) is operator-reported, confirming the risk
-  `docs/ARCHITECTURE.md` §9.3b predicted. As of this render,
-  `docs/REHEARSAL.md`'s Run 3 continuation is still marked "WAITING" on the
-  resume-after-kill check, so the slide and script call the fix "fixed
-  after rehearsal, re-proof pending" rather than claiming it's verified —
-  update that framing once `docs/REHEARSAL.md` records a completed re-test.
-- Slide 12 ("The deliverable flow") describes a capability not yet in any
-  doc as of this render — operator-specified directly. Marked "being
-  built, not yet observed" on-slide per the same rule: update once
-  `docs/REHEARSAL.md` records it run live.

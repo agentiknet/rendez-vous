@@ -9,146 +9,85 @@
   {
     "type": "statement",
     "isStatement": true,
-    "eyebrow": "The week",
-    "title": "The sandbox is now a commodity.",
+    "eyebrow": "The problem",
+    "title": "Work is multiplayer. Agents are single-player.",
     "bullets": [
-      "OpenAI's Agents API: nine sandbox partners, one API call (2026-09-10).",
-      "Every one of them is single-principal — one key, one developer, one session."
+      "Every agent lives in exactly one person's window."
     ],
-    "highlight": "The uncontested ground isn't the sandbox. It's the room around it.",
     "page": "2 / 13"
   },
   {
-    "type": "list",
-    "isList": true,
-    "eyebrow": "The primitive",
-    "title": "Room",
+    "type": "statement",
+    "isStatement": true,
+    "eyebrow": "The consequence",
+    "title": "So the human becomes the integration layer.",
     "bullets": [
-      "Code — RDV-7F3K, a durable handle",
-      "Members — many humans, many surfaces",
-      "Tiers — messenger, email, room-web",
-      "One session — the one agent turn-loop",
-      "One artifact URL — stable, public, live"
+      "Copy-paste relay between two separate chat windows.",
+      "Screenshots of chats, forwarded to the other side.",
+      "“Let me ask the AI and get back to you.”",
+      "The second person never sees the context.",
+      "The deliverable dies inside one private thread."
     ],
     "page": "3 / 13"
   },
   {
-    "type": "ladder",
-    "isLadder": true,
-    "eyebrow": "The fidelity ladder",
-    "title": "Three tiers, one room",
-    "ladderRows": [
-      { "tier": "1", "surface": "WhatsApp / Telegram", "sends": "plain text turns", "receives": "final reply + artifact URL, terse", "latency": "seconds" },
-      { "tier": "2", "surface": "Email", "sends": "reply-to-thread turns", "receives": "per-turn digest + artifact link", "latency": "minutes" },
-      { "tier": "3", "surface": "Laptop web room", "sends": "turns, permission answers", "receives": "full transcript + live artifact iframe", "latency": "live" }
+    "type": "statement",
+    "isStatement": true,
+    "eyebrow": "The solution",
+    "title": "One agent. Many humans. No new app.",
+    "bullets": [
+      "One agent session, many humans, on their own surfaces.",
+      "No install. No shared login. No new app."
     ],
-    "caption": "Telegram and laptop are already two real surfaces.",
+    "highlight": "Sandboxes are now commodity — nine partners, one API call, each single-principal.",
     "page": "4 / 13"
   },
   {
     "type": "timeline",
     "isTimeline": true,
-    "eyebrow": "Run 3 — what actually happened",
-    "title": "A real phone, a real operator, one artifact",
+    "eyebrow": "The product working",
+    "title": "Two people, two surfaces, one artifact, attributed.",
     "timelineItems": [
-      { "time": "0s", "label": "Alice's “new” on real Telegram — room created" },
-      { "time": "86.5s", "label": "Cold boot — session + artifact ready (4th and final boot budget)" },
-      { "time": "+~20s", "label": "Bob joins from the laptop room view" },
-      { "time": "live", "label": "Attribution confirmed in the stream: [Bob · room-web], [6371794295 · messenger]" },
-      { "time": "~33s", "label": "Agent finds and edits the artifact, unaided" }
+      { "time": "0s", "label": "A real phone types “new” on Telegram — the room exists" },
+      { "time": "86.5s", "label": "Cold boot — session and artifact ready" },
+      { "time": "+~20s", "label": "A second person joins from the laptop" },
+      { "time": "live", "label": "Every message attributed: [Bob · room-web], [phone · messenger]" },
+      { "time": "~33s", "label": "The agent finds the artifact and edits it, unaided" }
     ],
-    "caption": "Curl-verified at every step. Delivery to the phone: operator-confirmed.",
+    "caption": "Delivery confirmed on the phone.",
     "page": "5 / 13"
   },
   {
-    "type": "findings",
-    "isFindings": true,
-    "eyebrow": "The strongest finding",
-    "title": "One shape, five independent bugs",
-    "findingsItems": [
-      { "n": "1", "tag": "found live, tonight", "label": "the liveness check reads res.ok, not status — a killed session still answers 200, so resume reports success in 0.7s having resumed nothing" },
-      { "n": "2", "label": "queue: true omitted → a mid-turn prompt is silently dropped" },
-      { "n": "3", "label": "the resume cursor stays frozen → every reply after a resume vanishes" },
-      { "n": "4", "label": "an account-pinned inbound route → never fires, filtered out silently" },
-      { "n": "5", "label": "the agent proposes to rebuild a Gmail capability it already held" }
+    "type": "code",
+    "isCode": true,
+    "eyebrow": "How we built it",
+    "title": "Every message becomes one artifact.",
+    "bullets": [
+      "Messenger — WhatsApp, Telegram: quick text in, terse replies out.",
+      "Email — reply-to-thread turns, a per-turn digest back.",
+      "Room-web — laptop, full transcript, the live artifact."
     ],
-    "highlight": "The first four lost data quietly. The fifth reported success while doing nothing — the correct field was already parsed one function over.",
-    "caption": "None crash. All look like working code or correct config. This is evidence you only get by running it.",
+    "code": "agentpush ingress\n  → room  (many contacts, one session)\n  → fan-out  (by presence tier)\n  → e2b sandbox\n  → artifact URL",
+    "highlight": "Built on our own open-source runtime — unmodified, from npm.",
     "page": "6 / 13"
   },
   {
     "type": "statement",
     "isStatement": true,
-    "eyebrow": "A designed position",
-    "title": "Credentials are per-member, not per-room",
+    "eyebrow": "The designed call",
+    "title": "Credentials are per-member, not per-room.",
     "bullets": [
-      "A shared room holding one key shares it with everyone who has the code.",
-      "Our position: each member attaches their own tools over rendezvous — nothing inherited.",
-      "Revocation is an unpair, not a key rotation — there was never a shared secret to rotate."
+      "A shared room key is shared with anyone holding the code.",
+      "Each member attaches their own tools over rendezvous — nothing inherited.",
+      "Revocation is an unpair, not a key rotation."
     ],
     "page": "7 / 13"
   },
   {
     "type": "findings",
     "isFindings": true,
-    "eyebrow": "Why a room",
-    "title": "Why a room, not two people and one bot",
-    "findingsItems": [
-      { "n": "1", "label": "the agent asks Alice for the product shot" },
-      { "n": "2", "label": "the agent asks Bob for the one-line positioning" },
-      { "n": "3", "label": "each answers on their own channel, in their own time" },
-      { "n": "4", "label": "the agent synthesizes both into the deck — and it goes to the client as a PDF" }
-    ],
-    "highlight": "The agent addresses each member individually and reconciles what they contribute — not a group chat with a bot bolted on.",
-    "caption": "Specced, not yet built.",
-    "page": "8 / 13"
-  },
-  {
-    "type": "code",
-    "isCode": true,
-    "eyebrow": "Phase 2 — tested, corrected",
-    "title": "The swap needs a login first",
-    "bullets": [
-      "Tested live: the boot failed at the auth gate, before the adapter swap could even be observed.",
-      "installAdapters installs the codex binary — not a login. Nothing is sent to a box automatically."
-    ],
-    "code": "agent_start({ adapter: \"codex\", model: \"gpt-5.2-codex\", ... })\n\n→ 500 sandbox_proxy_failed\n   \"no codex login found — run `codex login`\"\n\nbox destroyed on failure — boots used: 1 of 1",
-    "highlight": "Same box, same seed, same port with a different CLI is plausible from source, but unobserved. The real second-brain work is the credential model (§9.3, device-auth) — not the adapter swap.",
-    "caption": "docs/CODEX-FLIP.md — variant A only; B and C untested (1-boot budget).",
-    "page": "9 / 13"
-  },
-  {
-    "type": "statement",
-    "isStatement": true,
-    "eyebrow": "Is this a cheat?",
-    "title": "Built on our own open-source runtime",
-    "bullets": [
-      "Unmodified. Installed from npm. No fork, no vendored copy.",
-      "The room layer is every line that's new — the judged artifact.",
-      "8 upstream findings, shipped as a maintainer write-up (docs/UPSTREAM.md)."
-    ],
-    "page": "10 / 13"
-  },
-  {
-    "type": "list",
-    "isList": true,
-    "eyebrow": "Honest limits",
-    "title": "What was simulated, what was observed",
-    "bullets": [
-      "Runs 1–2: simulated inbound, no phone, no agentpush workspace. Run 3: real Telegram + web, live.",
-      "Paused e2b boxes expire in 20–60 min — and tonight it happened live: box i7jos61ixgkcfrekmi1vl expired mid-rehearsal, and the room kept advertising its now-dead artifact URL.",
-      "Resume-after-kill and the dead artifact link: fixed after rehearsal, re-proof pending. A room-scoped, proxied artifact URL is now being built — ahead of whisper and multimodal.",
-      "We share the default workspace's Telegram routing — its existing responder route can fire alongside ours on the same message, risking a double reply.",
-      "WhatsApp: not provisioned. No number, no key.",
-      "Phase 2 pairing-back: untested — box-to-broker egress, which side mints the token, post-pairing scope."
-    ],
-    "page": "11 / 13"
-  },
-  {
-    "type": "findings",
-    "isFindings": true,
-    "eyebrow": "The deliverable flow",
-    "title": "Work leaves the room — on purpose",
+    "eyebrow": "Work leaves the room",
+    "title": "Work leaves the room — on purpose.",
     "findingsItems": [
       { "n": "1", "label": "Jeremy asks the room to build a presentation, then reviews it live at the artifact URL" },
       { "n": "2", "label": "He asks for a PDF" },
@@ -156,15 +95,73 @@
       { "n": "4", "label": "the PDF reaches Jeremy's own messenger, and by email, a client who is not a member of the room" },
       { "n": "5", "label": "every send lands in the shared transcript: who asked, who confirmed, what was sent, to whom" }
     ],
-    "highlight": "Every other capability keeps work inside the room. This one lets the room produce a work product that leaves it — the confirmation gate is a room with a notion of authority, not just relay.",
-    "caption": "Chains fan-in, the artifact, canvakit and agentpush end to end. Being built, not yet observed.",
-    "page": "12 / 13"
+    "highlight": "Every other capability keeps work inside the room. This one lets it leave — with authority, not just relay.",
+    "caption": "Code done, tested — the first live send still bypassed the room's own flow.",
+    "page": "8 / 13"
   },
   {
     "type": "closing",
     "isClosing": true,
     "title": "The room is the primitive.",
     "subtitle": "The runtime is a detail.",
+    "page": "9 / 13"
+  },
+  {
+    "type": "findings",
+    "isFindings": true,
+    "eyebrow": "Appendix — the five findings",
+    "title": "One shape, five independent bugs.",
+    "findingsItems": [
+      { "n": "1", "tag": "found live, tonight", "label": "a killed session still answers 200 — resume reported success doing nothing" },
+      { "n": "2", "label": "queue: true omitted — a mid-turn prompt is silently dropped" },
+      { "n": "3", "label": "the resume cursor freezes — every reply after it vanishes" },
+      { "n": "4", "label": "an account-pinned route never fires — filtered out silently" },
+      { "n": "5", "label": "the agent proposes rebuilding a Gmail capability it already had" }
+    ],
+    "highlight": "Four of these five lost data quietly. This one reported success while doing nothing.",
+    "caption": "None crash. All look like working code or correct config.",
+    "page": "10 / 13"
+  },
+  {
+    "type": "list",
+    "isList": true,
+    "eyebrow": "Appendix — honest limits",
+    "title": "Four things we haven't proven yet.",
+    "bullets": [
+      "Resume-after-kill: fixed, but not yet re-proved on a phone.",
+      "Paused sandboxes expire in 20 to 60 minutes.",
+      "WhatsApp: not provisioned — no number, no key.",
+      "Shared inbound routing risks a responder double reply."
+    ],
+    "page": "11 / 13"
+  },
+  {
+    "type": "code",
+    "isCode": true,
+    "eyebrow": "Appendix — the codex verdict",
+    "title": "It failed at the auth gate, not the swap.",
+    "bullets": [
+      "Tested live: the swap alone hit a login wall first.",
+      "installAdapters installs the binary — not a login."
+    ],
+    "code": "agent_start({ adapter: \"codex\", model: \"gpt-5.2-codex\", ... })\n\n→ 500 sandbox_proxy_failed\n   \"no codex login found — run `codex login`\"\n\nbox destroyed on failure — boots used: 1 of 1",
+    "highlight": "The credential model — device-auth — is the real second-brain work, not the adapter swap.",
+    "caption": "docs/CODEX-FLIP.md — variant A only; B and C untested (1-boot budget).",
+    "page": "12 / 13"
+  },
+  {
+    "type": "findings",
+    "isFindings": true,
+    "eyebrow": "Appendix — the middleman arc",
+    "title": "Why a room, not two people and one bot.",
+    "findingsItems": [
+      { "n": "1", "label": "the agent asks Alice for the product shot" },
+      { "n": "2", "label": "the agent asks Bob for the one-line positioning" },
+      { "n": "3", "label": "each answers on their own channel, in their own time" },
+      { "n": "4", "label": "the agent synthesizes both into the deck — sent as a PDF" }
+    ],
+    "highlight": "The agent addresses each member individually and reconciles what they contribute.",
+    "caption": "Specced, not yet built.",
     "page": "13 / 13"
   }
 ]
