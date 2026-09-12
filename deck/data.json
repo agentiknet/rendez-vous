@@ -4,7 +4,7 @@
     "isClosing": true,
     "title": "Work is multiplayer.",
     "subtitle": "Agents are single-player.",
-    "page": "1 / 6"
+    "page": "1 / 7"
   },
   {
     "type": "statement",
@@ -17,7 +17,7 @@
       "Nobody else ever sees it."
     ],
     "illustration": "Two chat windows side by side, the same message being dragged from one to the other. Build this one — no shoot needed.",
-    "page": "2 / 6"
+    "page": "2 / 7"
   },
   {
     "type": "statement",
@@ -30,7 +30,7 @@
       "An agent in the middle, sorting out who wants what."
     ],
     "illustration": "THE money shot. The 4-up frame mid-conflict: Julie's phone, Tom's phone, the room view showing the agent's “Tom's villa is 16k, Julie's cap is 12k”, and the artifact.",
-    "page": "3 / 6"
+    "page": "3 / 7"
   },
   {
     "type": "statement",
@@ -43,38 +43,136 @@
       "An agent joins the same way a person does."
     ],
     "illustration": "One phone: “new” → the room code and QR come straight back. A second phone joins. Two real screens.",
-    "page": "4 / 6"
+    "page": "4 / 7"
   },
   {
-    "type": "diagram",
-    "isDiagram": true,
-    "eyebrow": "How it works",
-    "title": "One conversation. One agent. One link.",
-    "dgIn": [
-      "Julie · phone",
-      "Tom · phone",
-      "the boss · email",
-      "Atlas · an agent"
+    "type": "hub",
+    "isHub": true,
+    "eyebrow": "The shape of it",
+    "title": "One orchestrator. N humans. N agents.",
+    "hubLeft": [
+      {
+        "y": 100,
+        "ty": 138,
+        "label": "Julie · phone"
+      },
+      {
+        "y": 330,
+        "ty": 368,
+        "label": "Tom · phone"
+      },
+      {
+        "y": 560,
+        "ty": 598,
+        "label": "…anyone with the code"
+      }
     ],
-    "dgRoom": "THE ROOM",
-    "dgRoomSub": "one conversation — every message carries who sent it, and from where",
-    "dgAgent": "ONE AGENT, on a real computer in the cloud",
-    "dgAgentSub": "reads what everyone said · writes the files · puts the site online",
-    "dgOut": [
-      "a PDF",
-      "a website",
-      "one link for everyone"
+    "hubRight": [
+      {
+        "y": 100,
+        "ty": 138,
+        "label": "Atlas · on a Mac"
+      },
+      {
+        "y": 330,
+        "ty": 368,
+        "label": "a research agent"
+      },
+      {
+        "y": 560,
+        "ty": 598,
+        "label": "…whatever you plug in"
+      }
     ],
-    "highlight": "Nothing leaves the room until one of you confirms what is being sent, and to whom.",
-    "caption": "Messaging by agentpush · the agent runs on our open-source agentproto · the machine is an e2b sandbox.",
-    "page": "5 / 6"
+    "highlight": "Only the orchestrator sees every thread — which is how it can tell you that what you just asked for contradicts what someone else asked for.",
+    "page": "5 / 7"
+  },
+  {
+    "type": "system",
+    "isSystem": true,
+    "eyebrow": "System design",
+    "title": "What it runs on.",
+    "sysRows": [
+      {
+        "x": 270,
+        "y": 40,
+        "w": 1100,
+        "cx": 820,
+        "ty": 78,
+        "sy": 106,
+        "label": "WhatsApp · Telegram · Email · Web",
+        "note": "the apps people already have",
+        "fill": "var(--color-surface, #F5F8FC)",
+        "stroke": "var(--color-border-strong, rgba(10,36,71,0.24))",
+        "ink": "var(--color-ink, #0A2447)",
+        "sub": "var(--color-ink-muted, #3E5B80)"
+      },
+      {
+        "x": 270,
+        "y": 180,
+        "w": 1100,
+        "cx": 820,
+        "ty": 218,
+        "sy": 246,
+        "label": "agentpush",
+        "note": "one API for every channel, inbound and outbound",
+        "fill": "var(--color-surface, #F5F8FC)",
+        "stroke": "var(--color-border-strong, rgba(10,36,71,0.24))",
+        "ink": "var(--color-ink, #0A2447)",
+        "sub": "var(--color-ink-muted, #3E5B80)"
+      },
+      {
+        "x": 270,
+        "y": 320,
+        "w": 1100,
+        "cx": 820,
+        "ty": 358,
+        "sy": 386,
+        "label": "RENDEZ-VOUS",
+        "note": "members · attribution · fan-out per surface · the send gate",
+        "fill": "var(--color-accent, #5586C8)",
+        "stroke": "var(--color-accent, #5586C8)",
+        "ink": "var(--color-accent-fg, #FFFFFF)",
+        "sub": "var(--color-accent-fg, #FFFFFF)"
+      },
+      {
+        "x": 380,
+        "y": 460,
+        "w": 880,
+        "cx": 820,
+        "ty": 498,
+        "sy": 526,
+        "label": "agentproto daemon",
+        "note": "our open-source runtime — unmodified, from npm",
+        "fill": "var(--color-surface, #F5F8FC)",
+        "stroke": "var(--color-border-strong, rgba(10,36,71,0.24))",
+        "ink": "var(--color-ink, #0A2447)",
+        "sub": "var(--color-ink-muted, #3E5B80)"
+      },
+      {
+        "x": 380,
+        "y": 600,
+        "w": 880,
+        "cx": 820,
+        "ty": 638,
+        "sy": 666,
+        "label": "e2b sandbox",
+        "note": "the agent, a real terminal, the files, and a public URL",
+        "fill": "var(--color-surface, #F5F8FC)",
+        "stroke": "var(--color-border-strong, rgba(10,36,71,0.24))",
+        "ink": "var(--color-ink, #0A2447)",
+        "sub": "var(--color-ink-muted, #3E5B80)"
+      }
+    ],
+    "caption": "The sandbox is the isolation boundary: nobody's laptop, and no member's credentials inside it. The room reaches the agent through the daemon; the agent reaches back out through one MCP tool, and only that one.",
+    "page": "6 / 7"
   },
   {
     "type": "closing",
     "isClosing": true,
     "title": "You are not the middleman anymore.",
     "subtitle": "Humans and agents, finally in the same room.",
-    "page": "6 / 6"
+    "page": "7 / 7"
   },
   {
     "type": "findings",

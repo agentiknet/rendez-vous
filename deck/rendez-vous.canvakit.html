@@ -29,13 +29,17 @@ page:
         print-color-adjust: exact;
       }
 
+      html { font-size: 26px; }
+
       .slide {
         position: relative;
         display: flex;
         flex-direction: column;
         justify-content: center;
         width: 100vw;
-        min-height: 100vh;
+        height: 100vh;
+        max-height: 100vh;
+        overflow: hidden;
         break-inside: avoid;
         page-break-inside: avoid;
         padding: 4.5rem 5rem;
@@ -56,7 +60,7 @@ page:
 
       .eyebrow {
         font-family: var(--font-label-family, 'Poppins', sans-serif);
-        font-size: var(--font-label-size, 0.75rem);
+        font-size: 0.8rem;
         font-weight: var(--font-label-weight, 600);
         letter-spacing: var(--font-label-letter-spacing, 0.06em);
         text-transform: uppercase;
@@ -66,48 +70,48 @@ page:
 
       h1 {
         font-family: var(--font-h1-family, 'Poppins', sans-serif);
-        font-size: var(--font-h1-size, 2.25rem);
+        font-size: 2.75rem;
         font-weight: var(--font-h1-weight, 700);
         line-height: var(--font-h1-line-height, 1.12);
         letter-spacing: var(--font-h1-letter-spacing, -0.015em);
         color: var(--color-ink, #FFFFFF);
-        max-width: 44rem;
-        margin-bottom: 2rem;
+        max-width: 34rem;
+        margin-bottom: 2.25rem;
       }
 
       .slide--center h1 {
         font-family: var(--font-display-family, 'Poppins', sans-serif);
-        font-size: var(--font-display-size, 3rem);
+        font-size: 4rem;
         font-weight: var(--font-display-weight, 700);
         line-height: var(--font-display-line-height, 1.08);
         letter-spacing: var(--font-display-letter-spacing, -0.02em);
         color: var(--color-accent, #7FA9DC);
-        max-width: 48rem;
-        margin: 0 auto 1.25rem;
+        max-width: 54rem;
+        margin: 0 auto 1.5rem;
       }
 
       .subtitle {
         font-family: var(--font-h2-family, 'Poppins', sans-serif);
-        font-size: 1.35rem;
-        line-height: 1.5;
+        font-size: 1.7rem;
+        line-height: 1.45;
         color: var(--color-ink-muted, #A9BDD6);
-        max-width: 34rem;
+        max-width: 44rem;
         margin: 0 auto;
       }
 
       ul.bullets {
         list-style: none;
-        max-width: 42rem;
+        max-width: 34rem;
       }
 
       ul.bullets li {
         position: relative;
         font-family: var(--font-body-family, 'Poppins', sans-serif);
-        font-size: 1.15rem;
-        line-height: 1.5;
+        font-size: 1.32rem;
+        line-height: 1.45;
         color: var(--color-ink-muted, #A9BDD6);
-        padding-left: 1.5rem;
-        margin-bottom: 1.1rem;
+        padding-left: 1.6rem;
+        margin-bottom: 1.15rem;
       }
 
       ul.bullets li::before {
@@ -127,26 +131,26 @@ page:
         padding: 1rem 1.5rem;
         background: var(--color-surface, #123057);
         border-radius: 8px;
-        max-width: 42rem;
+        max-width: 34rem;
       }
 
       .highlight p {
         font-family: var(--font-h2-family, 'Poppins', sans-serif);
-        font-size: 1.35rem;
+        font-size: 1.45rem;
         font-weight: 600;
-        line-height: 1.4;
+        line-height: 1.38;
         color: var(--color-ink, #FFFFFF);
       }
 
       table.ladder {
         border-collapse: collapse;
         width: 100%;
-        max-width: 52rem;
+        max-width: 34rem;
       }
 
       table.ladder th {
         font-family: var(--font-label-family, 'Poppins', sans-serif);
-        font-size: 0.72rem;
+        font-size: 0.78rem;
         font-weight: 600;
         letter-spacing: 0.06em;
         text-transform: uppercase;
@@ -158,10 +162,10 @@ page:
 
       table.ladder td {
         font-family: var(--font-body-family, 'Poppins', sans-serif);
-        font-size: 0.95rem;
+        font-size: 1.08rem;
         line-height: 1.4;
         color: var(--color-ink-muted, #A9BDD6);
-        padding: 1rem 1rem 1rem 0;
+        padding: 1.05rem 1rem 1.05rem 0;
         border-bottom: 1px solid var(--color-border, rgba(255,255,255,0.14));
         vertical-align: top;
       }
@@ -175,7 +179,7 @@ page:
       }
 
       .timeline {
-        max-width: 46rem;
+        max-width: 34rem;
       }
 
       .timeline-row {
@@ -187,23 +191,23 @@ page:
 
       .timeline-time {
         font-family: var(--font-mono-family, ui-monospace, monospace);
-        font-size: 0.95rem;
+        font-size: 1.02rem;
         font-weight: 700;
         color: var(--color-accent, #7FA9DC);
-        min-width: 5rem;
+        min-width: 5.5rem;
         flex-shrink: 0;
         text-align: right;
       }
 
       .timeline-label {
         font-family: var(--font-body-family, 'Poppins', sans-serif);
-        font-size: 1.05rem;
-        line-height: 1.4;
+        font-size: 1.2rem;
+        line-height: 1.42;
         color: var(--color-ink-muted, #A9BDD6);
       }
 
       .findings {
-        max-width: 46rem;
+        max-width: 34rem;
       }
 
       .findings-row {
@@ -237,8 +241,8 @@ page:
 
       .findings-label {
         font-family: var(--font-body-family, 'Poppins', sans-serif);
-        font-size: 1.1rem;
-        line-height: 1.45;
+        font-size: 1.24rem;
+        line-height: 1.44;
         color: var(--color-ink-muted, #A9BDD6);
         padding-top: 0.15rem;
       }
@@ -252,18 +256,33 @@ page:
         border: 1px solid var(--color-border, rgba(255,255,255,0.14));
         border-radius: 8px;
         padding: 1.25rem 1.5rem;
-        max-width: 42rem;
+        max-width: 34rem;
         margin-top: 1rem;
         white-space: pre;
       }
 
       .caption {
+        max-width: 34rem;
         font-family: var(--font-caption-family, 'Poppins', sans-serif);
-        font-size: var(--font-caption-size, 0.8125rem);
+        font-size: 0.92rem;
         color: var(--color-ink-faint, #6C84A3);
         margin-top: 1.5rem;
         max-width: 42rem;
       }
+
+      /* The two SVG diagrams. Text styling has to live here, not on the
+         elements: canvakit's print pass does not inherit font shorthand into
+         <text>, so each class sets family and size explicitly. */
+      .slide:has(.hub) h1 { max-width: 62rem; margin-bottom: 1rem; }
+      .slide:has(.hub) .highlight, .slide:has(.hub) .caption { max-width: 44rem; margin-left: auto; margin-right: auto; }
+      .hub { width: 100%; max-width: 43rem; margin: 0 auto; display: block; }
+      .hub text { text-anchor: middle; }
+      .hub-c { font-family: var(--font-display-family, 'Poppins', sans-serif); font-size: 30px; font-weight: 700; fill: var(--color-accent-fg, #FFFFFF); }
+      .hub-cs { font-family: var(--font-caption-family, 'Poppins', sans-serif); font-size: 19px; fill: var(--color-accent-fg, #FFFFFF); opacity: 0.85; }
+      .hub-n { font-family: var(--font-caption-family, 'Poppins', sans-serif); font-size: 22px; font-weight: 600; fill: var(--color-ink, #0A2447); }
+      .hub-h { font-family: var(--font-caption-family, 'Poppins', sans-serif); font-size: 17px; font-weight: 700; letter-spacing: 0.14em; fill: var(--color-ink-faint, #7B93B2); }
+      .sys-t { font-family: var(--font-display-family, 'Poppins', sans-serif); font-size: 25px; font-weight: 700; }
+      .sys-s { font-family: var(--font-caption-family, 'Poppins', sans-serif); font-size: 18px; }
 
       /* The architecture slide. Boxes and arrows, drawn in CSS — an
          architecture slide a jury reads in four seconds, not a paragraph
@@ -319,10 +338,10 @@ page:
          right half, which every layout in this deck leaves empty. */
       .illo {
         position: absolute;
-        right: 4.5rem;
-        top: 10rem;
-        width: 40rem;
-        height: 26rem;
+        right: 5rem;
+        top: 9rem;
+        width: 26rem;
+        height: 17.5rem;
         border: 2px dashed var(--color-border-strong, rgba(10, 36, 71, 0.24));
         border-radius: 12px;
         background: var(--color-surface, #F5F8FC);
@@ -334,14 +353,14 @@ page:
       }
       .illo-tag {
         font-family: var(--font-caption-family, 'Poppins', sans-serif);
-        font-size: 0.6875rem;
+        font-size: 0.72rem;
         letter-spacing: 0.12em;
         font-weight: 700;
         color: var(--color-accent, #5586C8);
       }
       .illo-text {
         font-family: var(--font-caption-family, 'Poppins', sans-serif);
-        font-size: 0.9375rem;
+        font-size: 0.92rem;
         line-height: 1.5;
         color: var(--color-ink-muted, #3E5B80);
       }
@@ -465,6 +484,53 @@ page:
       {{#highlight}}<div class="highlight"><p>{{highlight}}</p></div>{{/highlight}}
       {{#caption}}<p class="caption">{{caption}}</p>{{/caption}}
       {{/isCode}}
+
+      {{#isHub}}
+      <div class="eyebrow">{{eyebrow}}</div>
+      <h1>{{title}}</h1>
+      <!-- The shape of the product: one orchestrator, N humans on one side,
+           N agents on the other. Inline SVG rather than CSS boxes — a radial
+           layout needs real coordinates, and the print pass renders it sharp. -->
+      <svg class="hub" viewBox="0 0 1640 720" xmlns="http://www.w3.org/2000/svg">
+        <g stroke="var(--color-border-strong, rgba(10,36,71,0.24))" stroke-width="2">
+          <line x1="330" y1="130" x2="700" y2="330" /><line x1="330" y1="360" x2="690" y2="360" /><line x1="330" y1="590" x2="700" y2="390" />
+          <line x1="1310" y1="130" x2="940" y2="330" /><line x1="1310" y1="360" x2="950" y2="360" /><line x1="1310" y1="590" x2="940" y2="390" />
+        </g>
+        <circle cx="820" cy="360" r="130" fill="var(--color-accent, #5586C8)" />
+        <text x="820" y="345" class="hub-c">ORCHESTRATOR</text>
+        <text x="820" y="385" class="hub-c">AGENT</text>
+        <text x="820" y="425" class="hub-cs">sees every thread</text>
+        {{#hubLeft}}<g><rect x="60" y="{{y}}" width="270" height="60" rx="30" fill="var(--color-surface, #F5F8FC)" stroke="var(--color-border, rgba(10,36,71,0.12))" stroke-width="2" /><text x="195" y="{{ty}}" class="hub-n">{{label}}</text></g>{{/hubLeft}}
+        {{#hubRight}}<g><rect x="1310" y="{{y}}" width="270" height="60" rx="30" fill="var(--color-surface, #F5F8FC)" stroke="var(--color-border, rgba(10,36,71,0.12))" stroke-width="2" /><text x="1445" y="{{ty}}" class="hub-n">{{label}}</text></g>{{/hubRight}}
+        <text x="195" y="70" class="hub-h">HUMANS</text>
+        <text x="1445" y="70" class="hub-h">AGENTS</text>
+      </svg>
+      {{#highlight}}<div class="highlight"><p>{{highlight}}</p></div>{{/highlight}}
+      {{/isHub}}
+
+      {{#isSystem}}
+      <div class="eyebrow">{{eyebrow}}</div>
+      <h1>{{title}}</h1>
+      <svg class="hub" viewBox="0 0 1640 700" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="var(--color-ink-faint, #7B93B2)" /></marker></defs>
+        {{#sysRows}}
+        <rect x="{{x}}" y="{{y}}" width="{{w}}" height="86" rx="14" fill="{{fill}}" stroke="{{stroke}}" stroke-width="2" />
+        <text x="{{cx}}" y="{{ty}}" class="sys-t" fill="{{ink}}">{{label}}</text>
+        <text x="{{cx}}" y="{{sy}}" class="sys-s" fill="{{sub}}">{{note}}</text>
+        {{/sysRows}}
+        <g stroke="var(--color-ink-faint, #7B93B2)" stroke-width="2" marker-end="url(#ar)">
+          <line x1="820" y1="126" x2="820" y2="168" /><line x1="820" y1="266" x2="820" y2="308" />
+          <line x1="820" y1="406" x2="820" y2="448" /><line x1="820" y1="546" x2="820" y2="588" />
+        </g>
+        <!-- The one way back up: the sandboxed agent calls our MCP tool. It
+             routes outside every box so it never crosses one, which is also
+             what it means — this is the only channel out of the sandbox. -->
+        <path d="M1260 643 L1400 643 L1400 363 L1372 363" fill="none" stroke="var(--color-accent, #5586C8)" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#ar)" />
+        <text x="1420" y="494" class="sys-s" fill="var(--color-accent, #5586C8)" text-anchor="start">the agent calls</text>
+        <text x="1420" y="520" class="sys-s" fill="var(--color-accent, #5586C8)" text-anchor="start">render_artifact</text>
+      </svg>
+      {{#caption}}<p class="caption">{{caption}}</p>{{/caption}}
+      {{/isSystem}}
 
       {{#isDiagram}}
       <div class="eyebrow">{{eyebrow}}</div>
