@@ -586,6 +586,14 @@ agent_start({
 Same box. Same filesystem. Same public artifact URL. Different brain, running
 **locally in the room's own sandbox**, on its own CLI auth. Zero new code.
 
+**Proved 2026-09-12: does not hold as stated.** One fresh e2b boot with only
+`adapter` and `model` changed failed at the auth gate: a fresh box has no codex
+credentials. `installAdapters` installs the binary, not the login. The daemon
+destroyed the box on failure, so the mechanical swap (same box, seed, port,
+different CLI) is plausible from source but unobserved. The real second-brain
+work is the credential model described below (device-auth first), not the
+adapter swap. Full spawn body and errors: `docs/CODEX-FLIP.md`.
+
 This reframes §9.4 completely. "Bring your own agent" is not the expensive
 stretch goal — it is the **cheapest** big idea we have, because the adapter
 layer already did the work. A room can host Claude, Codex, Gemini and Mistral
