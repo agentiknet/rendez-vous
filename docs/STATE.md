@@ -92,8 +92,8 @@ Last updated: 2026-09-12 01:18 UTC (03:18 local). Repo: this directory,
    never stalls) — SPEC IN PROGRESS (executor rdv-middleman-spec), build
    after item 3.
 7. Multimodal implementation — SPEC DONE (`docs/MULTIMODAL.md`), build last.
-8. Deck — DONE and current at `557ae2e` (12 pages, `deck/rendez-vous.pdf`);
-   the "why a room" slide is rendering (executor rdv-pitch-deck).
+8. Deck — DONE and current at `58da294` (13 pages, `deck/rendez-vous.pdf`,
+   includes the deliverable beat, the codex verdict and the "why a room" slide).
 9. Repo publish — DONE (private, 59 commits matched at publish time).
 10. Codex flip — DONE: the one-parameter claim does NOT hold; the boot failed
     at the auth gate (`docs/CODEX-FLIP.md`, architecture §9.3).
