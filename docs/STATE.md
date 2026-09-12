@@ -108,8 +108,9 @@ Last updated: 2026-09-12 01:34 UTC (03:34 local). Repo: this directory,
     (app-serve ui.path, reconnect not pausing, spawn surviving disconnect).
 
 12. Morning email to Jeremy (deck PDF, script, status body) to jeremy@agentik.net ONLY,
-    by 02:20 UTC — IN PROGRESS (executor rdv-morning-email, `sess_8cfaa0a7`, Sonnet).
+    by 02:20 UTC — DONE (executor rdv-morning-email, `sess_8cfaa0a7`, Sonnet).
     The only outbound email authorised overnight. Verify the attachment arrives.
+    Morning email to Jeremy: SENT 2026-09-12T01:26:24Z, attachment verified: yes, method: manual
 
 Demo status: run 3 on a real phone passed (attribution, fan-out, artifact
 edit). Resume-after-kill is marked NOT demo-safe in `docs/DEMO.md` until

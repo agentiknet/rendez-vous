@@ -408,3 +408,35 @@ exactly this. A fix executor was already on it as of this writing, expected
 to restart the service on port 8790 again once landed. **Artifact
 unchanged/still-serving and reply-reaching-both were not testable** — the
 message never got far enough to matter for either.
+
+## Deliverable flow, first real exercise
+
+Not a real exercise of the flow — the deliverable flow (`src/service/deliverable.ts`,
+`send pdf to <address>` / `confirm <token>`) is wired into `RoomService` as
+of this writing, but only inside its own uncommitted working tree; the live
+`node src/cli.ts serve` process (started 00:32:17Z, PID 84514) predates those
+files and was not restarted to pick them up — restarting it would have cut
+off Jeremy's own live session on room `RDV-NG7F`, and this executor is
+fenced away from `src/service/http.ts`/`room-service.ts` while
+`rdv-deliverable-flow` (`sess_5d7b39d2`) is still building it. So the
+morning-email send (`docs/STATE.md` item 12) went by hand instead, through a
+one-off script (`scripts/send-deck-email.ts`) that calls the same
+`AgentpushToolClient`/`send_message` contract `EmailTransport` and
+`DeliverableService` already use.
+
+Rendered both `deck/out/rendez-vous-light.pdf` and `-dark.pdf` via the
+canvakit CLI (deck/README.md's command, `--design kit:agentik` /
+`kit:agentik-dark`) — both valid PDFs, signature `%PDF-` confirmed, 13 page
+objects each (matches the 13-slide deck). Attached the light one per this
+milestone's default (no basis to judge one design kit visually better than
+the other from here).
+
+Sent at 2026-09-12T01:26:24Z to `jeremy@agentik.net` (the workspace's own
+connected Gmail, confirmed via `mailbox_list`) — `send_message` returned
+`{"status":"sent","message_id":"1a09338fad9c5392"}`. Verified arrival by
+reading the mailbox back (`mailbox_search`, `mailbox` = the Gmail account's
+id, filtered by exact subject): the message exists, `id` matches the
+provider message id above, and both attachments match exactly what was
+sent — `rendez-vous-deck.pdf`, `application/pdf`, 111188 bytes (the light
+PDF's own byte count); `SCRIPT.md`, `text/markdown`, 7113 bytes (matches
+`deck/SCRIPT.md` on disk). One send; no second send needed.
