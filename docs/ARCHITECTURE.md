@@ -210,6 +210,33 @@ that record, not a separate message. Full ingress/egress design, the stored
 media record shape, and the implementation plan are in
 `docs/MULTIMODAL.md`.
 
+### 2.5 The agent as middleman
+
+This is the answer to why a room must be multiplayer instead of two people
+using one bot: **the agent can address members individually and reconcile
+what each contributes.** Alice sends the picture, Bob sends the pitch, and
+the agent — knowing who knows what — solicits each piece from the person who
+has it, on their own channel, in their own time, then synthesises both into
+the artifact and ships it through the deliverable flow. A shared prompt box
+cannot do this; it answers whoever talks, it never asks.
+
+The arc, fully specified in `docs/MIDDLEMAN.md`: the agent whispers Alice
+"send me the product shot" and Bob "give me the one-line positioning"
+(`[[ask <name>]]` blocks, a whisper variant); each replies on their own
+tier; a picture answers by media id per §2.4; synthesis lands on the
+artifact page; the PDF out goes through the confirmed deliverable flow's
+preview-and-confirm gate.
+
+Two rules, both structural:
+
+- **Asks live in the room record**, next to `cursor` and `members` — never
+  only in the model's context. The web page, the fan-out markers, and a
+  resumed box all read the same record; invisible state diverging from
+  reality is the bug class of the night (`docs/UPSTREAM.md`, "The pattern").
+- **The agent never blocks.** One nudge after 10 minutes, a visible
+  service-originated "proceed" after 30; every ask transition is a
+  transcript line, and the agent continues with what has arrived.
+
 ---
 
 ## 3. The decisive finding: no fork required
