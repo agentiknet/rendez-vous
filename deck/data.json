@@ -96,7 +96,7 @@
       { "n": "5", "label": "every send lands in the shared transcript: who asked, who confirmed, what was sent, to whom" }
     ],
     "highlight": "Every other capability keeps work inside the room. This one lets it leave — with authority, not just relay.",
-    "caption": "Code done, tested — the first live send still bypassed the room's own flow.",
+    "caption": "Run end-to-end through the room's own commands — the email leg verified.",
     "page": "8 / 13"
   },
   {

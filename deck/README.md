@@ -60,11 +60,10 @@ whatever pulls that path directly (e.g. the deliverable-flow send).
   Telegram + web: COMPLETED live").
 - Slide 8 ("Work leaves the room") keeps the substance of the deliverable
   flow (`docs/DELIVERABLE.md`): preview, explicit member confirm, PDF to
-  messenger and mail, every send in the transcript. Caption reflects
-  `docs/REHEARSAL.md`'s "Deliverable flow, first real exercise": the code
-  is done and tested, but the first real send went by a one-off script,
-  not the room's own `send pdf to`/`confirm` flow — update the caption
-  once that's exercised live.
+  messenger and mail,   every send in the transcript. Caption reflects `docs/REHEARSAL.md`'s
+  "Deliverable flow, first real exercise (through the flow)": the flow ran
+  end-to-end through the room's own `send pdf to`/`confirm` commands, with
+  the email leg verified.
 - Appendix slide 10 (the five findings) orders the liveness-by-existence
   bug first — it's `docs/UPSTREAM.md` finding 9, found live on a real
   phone during the Run 3 continuation — then the other four in the order
