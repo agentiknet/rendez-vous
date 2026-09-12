@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 02:31 UTC (04:31 local). Repo: this directory,
+Last updated: 2026-09-12 02:40 UTC (04:40 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -126,11 +126,12 @@ Last updated: 2026-09-12 02:31 UTC (04:31 local). Repo: this directory,
    becomes text plus a stored media ref before enqueue, null STT/vision
    providers tonight. Middleman BUILD starts once rdv-box-liveness releases
    room-service.ts.
-8. Deck — REWRITE IN PROGRESS (executor rdv-deck-rewrite, `sess_73856c41`,
-   Sonnet): Jeremy judged the 13-page deck a logbook; frozen new arc is
-   problem / consequence / solution / it works / how we built it / per-member
-   credentials / work leaves the room / close, plus an appendix (five findings,
-   limits, codex verdict, middleman). Previous deck at `58da294` stays in history.
+8. Deck — REBUILT as a pitch at `dbf938b` (13 pages: 9-slide arc problem /
+   consequence / solution / it works / how / per-member credentials / work
+   leaves the room / close, plus a 4-slide appendix). Both kits in `deck/out/`.
+   FOLLOW-UP once the deliverable-flow exercise lands: slide 8's caption in
+   `deck/data.json` and the matching README note say the first live send
+   bypassed the room's own commands; update them if the flow gets exercised.
 8b. Room page shows the room — IN PROGRESS (executor rdv-room-page,
    `sess_0f657dd5`, GLM): `GET /r/:code/state` polled every 3 s, DOM patched,
    members with tier badges, agent busy/idle, proxied artifact link never dead.
@@ -166,7 +167,6 @@ re-proven on a phone after `4e73786`.
   Jeremy's own contact and mailbox via the simulated inbound route; edits only
   docs/REHEARSAL.md, docs/STATE.md and `.env.local` (allowlist line).
 - `sess_d233dc3a` rdv-up-app-serve-ui-path, GLM: worktree `wt/app-serve-ui-path` (upstream PR).
-- `sess_73856c41` rdv-deck-rewrite, sonnet: `deck/` only.
 - `sess_0f657dd5` rdv-room-page, GLM: `src/web/**`, the `GET /r/:code/state` route only in
   `src/service/http.ts`, one helper in `daemon-extra.ts` if needed, `test/web/**`, `test/service/http.test.ts`.
 - `sess_b3541f0a` rdv-multimodal-ingress, GLM: `src/channels/media-ingress.ts`, channel
