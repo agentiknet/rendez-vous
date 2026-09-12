@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 02:22 UTC (04:22 local). Repo: this directory,
+Last updated: 2026-09-12 02:31 UTC (04:31 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -68,10 +68,16 @@ Last updated: 2026-09-12 02:22 UTC (04:22 local). Repo: this directory,
 
 ## e2b boot budget and boxes (these bill)
 
-- Overnight budget: 10 fresh boots. Spent: 1 (an unattributed box
-  `i5fln5g688isw18enzov9` appeared at 01:07 UTC with no owning session; no
-  executor transcript claims it; PAUSED by the supervisor at 01:30 UTC and
-  counted as spent). Remaining: 9.
+- Overnight budget: 10 fresh boots. Spent so far, as of 02:30 UTC: 1
+  unattributed (`i5fln5g…`, 01:07, paused); 2 for waking RDV-NG7F after its box
+  expired (a raced revive produced two sessions and two boxes at 01:45 and
+  01:47; the orphan session `sess_13a08221` and box `i65mye…` were killed by
+  the supervisor at 02:30; the room now runs on `icc84uy0qdas650d1sntl`,
+  session `sess_1696a06c`); 1 for the box-liveness proof room RDV-8WLG
+  (`i6s6gs…`, deleted by the proof); plus `iw1ylk7jshrtfj9bvsqw2` (01:48,
+  running, not in the ledger, attribution pending: probably the box-liveness
+  restore-on-fresh-box step, else an upstream test-gate box). Count: 5 of 10.
+  Remaining: 5. The raced double revive is a NEW bug to fix (see findings).
 - Boxes e2b currently lists (state filter is unreliable; treat all as
   billable): `i7jos61ixgkcfrekmi1vl` (the live room; keep),
   `i70vb4teaxca9r1id1c4p` (from the boot-fix work, 00:34; PAUSED by the supervisor at 01:17 UTC, will expire on its own),
