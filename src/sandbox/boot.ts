@@ -197,10 +197,17 @@ function buildSandboxSpec(opts: {
   readonly appDir: string
   readonly seedFromDir: string | undefined
   readonly reuse: string | undefined
+  /** `sandbox.config.installAdapters` — harness slugs to pre-install in the
+   *  box beyond the spawned `adapter` (which the daemon already auto-injects
+   *  for a sandboxed spawn). See docs/CODEX-FLIP.md. */
+  readonly installAdapters: readonly string[] | undefined
 }): SandboxSpecInput {
   return {
     provider: SANDBOX_PROVIDER,
-    config: opts.seedFromDir !== undefined ? { setupCommands: [buildAppSeedScript(opts.seedFromDir, opts.appDir)] } : {},
+    config: {
+      ...(opts.seedFromDir !== undefined ? { setupCommands: [buildAppSeedScript(opts.seedFromDir, opts.appDir)] } : {}),
+      ...(opts.installAdapters !== undefined ? { installAdapters: [...opts.installAdapters] } : {}),
+    },
     extraPorts: [opts.port],
     ...(opts.reuse !== undefined ? { reuse: opts.reuse } : {}),
   }
@@ -236,6 +243,11 @@ export interface BootRoomSessionOpts {
    *  before `appServe` installs it. Omit only when `appDir` is already
    *  populated some other way. */
   readonly seedFromDir?: string
+  /** `sandbox.config.installAdapters` passthrough — harness slugs to
+   *  pre-install in the box beyond the spawned `adapter`. Omit for the
+   *  common single-adapter case; the daemon already auto-injects the spawned
+   *  adapter's own package for a sandboxed spawn. */
+  readonly installAdapters?: readonly string[]
   /** Injectable for tests; defaults to the real e2b API call. See
    *  `killE2bSandboxDirect`'s doc. */
   readonly killOrphanSandbox?: OrphanSandboxKiller
@@ -257,6 +269,7 @@ export async function bootRoomSession(client: DaemonClient, opts: BootRoomSessio
           appDir: opts.appDir,
           seedFromDir: opts.seedFromDir,
           reuse: opts.reuseSandboxId,
+          installAdapters: opts.installAdapters,
         }),
         appServe: { dir: opts.appDir, port: opts.port },
       }),
@@ -300,6 +313,9 @@ export interface ResumeRoomSessionOpts {
    *  reconnect too (harmless: `setupCommands` re-runs idempotently on every
    *  connect) and forwarded to the re-serve fallback below. */
   readonly seedFromDir?: string
+  /** Same as `BootRoomSessionOpts.installAdapters` — included on the bare
+   *  reconnect too and forwarded to the re-serve fallback below. */
+  readonly installAdapters?: readonly string[]
   /** Injectable for tests; defaults to the real e2b API call. Also forwarded
    *  to the re-serve fallback's `bootRoomSession` call below. */
   readonly killOrphanSandbox?: OrphanSandboxKiller
@@ -328,6 +344,7 @@ export async function resumeRoomSession(client: DaemonClient, opts: ResumeRoomSe
           appDir: opts.appDir,
           seedFromDir: opts.seedFromDir,
           reuse: opts.sandboxId,
+          installAdapters: opts.installAdapters,
         }),
       },
       opts.attempts ?? DEFAULT_RESUME_ATTEMPTS,
@@ -358,5 +375,6 @@ export async function resumeRoomSession(client: DaemonClient, opts: ResumeRoomSe
     reuseSandboxId: opts.sandboxId,
     killOrphanSandbox,
     ...(opts.seedFromDir !== undefined ? { seedFromDir: opts.seedFromDir } : {}),
+    ...(opts.installAdapters !== undefined ? { installAdapters: opts.installAdapters } : {}),
   })
 }

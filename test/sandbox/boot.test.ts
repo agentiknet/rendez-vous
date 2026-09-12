@@ -106,6 +106,33 @@ test("bootRoomSession with seedFromDir sends a single deterministic setupCommand
   }
 })
 
+test("bootRoomSession forwards installAdapters into sandbox.config.installAdapters", async () => {
+  const daemon = await startFakeDaemon({})
+  try {
+    const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+    await bootRoomSession(client, {
+      cwd: "/home/user",
+      label: "rdv-room",
+      adapter: "codex",
+      model: "gpt-5.2-codex",
+      prompt: "hello room",
+      appDir: "/home/user/apps/rdv-hello",
+      port: 3210,
+      installAdapters: ["codex"],
+    })
+    const req = daemon.requestsReceived.find(r => r.path === "/sessions/agent")
+    assert.ok(req !== undefined)
+    assert.ok(isRecord(req.body))
+    assert.deepEqual(req.body.sandbox, {
+      provider: "e2b",
+      config: { installAdapters: ["codex"] },
+      extraPorts: [3210],
+    })
+  } finally {
+    await daemon.close()
+  }
+})
+
 test("resumeRoomSession returns without re-serving when the artifact probes alive", async () => {
   const artifact = createServer((_req, res) => {
     res.writeHead(200)
