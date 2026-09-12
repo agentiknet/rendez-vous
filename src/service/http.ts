@@ -16,6 +16,7 @@ import type { TranscriptRecord } from "../daemon/records.ts"
 import { env } from "../env.ts"
 import { joinLinks } from "../links/index.ts"
 import type { Room, Tier, Delivery, Member } from "../rooms/types.ts"
+import { ROUTED_PROVIDERS } from "../rooms/types.ts"
 import { renderRoomNotFoundPage, renderRoomPage } from "../web/page.ts"
 import { proxyArtifact, publicArtifactUrl } from "./artifact-proxy.ts"
 import { ArtifactRenderStore } from "./artifact-renders.ts"
@@ -231,6 +232,14 @@ async function handleInboundSimulated(service: RoomService, req: IncomingMessage
     !isTier(tier)
   ) {
     sendJson(res, 400, { error: "invalid_body" })
+    return
+  }
+  // Brief E: an unroutable provider used to surface as an uncaught 500 from
+  // `addMember` → `deliveryFromAddress`. The request body is the one place
+  // an arbitrary provider enters the system unverified — validate it here and
+  // answer 400 naming it, before anything downstream throws.
+  if (!ROUTED_PROVIDERS.includes(provider)) {
+    sendJson(res, 400, { error: "unknown_provider", provider })
     return
   }
 
@@ -459,12 +468,18 @@ async function handleRoomSend(
   }
   const displayName = stringField(body, "displayName")
   const text = stringField(body, "text")
+  const claim = stringField(body, "claim")
   if (displayName === undefined || text === undefined || displayName.trim().length === 0 || text.trim().length === 0) {
     sendJson(res, 400, { error: "invalid_body" })
     return
   }
 
-  const outcome = await service.sendFromRoomWeb(code, displayName, text)
+  const outcome = await service.sendFromRoomWeb(
+    code,
+    displayName,
+    text,
+    claim !== undefined && claim.trim().length > 0 ? claim.trim() : undefined,
+  )
   if (outcome.kind === "unknown-code") {
     sendJson(res, 404, { error: "not_found" })
     return
@@ -473,11 +488,69 @@ async function handleRoomSend(
     sendJson(res, 409, { error: "no_session" })
     return
   }
+  if (outcome.kind === "name-claimed") {
+    sendJson(res, 409, { error: "name_claimed", message: NAME_TAKEN_MESSAGE })
+    return
+  }
   if (outcome.kind === "delivered") {
     sendJson(res, 200, { delivered: true, text: outcome.text })
     return
   }
   sendJson(res, 200, outcome.result)
+}
+
+/** The one refusal message a claimed name produces, shared by the claim
+ *  exchange and the send path so the page renders it from either (brief A:
+ *  a distinct outcome the UI can render, not a generic 500). */
+const NAME_TAKEN_MESSAGE = "ce nom est déjà pris dans cette room — choisis-en un autre"
+
+/** `POST /rooms/:code/claim` (PLAN-02 §3-D3 amended) — the browser's join
+ *  handshake. The page sends the name it typed plus the join secret it holds
+ *  in localStorage, if any; the service mints one on the join that first
+ *  claims the name and returns it EXACTLY once. The response carries this
+ *  member's bearer token for `GET /rooms/:code/outbox` — and nothing else
+ *  ever does: the token is bound to a member whose name only the claim
+ *  holder can assume, so this endpoint is the only door it leaves through.
+ *  That is why the token is NOT embedded in the page HTML (see page.ts): the
+ *  page is rendered before anyone has presented anything, and a spectator's
+ *  HTML must hold no credential at all. */
+async function handleRoomClaim(
+  service: RoomService,
+  req: IncomingMessage,
+  res: ServerResponse,
+  encodedCode: string,
+): Promise<void> {
+  const code = decodeURIComponent(encodedCode)
+  const body = await readJsonBody(req)
+  if (!isRecord(body)) {
+    sendJson(res, 400, { error: "invalid_body" })
+    return
+  }
+  const displayName = stringField(body, "displayName")
+  const presented = stringField(body, "claim")
+  if (displayName === undefined || displayName.trim().length === 0) {
+    sendJson(res, 400, { error: "invalid_body" })
+    return
+  }
+  const outcome = await service.claimRoomWeb(
+    code,
+    displayName,
+    presented !== undefined && presented.trim().length > 0 ? presented.trim() : undefined,
+  )
+  if (outcome.kind === "unknown-code") {
+    sendJson(res, 404, { error: "not_found" })
+    return
+  }
+  if (outcome.kind === "name-claimed") {
+    sendJson(res, 409, { error: "name_claimed", message: NAME_TAKEN_MESSAGE })
+    return
+  }
+  sendJson(res, 200, {
+    memberId: outcome.member.id,
+    displayName: outcome.member.displayName,
+    memberToken: outcome.token,
+    ...(outcome.claim !== undefined ? { claim: outcome.claim } : {}),
+  })
 }
 
 /** How long the outbox SSE drain waits between looks at the room's store for
@@ -981,6 +1054,17 @@ async function handle(
       return
     }
     await handleRoomOutbox(service, req, res, encodedCode, parseSince(url.searchParams.get("since")), url.searchParams.has("since"))
+    return
+  }
+
+  const claimMatch = /^\/rooms\/([^/]+)\/claim$/.exec(url.pathname)
+  if (claimMatch !== null && req.method === "POST") {
+    const encodedCode = claimMatch[1]
+    if (encodedCode === undefined) {
+      sendJson(res, 400, { error: "invalid_code" })
+      return
+    }
+    await handleRoomClaim(service, req, res, encodedCode)
     return
   }
 

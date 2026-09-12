@@ -60,8 +60,36 @@ export interface Member {
    *  (`addMember`), so a member in memory always has one; routing falls back
    *  to `deliveryFromAddress` only for members built by hand without it. */
   delivery?: MemberDelivery
+  /** The room-web join secret (PLAN-02 §3-D3 amended): an opaque random
+   *  string minted ONCE, on the join that first claims this member's name,
+   *  and returned to that caller exactly once. A later join under the same
+   *  name must present it — absent or wrong is a refusal ("name taken"),
+   *  because identity here is `slugify(displayName)` and anyone who typed
+   *  the name would otherwise receive the member's token and whispers.
+   *  Absent on members persisted before the field existed (same optional-key
+   *  JSON round-trip rule as `delivery`); the first browser join that
+   *  presents no claim adopts them and mints one — a deliberate one-time
+   *  grandfather, not an oversight. Messenger and email members never get
+   *  one: their address is already a credential a third party verified. */
+  claim?: string
   joinedAt: string
 }
+
+/** Push or pull, per member — the one question the fan-out's artifact-notice
+ *  gate and any other "should this reach a phone?" check asks. Pull members
+ *  have no push transport at all (their drain is the outbox); pushing to
+ *  them is a caller bug that `CompositeTransport` turns into a loud throw. */
+export function deliveryModeOf(member: Member): "push" | "pull" {
+  return (member.delivery ?? deliveryFromAddress(member.address)).mode
+}
+
+/** Providers `deliveryFromAddress` routes (D1's exhaustive union). The
+ *  inbound HTTP surface validates against this list so a join with an
+ *  unroutable provider is a validated 400 naming the provider, never an
+ *  uncaught throw from `deliveryFromAddress`. Keep in sync with that
+ *  switch — it is its domain, written out because a function that answers
+ *  "does this route?" by throwing cannot be asked. */
+export const ROUTED_PROVIDERS: readonly string[] = ["telegram", "whatsapp", "sms", "email", "console", "room-web"]
 
 export type RoomState = "active" | "paused"
 

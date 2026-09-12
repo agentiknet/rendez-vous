@@ -9,6 +9,14 @@
  * before JS, then a small polling loop patches the DOM from
  * `GET /r/:code/state` every 3 s — never a full reload, which would wipe
  * the live transcript mid-demo.
+ *
+ * Spectator and member are two roles (PLAN-02 §3-D5): the transcript stream
+ * above takes no name and no credential — that is what a projected display
+ * is. A tab becomes a member by claiming a name (`POST /rooms/:code/claim`,
+ * the one-time join secret in localStorage), after which it drains its own
+ * outbox (`GET /rooms/:code/outbox`, bearer-authenticated, server-scoped).
+ * A fresh tab with no name claimed is a pure spectator and works fully; it
+ * receives no member token and no addressed traffic.
  */
 import type { JoinLinks } from "../links/index.ts"
 import { qrSvg } from "../links/index.ts"
@@ -30,6 +38,12 @@ function embedJson(value: unknown): string {
 }
 
 const ARTIFACT_PAUSED_TEXT = "artifact paused, the link will come back when the room wakes"
+
+/** The gap notice (PLAN-02 §3-D6): a `pruned: true` outbox response means the
+ *  server destroyed records the tab's cursor still points at. Never let that
+ *  read as silence — rendered as its own line in the transcript. */
+const OUTBOX_GAP_TEXT =
+  "Some earlier messages were lost while this tab was away — the room no longer holds them."
 
 /** The member-facing artifact is live only when the room is active and the
  *  last boot/liveness probe confirmed the box is actually serving it —
@@ -53,8 +67,7 @@ function membersHtml(room: Room): string {
 }
 
 const STYLE = `
-  :root { --accent: #3a6df0; --border: #e2e4ea; --bg: #fafafc; --grey: #6b7280; }
-  * { box-sizing: border-box; }
+  :root { --accent: #3a6df0; --border: #e2e4ea; --bg: #fafafc; --grey: #6b7280; }  * { box-sizing: border-box; }
   body { margin: 0; font-family: system-ui, -apple-system, sans-serif; color: #1a1c23; background: var(--bg); }
   header { padding: 14px; border-bottom: 1px solid var(--border); background: #fff; display: flex; flex-direction: column; align-items: center; gap: 12px; text-align: center; }
   .join-code { font-size: 26px; font-weight: 700; }
@@ -88,11 +101,14 @@ const STYLE = `
   .bubble { max-width: 90%; margin: 0 0 10px; padding: 8px 10px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; }
   .bubble.user { background: #eef2ff; margin-left: auto; }
   .bubble.assistant { background: #fff; border: 1px solid var(--border); }
+  .bubble.whisper { border-color: #d8c9f0; background: #f6f1fd; }
+  .outbox-gap { font-size: 12px; color: #b42318; background: #fdeaea; border: 1px solid #f2c4c0; border-radius: 6px; padding: 6px 10px; margin: 0 0 10px; }
+  #name-error { color: #b42318; font-size: 12px; font-weight: 600; display: none; width: 100%; }
   .badge { display: inline-block; font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 4px; }
   details.thought { margin-top: 6px; font-size: 12px; color: var(--grey); }
   details.thought summary { cursor: pointer; }
   .tool-row { font-size: 12px; color: var(--grey); margin-top: 4px; }
-  footer { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: #fff; }
+  footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: #fff; }
   footer input { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; }
   #name-input { flex: 0 0 120px; }
   #text-input { flex: 1 1 auto; }
@@ -118,12 +134,19 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     const INITIAL_ROOM = ${embedJson(room)};
     const INITIAL_AGENT_BUSY = ${embedJson(agentBusy)};
     const PAUSED_ARTIFACT_TEXT = ${embedJson(ARTIFACT_PAUSED_TEXT)};
+    const OUTBOX_GAP_TEXT = ${embedJson(OUTBOX_GAP_TEXT)};
+    // The SAME pure function the tests exercise, embedded via its own
+    // JavaScript source: one outbox-to-render plan, tested and shipped from
+    // one source.
+    // one outbox-to-render plan, tested and shipped from one source.
+    const planOutboxRender = ${planOutboxRender.toString()};
 
     const transcriptEl = document.getElementById("transcript");
     const artifactFrame = document.getElementById("artifact-frame");
     const artifactPlaceholder = document.getElementById("artifact-placeholder");
     const nameInput = document.getElementById("name-input");
     const textInput = document.getElementById("text-input");
+    const nameErrorEl = document.getElementById("name-error");
 
     nameInput.value = localStorage.getItem("rdv-name") || "";
 
@@ -141,8 +164,6 @@ function script(code: string, room: Room, agentBusy: boolean): string {
       members: INITIAL_ROOM.members,
       agent: { busy: INITIAL_AGENT_BUSY === true, lastActivityAt: INITIAL_ROOM.lastActivityAt },
     };
-
-    let currentMembers = INITIAL_ROOM.members;
 
     function relTime(iso) {
       const ms = Date.now() - Date.parse(iso);
@@ -190,7 +211,6 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     }
 
     function renderMembers(members) {
-      currentMembers = members;
       const el = document.getElementById("members");
       el.textContent = "";
       if (members.length === 0) {
@@ -214,79 +234,6 @@ function script(code: string, room: Room, agentBusy: boolean): string {
         span.appendChild(tier);
         span.appendChild(joined);
         el.appendChild(span);
-      });
-    }
-
-    function findMemberByName(name) {
-      const needle = name.trim().toLowerCase();
-      return currentMembers.find(function (m) { return m.displayName.toLowerCase() === needle; });
-    }
-
-    // Same convention the service's fan-out understands (src/fanout/whisper.ts):
-    // a "[[whisper to <name>]]" / "[[/whisper]]" pair, each delimiter on its
-    // own line. This page reads the raw daemon transcript directly, so it does
-    // its own parsing rather than the already-resolved per-member text the
-    // fan-out sends to messenger/email members.
-    function parseWhisperBlocks(text) {
-      const lines = text.split("\\n");
-      const segments = [];
-      let broadcastLines = [];
-      let i = 0;
-      function flush() {
-        const joined = broadcastLines.join("\\n");
-        if (joined.length > 0) segments.push({ kind: "broadcast", text: joined });
-        broadcastLines = [];
-      }
-      while (i < lines.length) {
-        const line = lines[i];
-        const open = /^\\[\\[whisper to (.+)\\]\\]$/.exec(line.trim());
-        if (!open) {
-          broadcastLines.push(line);
-          i += 1;
-          continue;
-        }
-        let closeIndex = -1;
-        for (let j = i + 1; j < lines.length; j++) {
-          if (/^\\[\\[\\/whisper\\]\\]$/.test(lines[j].trim())) { closeIndex = j; break; }
-        }
-        if (closeIndex === -1) {
-          broadcastLines = broadcastLines.concat(lines.slice(i));
-          break;
-        }
-        flush();
-        segments.push({ kind: "whisper", targetName: open[1].trim(), text: lines.slice(i + 1, closeIndex).join("\\n") });
-        i = closeIndex + 1;
-      }
-      flush();
-      return segments;
-    }
-
-    function renderTurnBody(turn) {
-      turn.textEl.innerHTML = "";
-      parseWhisperBlocks(turn.raw).forEach(function (segment) {
-        if (segment.kind === "broadcast") {
-          if (segment.text.length === 0) return;
-          const span = document.createElement("span");
-          span.textContent = segment.text;
-          turn.textEl.appendChild(span);
-          return;
-        }
-        const target = findMemberByName(segment.targetName);
-        const marker = document.createElement("div");
-        marker.className = "whisper-marker";
-        marker.textContent = "whispered to " + (target ? target.displayName : segment.targetName);
-        turn.textEl.appendChild(marker);
-
-        const details = document.createElement("details");
-        details.className = "whisper-toggle";
-        const summary = document.createElement("summary");
-        summary.textContent = "private, visible here because the web room has no member auth yet";
-        const content = document.createElement("div");
-        content.className = "whisper-content";
-        content.textContent = segment.text;
-        details.appendChild(summary);
-        details.appendChild(content);
-        turn.textEl.appendChild(details);
       });
     }
 
@@ -391,16 +338,103 @@ function script(code: string, room: Room, agentBusy: boolean): string {
       };
     }
 
+    // --- the member half: claim a name, drain the outbox (PLAN-02 §3-D5) ---
+    // Spectator and member are two roles. Watching the transcript above takes
+    // no name and no credential — that is what a projected display is. A tab
+    // becomes a member by claiming a name: the claim secret is minted once by
+    // the server, stored here per room code + name, and exchanged for this
+    // member's bearer token. The token is never in the page HTML — the server
+    // hands it only across this exchange, to a visitor who presented the
+    // name's claim.
+    function claimKey(name) {
+      return "rdv-claim:" + ROOM_CODE + ":" + name.trim().toLowerCase();
+    }
+
+    let memberTokenValue = null;
+    let outboxSince = 0;
+    const seenDeliveries = {};
+
+    async function ensureClaimed() {
+      const name = nameInput.value.trim();
+      if (!name) return false;
+      const key = claimKey(name);
+      const stored = localStorage.getItem(key);
+      let res;
+      try {
+        res = await fetch("/rooms/" + ROOM_CODE + "/claim", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(stored ? { displayName: name, claim: stored } : { displayName: name }),
+        });
+      } catch (e) { return false; }
+      if (res.status === 409) {
+        // The name is claimed and we could not prove it is ours: say so,
+        // visibly, and forget the stale secret.
+        localStorage.removeItem(key);
+        nameErrorEl.style.display = "";
+        return false;
+      }
+      if (!res.ok) return false;
+      let body;
+      try { body = await res.json(); } catch (e) { return false; }
+      if (typeof body.claim === "string") localStorage.setItem(key, body.claim);
+      memberTokenValue = typeof body.memberToken === "string" ? body.memberToken : null;
+      if (memberTokenValue !== null) nameErrorEl.style.display = "none";
+      return memberTokenValue !== null;
+    }
+
+    // The drain is a POLL, not the EventSource the transcript uses: an
+    // EventSource cannot carry an Authorization header, and the ?t= query
+    // carrier is /mcp/room's mount workaround (PLAN-02 §4.1) — not something
+    // to propagate. The endpoint answers both readings (SSE or JSON); poll
+    // is the one a browser can authenticate.
+    async function drainOutbox() {
+      if (memberTokenValue === null) return;
+      try {
+        const res = await fetch("/rooms/" + ROOM_CODE + "/outbox?since=" + outboxSince, {
+          headers: { authorization: "Bearer " + memberTokenValue },
+        });
+        if (res.status === 401) { memberTokenValue = null; return; }
+        if (!res.ok) return;
+        const payload = await res.json();
+        const plan = planOutboxRender(payload, seenDeliveries);
+        if (plan.gap) {
+          const el = document.createElement("div");
+          el.className = "outbox-gap";
+          el.textContent = plan.gap;
+          transcriptEl.appendChild(el);
+        }
+        plan.items.forEach(function (item) {
+          const el = bubble(item.kind === "whisper" ? "assistant whisper" : "assistant");
+          const badge = document.createElement("span");
+          badge.className = "badge";
+          badge.textContent = item.kind === "whisper" ? "whisper · private, to you" : "agent · to you";
+          const body = document.createElement("div");
+          body.textContent = item.text;
+          el.appendChild(badge);
+          el.appendChild(body);
+        });
+        if (typeof payload.cursor === "number") outboxSince = payload.cursor;
+        transcriptEl.scrollTop = transcriptEl.scrollHeight;
+      } catch (e) {
+        // Transient network error — the next tick retries from the same cursor.
+      }
+    }
+
     async function sendMessage() {
       const displayName = nameInput.value.trim();
       const text = textInput.value.trim();
       if (!displayName || !text) return;
+      // Claim BEFORE sending: the send refuses a claimed name whose secret we
+      // cannot present, so the exchange (which may mint one) runs first.
+      const claimed = await ensureClaimed();
+      if (!claimed) return;
       localStorage.setItem("rdv-name", displayName);
       textInput.value = "";
       await fetch("/rooms/" + ROOM_CODE + "/send", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ displayName: displayName, text: text }),
+        body: JSON.stringify({ displayName: displayName, text: text, claim: localStorage.getItem(claimKey(displayName)) || undefined }),
       });
       pollState();
     }
@@ -433,6 +467,7 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     }
 
     setInterval(pollState, 3000);
+    setInterval(drainOutbox, 2000);
     setInterval(function () {
       updatedEl.textContent = lastGoodPollAt
         ? "updated " + Math.max(0, Math.round((Date.now() - lastGoodPollAt) / 1000)) + "s ago"
@@ -442,7 +477,35 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     renderState(INITIAL_STATE);
     connectStream();
     pollState();
+    if (nameInput.value) {
+      ensureClaimed().then(function (ok) {
+        if (ok) drainOutbox();
+      });
+    }
   `
+}
+
+/** The outbox drain's pure half, shared between the generated page script
+ *  (embedded above via `toString()`, so the shipped page and the tests run
+ *  the SAME code) and test/web/page.test.ts: dedupe on `Delivery.id`
+ *  (at-least-once — a reconnect repeats records), and surface the `pruned`
+ *  gap marker as text instead of silence (PLAN-02 §3-D6). Kept
+ *  self-contained on purpose: it must survive `toString()` with no free
+ *  references except OUTBOX_GAP_TEXT, which the script defines alongside. */
+export const planOutboxRender = (
+  payload: { pruned?: boolean; deliveries?: readonly { id: string; kind: string; text: string }[] },
+  seenIds: Record<string, boolean>,
+): { gap: string | undefined; items: { id: string; kind: string; text: string }[] } => {
+  const items: { id: string; kind: string; text: string }[] = []
+  const deliveries = payload.deliveries === undefined || payload.deliveries === null ? [] : payload.deliveries
+  for (const record of deliveries) {
+    if (record === undefined || record === null) continue
+    if (typeof record.id !== "string") continue
+    if (seenIds[record.id] === true) continue
+    seenIds[record.id] = true
+    items.push({ id: record.id, kind: record.kind === "whisper" ? "whisper" : "say", text: record.text === undefined ? "" : record.text })
+  }
+  return { gap: payload.pruned === true ? OUTBOX_GAP_TEXT : undefined, items }
 }
 
 /** One button per configured surface, in the fidelity-ladder order
@@ -512,6 +575,7 @@ export function renderRoomPage(room: Room, links: JoinLinks, agentBusy = false):
   </section>
 </main>
 <footer>
+  <div id="name-error">ce nom est déjà pris dans cette room — choisis-en un autre</div>
   <input id="name-input" placeholder="Your name" autocomplete="off" />
   <input id="text-input" placeholder="Say something…" autocomplete="off" />
   <button id="send-button">Send</button>

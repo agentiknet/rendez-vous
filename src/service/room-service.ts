@@ -1,5 +1,6 @@
 import type { DaemonClient, HealthResult, PromptResult } from "../daemon/client.ts"
 import type { TranscriptRecord } from "../daemon/records.ts"
+import { randomBytes } from "node:crypto"
 import { AgentpushToolClient } from "../channels/agentpush/tools-client.ts"
 import { env } from "../env.ts"
 import { fanIn } from "../fanin/index.ts"
@@ -9,6 +10,7 @@ import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
 import { ensureMembership, handleCommand, parseCommand } from "../rooms/commands.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import type { Address, Member, Room, Tier } from "../rooms/types.ts"
+import { memberToken, tokensMatch } from "./mcp-room.ts"
 import { publicArtifactUrl, publicMediaUrl } from "./artifact-proxy.ts"
 import type { SessionBooter } from "./booter.ts"
 import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
@@ -53,6 +55,17 @@ export type RoomWebSendOutcome =
   | { kind: "delivered"; member: Member; text: string }
   | { kind: "unknown-code" }
   | { kind: "no-session" }
+  | { kind: "name-claimed" }
+
+/** `POST /rooms/:code/claim`'s outcome (PLAN-02 §3-D3 amended): the browser
+ *  exchanges the name it typed (plus the join secret it holds, if any) for
+ *  this member's bearer token. `claim` is present ONLY when the secret was
+ *  minted on this call — mint-once, hand-over-once; a returning tab that
+ *  presented its stored claim gets the token and nothing more. */
+export type RoomWebClaimOutcome =
+  | { kind: "claimed"; member: Member; token: string; claim?: string }
+  | { kind: "unknown-code" }
+  | { kind: "name-claimed" }
 
 const RESUMING_TEXT = "Resuming room, one moment…"
 
@@ -138,6 +151,14 @@ function slugify(displayName: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
   return slug.length > 0 ? slug : "guest"
+}
+
+/** The room-web join secret (PLAN-02 §3-D3 amended). Opaque, random, never
+ *  derived from anything the roster exposes — unlike `memberToken`, which is
+ *  a pure function of the (public-within-the-room) member id, this secret is
+ *  what stops "anyone who typed the name" from becoming that member. */
+function mintClaim(): string {
+  return randomBytes(24).toString("hex")
 }
 
 export class RoomService {
@@ -433,9 +454,78 @@ export class RoomService {
     return this.store.get(room.code) ?? room
   }
 
+  /** Resolve (or first-claim) the room-web member a displayName names, under
+   *  the claim protocol. The claim is checked against THIS room's member
+   *  only: a room-web member moved to another room gets a fresh record there
+   *  (the move deletes the old one), so a per-room secret is exactly as
+   *  stable as the member it protects. Rules:
+   *
+   *  - member already has a `claim` → `presented` must match, constant-time;
+   *    absent or wrong is a refusal — the name is taken by someone else's tab.
+   *  - member exists without a `claim` (pre-claim persisted member, or one
+   *    created by a non-browser path) → the DELIBERATE one-time grandfather:
+   *    the join that presents no claim IS the same human coming back; mint
+   *    once, adopt it, hand it back once.
+   *  - no member at all → mint once on creation, hand it back once.
+   *
+   *  Messenger/email members never reach here — their address is already a
+   *  credential a third party verified. */
+  private async resolveRoomWebMember(
+    code: string,
+    displayName: string,
+    presented: string | undefined,
+  ): Promise<RoomWebClaimOutcome> {
+    const room = this.store.get(code)
+    if (room === undefined) return { kind: "unknown-code" }
+    const contactRef = slugify(displayName)
+    const address: Address = { provider: "room-web", source: "room-web", contactRef }
+    const local = room.members.find(
+      (member) => member.address.provider === "room-web" && member.address.contactRef === contactRef,
+    )
+
+    if (local !== undefined && local.claim !== undefined) {
+      if (presented === undefined || !tokensMatch(presented, local.claim)) {
+        return { kind: "name-claimed" }
+      }
+      const { member } = await ensureMembership(this.store, code, {
+        displayName,
+        tier: "room-web",
+        address,
+        claim: local.claim,
+      })
+      return { kind: "claimed", member, token: memberToken(code, member.id, env.roomTokenSecret) }
+    }
+
+    // Unclaimed: adopt what was presented (first-claim wins over a claim-less
+    // member) or mint fresh, and let `addMember` persist it — including
+    // across the cross-room move `ensureMembership` may perform.
+    const claim = presented ?? mintClaim()
+    const { member } = await ensureMembership(this.store, code, {
+      displayName,
+      tier: "room-web",
+      address,
+      claim,
+    })
+    return {
+      kind: "claimed",
+      member,
+      token: memberToken(code, member.id, env.roomTokenSecret),
+      ...(presented === undefined ? { claim } : {}),
+    }
+  }
+
+  /** `POST /rooms/:code/claim` — the browser's join handshake. See
+   *  `resolveRoomWebMember` for the credential rules. */
+  async claimRoomWeb(code: string, displayName: string, presented: string | undefined): Promise<RoomWebClaimOutcome> {
+    return this.resolveRoomWebMember(code, displayName, presented)
+  }
+
   /** A plain message from the room-web tier: no `new`/`join`/`resume`
-   *  commands accepted here, the caller already knows the room. */
-  async sendFromRoomWeb(code: string, displayName: string, text: string): Promise<RoomWebSendOutcome> {
+   *  commands accepted here, the caller already knows the room. The caller
+   *  presents the name's `claim` when it holds one (PLAN-02 §3-D3 amended):
+   *  a member whose name is claimed refuses any join that doesn't present
+   *  the secret. */
+  async sendFromRoomWeb(code: string, displayName: string, text: string, claim?: string): Promise<RoomWebSendOutcome> {
     let room = this.store.get(code)
     if (room === undefined) {
       return { kind: "unknown-code" }
@@ -445,11 +535,14 @@ export class RoomService {
       return { kind: "no-session" }
     }
 
-    const { member } = await ensureMembership(this.store, room.code, {
-      displayName,
-      tier: "room-web",
-      address: { provider: "room-web", source: "room-web", contactRef: slugify(displayName) },
-    })
+    const resolved = await this.resolveRoomWebMember(code, displayName, claim)
+    if (resolved.kind === "unknown-code") {
+      return { kind: "unknown-code" }
+    }
+    if (resolved.kind === "name-claimed") {
+      return { kind: "name-claimed" }
+    }
+    const { member } = resolved
 
     const deliverableText = await this.resolveDeliverableText(room, member, text)
     if (deliverableText !== undefined) {

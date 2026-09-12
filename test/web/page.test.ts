@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { JoinLinks } from "../../src/links/index.ts"
 import type { Room } from "../../src/rooms/types.ts"
-import { renderRoomNotFoundPage, renderRoomPage } from "../../src/web/page.ts"
+import { planOutboxRender, renderRoomNotFoundPage, renderRoomPage } from "../../src/web/page.ts"
 
 function fakeLinks(overrides: Partial<JoinLinks> = {}): JoinLinks {
   return {
@@ -120,15 +120,41 @@ test("renderRoomPage shows the room code in a large, prominent element", () => {
   assert.match(html, /class="join-code"[^>]*>Room <span class="code" id="room-code">RDV-7F3K<\/span>/)
 })
 
-test("renderRoomPage's inline script parses whisper blocks and renders the honest-collapse toggle", () => {
+test("renderRoomPage's inline script no longer parses whisper markers — whispers arrive through the outbox drain (PLAN-02 §3-D5)", () => {
   const html = renderRoomPage(fakeRoom(), fakeLinks())
-  assert.ok(html.includes("parseWhisperBlocks"), "should parse [[whisper to ...]] blocks from the raw transcript")
-  assert.ok(html.includes('"whispered to "'), "should render the visible one-line marker")
-  assert.ok(
-    html.includes("private, visible here because the web room has no member auth yet"),
-    "should label the collapsed-content toggle with the honesty note",
+  assert.ok(!html.includes("parseWhisperBlocks"), "the [[whisper to X]] marker protocol is dead")
+  assert.ok(!html.includes("renderTurnBody"))
+  // The outbox drain IS in the page: the embedded pure plan function, the
+  // poll, the claim exchange, and the gap notice.
+  assert.ok(html.includes("const planOutboxRender ="), "the tested plan function is embedded verbatim")
+  assert.ok(html.includes("/outbox?since="))
+  assert.ok(html.includes("/claim"), "the claim exchange is in the page")
+  assert.ok(html.includes("rdv-claim:"), "the claim secret is stored keyed by room code + name")
+  assert.ok(html.includes("outbox-gap"))
+})
+
+test("planOutboxRender dedupes on Delivery.id (at-least-once) and never repeats an item", () => {
+  const seen: Record<string, boolean> = {}
+  const first = planOutboxRender(
+    { pruned: false, deliveries: [{ id: "d1", kind: "say", text: "one" }, { id: "d2", kind: "whisper", text: "two" }] },
+    seen,
   )
-  assert.ok(html.includes("whisper-content"), "should render the whisper content in a distinct, collapsible element")
+  assert.equal(first.items.length, 2)
+  assert.equal(first.gap, undefined)
+  // The same records replayed (a reconnect) must produce nothing new.
+  const replay = planOutboxRender(
+    { pruned: false, deliveries: [{ id: "d1", kind: "say", text: "one" }, { id: "d2", kind: "whisper", text: "two" }] },
+    seen,
+  )
+  assert.equal(replay.items.length, 0)
+  const fresh = planOutboxRender({ pruned: false, deliveries: [{ id: "d3", kind: "whisper", text: "three" }] }, seen)
+  assert.deepEqual(fresh.items, [{ id: "d3", kind: "whisper", text: "three" }])
+})
+
+test("planOutboxRender turns the pruned gap marker into visible text, never silence (PLAN-02 §3-D6)", () => {
+  const plan = planOutboxRender({ pruned: true, deliveries: [] }, {})
+  assert.ok(typeof plan.gap === "string" && plan.gap.length > 0, "a destroyed backlog is announced, not rendered as silence")
+  assert.equal(plan.items.length, 0)
 })
 
 test("renderRoomNotFoundPage mentions the code and a hint to create a room", () => {

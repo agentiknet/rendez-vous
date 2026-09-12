@@ -86,15 +86,18 @@ function isMember(value: unknown): value is Member {
   ) {
     return false
   }
-  // `delivery` is optional: members persisted before the field round-trip
-  // without the key (same rule as lastError/deliveredAt on a Delivery).
+  // `delivery` and `claim` are optional: members persisted before either
+  // field round-trip without the key (same rule as lastError/deliveredAt on
+  // a Delivery).
   const delivery = "delivery" in value ? value.delivery : undefined
+  const claim = "claim" in value ? value.claim : undefined
   return (
     isString(value.id) &&
     isString(value.displayName) &&
     isTier(value.tier) &&
     isAddress(value.address) &&
     (delivery === undefined || isMemberDelivery(delivery)) &&
+    (claim === undefined || isString(value.claim)) &&
     isString(value.joinedAt)
   )
 }
@@ -430,6 +433,14 @@ export class RoomStore {
     const now = new Date().toISOString()
     if (existing !== undefined) {
       existing.displayName = input.displayName
+      // The one-time grandfather (Member.claim's doc): a member persisted
+      // before claims existed has none, and the caller who first joins under
+      // this name is the same human coming back — adopt the claim they were
+      // minted. Once set, `input.claim` is ignored: only the room-web claim
+      // path ever passes one, and re-claiming must never rotate the secret.
+      if (existing.claim === undefined && input.claim !== undefined) {
+        existing.claim = input.claim
+      }
       room.updatedAt = now
       await this.enqueueWrite()
       return existing
@@ -445,6 +456,7 @@ export class RoomStore {
       // `InboundInput` predates the field) did not set one. Throws on a
       // provider with no delivery mode — loud, per D1.
       delivery: input.delivery ?? deliveryFromAddress(input.address),
+      ...(input.claim !== undefined ? { claim: input.claim } : {}),
       joinedAt: now,
     }
     room.members.push(member)

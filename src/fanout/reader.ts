@@ -1,5 +1,5 @@
 import type { RoomStore } from "../rooms/store.ts"
-import type { Ask, Member, Room } from "../rooms/types.ts"
+import { deliveryModeOf, type Ask, type Member, type Room } from "../rooms/types.ts"
 import type { TtsProvider } from "../media/openai.ts"
 import { env } from "../env.ts"
 import { publicArtifactUrl, publicMediaUrl } from "../service/artifact-proxy.ts"
@@ -503,7 +503,11 @@ export class RoomFanout {
           // gate as its own standalone message. This is the same line
           // `renderMessenger` appends to the text for `"markers"` rooms;
           // here the text itself is suppressed, so the line must not be.
-          if (artifactChanged && artifactUrl !== undefined && member.tier !== "room-web") {
+          // It rides the push transports only (the former `tier !==
+          // "room-web"` sniff, expressed through the delivery union instead):
+          // a pull member IS the screen — it is watching the artifact live —
+          // and has no push transport at all.
+          if (artifactChanged && artifactUrl !== undefined && deliveryModeOf(member) === "push") {
             await this.transport.send(member, { text: artifactUrl, artifactUrl })
           }
         } else {

@@ -300,11 +300,23 @@ function isArrayOf<T>(value: unknown, guard: (v: unknown) => v is T): value is T
 test("POST /rooms/:code/send registers a room-web member once (idempotent) and puts queue:true plus the [Name · room-web] prefix on the wire", async () => {
   const { baseUrl, daemon, sessionId, code } = await newRoomHarness()
 
+  // The page's flow: claim the name first (mints the join secret), then send
+  // with it. Two sends under the same claimed name are one member.
+  const claimRes = await fetch(`${baseUrl}/rooms/${code}/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ displayName: "Chloe" }),
+  })
+  assert.equal(claimRes.status, 200)
+  const claimBody = await readJson(claimRes)
+  const claim = typeof claimBody.claim === "string" ? claimBody.claim : undefined
+  assert.ok(typeof claim === "string", "the first claim mints the secret and returns it once")
+
   const send = async (): Promise<Record<string, unknown>> => {
     const res = await fetch(`${baseUrl}/rooms/${code}/send`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ displayName: "Chloe", text: "hi from the web" }),
+      body: JSON.stringify({ displayName: "Chloe", text: "hi from the web", claim }),
     })
     assert.equal(res.status, 200)
     return readJson(res)
@@ -693,11 +705,12 @@ function outboxDelivery(
   memberId: string,
   text: string,
   status: Delivery["status"] = "pending",
+  kind: Delivery["kind"] = "say",
 ): Delivery {
   return {
     id,
     memberId,
-    kind: "say",
+    kind,
     text,
     status,
     failures: 0,
@@ -822,4 +835,166 @@ test("GET /rooms/:code/outbox answers Accept: text/event-stream with the same re
   assert.equal(frames[2]?.memberId, alice.id, "the meta frame carries the cursor and the gap marker")
   assert.equal(frames[2]?.pruned, false)
   assert.equal(frames[2]?.cursor, 2)
+})
+
+// --- POST /rooms/:code/claim (PLAN-02 step 3: the D3-amended name claim, ---
+// --- the spectator/member split, and the drain the page runs) ---------------
+
+async function postClaim(
+  baseUrl: string,
+  code: string,
+  displayName: string,
+  claim?: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(`${baseUrl}/rooms/${code}/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(claim === undefined ? { displayName } : { displayName, claim }),
+  })
+  return { status: res.status, body: await readJson(res) }
+}
+
+test("POST /rooms/:code/claim mints the join secret once and returns it exactly once; absent or wrong is refused with the name-taken outcome", async () => {
+  const { baseUrl, code, alice } = await outboxHarness()
+
+  // Chloe has no member yet: the first claim creates her and hands the
+  // secret over — exactly once.
+  const first = await postClaim(baseUrl, code, "Chloe")
+  assert.equal(first.status, 200)
+  const minted = typeof first.body.claim === "string" ? first.body.claim : undefined
+  assert.ok(typeof minted === "string", "the minting claim returns the secret once")
+  assert.equal(typeof first.body.memberToken, "string")
+  const token = first.body.memberToken
+
+  // A returning tab that presents the secret: accepted, same member, same
+  // token — and the secret is NOT handed out again.
+  const again = await postClaim(baseUrl, code, "Chloe", minted)
+  assert.equal(again.status, 200)
+  assert.equal(again.body.claim, undefined, "the secret is never returned to a second presentation")
+  assert.equal(again.body.memberToken, token)
+  assert.equal(again.body.memberId, first.body.memberId)
+
+  // Anyone else typing the name without the secret is refused, with the
+  // distinct outcome the UI renders — not a generic 500.
+  const impostor = await postClaim(baseUrl, code, "Chloe")
+  assert.equal(impostor.status, 409)
+  assert.equal(impostor.body.error, "name_claimed")
+  assert.ok(
+    typeof impostor.body.message === "string" && (impostor.body.message as string).includes("déjà pris"),
+    "the refusal message is the one the page renders",
+  )
+
+  const wrongSecret = await postClaim(baseUrl, code, "Chloe", "not-the-secret")
+  assert.equal(wrongSecret.status, 409)
+  assert.equal(wrongSecret.body.error, "name_claimed")
+
+  void alice
+})
+
+test("the grandfather path adopts a pre-claim member exactly once (brief A)", async () => {
+  const { baseUrl, code, alice } = await outboxHarness()
+  // `alice` (Chloe) was persisted by the harness WITHOUT a claim — the live
+  // store's pre-claim members. The first join that presents no claim is the
+  // same human coming back: adopt them, mint once, hand it over once.
+  const grandfathered = await postClaim(baseUrl, code, "Chloe")
+  assert.equal(grandfathered.status, 200)
+  const minted = typeof grandfathered.body.claim === "string" ? grandfathered.body.claim : undefined
+  assert.ok(typeof minted === "string", "the adopting join mints and returns the secret once")
+  assert.equal(grandfathered.body.memberId, alice.id, "the SAME member is adopted, not a new one")
+
+  // Exactly once: a second secret-less join is now an impostor.
+  const second = await postClaim(baseUrl, code, "Chloe")
+  assert.equal(second.status, 409)
+  const withSecret = await postClaim(baseUrl, code, "Chloe", minted)
+  assert.equal(withSecret.status, 200)
+})
+
+test("a spectator tab gets a working page and NO token in the HTML (brief C)", async () => {
+  const { baseUrl, code, alice, bob } = await outboxHarness()
+
+  const res = await fetch(`${baseUrl}/r/${code}`)
+  assert.equal(res.status, 200)
+  const html = await res.text()
+  assert.ok(html.includes(code), "the page renders for a visitor with no name claimed at all")
+  assert.ok(html.includes("/outbox?since="), "the outbox drain is in the page script")
+  for (const member of [alice, bob]) {
+    const token = memberToken(code, member.id, env.roomTokenSecret)
+    assert.ok(!html.includes(token), "no member's bearer token is embedded in the HTML")
+  }
+})
+
+test("a member's drain shows its own whisper and never another's, authorized by the token the claim exchange returned", async () => {
+  const { store, baseUrl, code, alice, bob } = await outboxHarness()
+  await store.update(code, {
+    deliverySeq: 2,
+    deliveries: [
+      outboxDelivery("d1", alice.id, "whisper for Chloe alone", "pending", "whisper"),
+      outboxDelivery("d2", bob.id, "whisper for Bob alone", "pending", "whisper"),
+    ],
+  })
+
+  // The claim exchange adopts the pre-claim member under her own name and
+  // returns her D3 token; the drain presents it.
+  const adopted = await postClaim(baseUrl, code, "Chloe")
+  assert.equal(adopted.status, 200)
+  const token = adopted.body.memberToken
+  assert.ok(typeof token === "string")
+  assert.equal(token, memberToken(code, alice.id, env.roomTokenSecret), "the claim exchange returns the D3 member token")
+
+  const drain = await readJson(
+    await fetch(`${baseUrl}/rooms/${code}/outbox`, { headers: { authorization: `Bearer ${token}` } }),
+  )
+  const records = isArrayOf(drain.deliveries, (v): v is Record<string, unknown> => isRecord(v)) ? drain.deliveries : []
+  assert.deepEqual(
+    records.map((record) => record.id),
+    ["d1"],
+  )
+  assert.ok(!JSON.stringify(drain).includes("whisper for Bob alone"), "another member's whisper is never on the wire")
+})
+
+test("POST /rooms/:code/send refuses a claimed name presented without its secret, and accepts it with the secret", async () => {
+  const { baseUrl, code, daemon, sessionId } = await newRoomHarness()
+
+  const first = await postClaim(baseUrl, code, "Chloe")
+  assert.equal(first.status, 200)
+  const minted = typeof first.body.claim === "string" ? first.body.claim : undefined
+  assert.ok(typeof minted === "string")
+
+  const impostor = await fetch(`${baseUrl}/rooms/${code}/send`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ displayName: "Chloe", text: "hi" }),
+  })
+  assert.equal(impostor.status, 409)
+  assert.equal((await readJson(impostor)).error, "name_claimed")
+
+  const holder = await fetch(`${baseUrl}/rooms/${code}/send`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ displayName: "Chloe", text: "hi", claim: minted }),
+  })
+  assert.equal(holder.status, 200)
+  const prompts = daemon.requestsReceived.filter((r) => r.path === `/sessions/${sessionId}/prompt`)
+  assert.equal(prompts.length, 1)
+})
+
+test("POST /inbound/simulated answers an unroutable provider with a validated 400 naming it, not an uncaught 500 (brief E)", async () => {
+  const { baseUrl, code } = await newRoomHarness()
+  void code
+  const res = await fetch(`${baseUrl}/inbound/simulated`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      provider: "sim",
+      source: "sim",
+      contactRef: "someone",
+      displayName: "Someone",
+      text: "hello",
+      tier: "messenger",
+    }),
+  })
+  assert.equal(res.status, 400)
+  const body = await readJson(res)
+  assert.equal(body.error, "unknown_provider")
+  assert.equal(body.provider, "sim")
 })
