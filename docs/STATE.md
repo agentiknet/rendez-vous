@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 02:40 UTC (04:40 local). Repo: this directory,
+Last updated: 2026-09-12 02:45 UTC (04:45 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -116,6 +116,13 @@ Last updated: 2026-09-12 02:40 UTC (04:40 local). Repo: this directory,
    First real exercise against Jeremy's own contact and mailbox: IN PROGRESS
    (executor rdv-flow-exercise). The demo service was restarted on `46912d3`
    at 01:38 UTC (pid 85899), so the proxy URL and the flow are live.
+   First real exercise: DONE 2026-09-12T01:53Z (docs/REHEARSAL.md, "Deliverable
+   flow, first real exercise (through the flow)"), email verified yes
+   (jeremy@agentik.net, message 1a0935074773122c, attachment byte-matched via
+   mailbox_search), messenger status: skipped — no address form exists for a
+   raw messenger contact ref via `send pdf to <address>` (gap recorded, not
+   improvised). Also hit a real `E2bBooter.resume` box-liveness race and a
+   second unplanned same-port service-process collision during the run.
 4. Leave/switch — DONE (`cfb9aa5`).
 5. Whisper, N addressed messages per turn — DONE (`741fe35`, `dc1b178`).
 6. Middleman (agent solicits from each member, asks recorded in the room,
@@ -129,6 +136,9 @@ Last updated: 2026-09-12 02:40 UTC (04:40 local). Repo: this directory,
 8. Deck — REBUILT as a pitch at `dbf938b` (13 pages: 9-slide arc problem /
    consequence / solution / it works / how / per-member credentials / work
    leaves the room / close, plus a 4-slide appendix). Both kits in `deck/out/`.
+   FORMAT FIX IN PROGRESS (executor rdv-deck-format, GLM): the pages render
+   portrait; Jeremy asked for slide format, so both kits are being re-rendered
+   as 16:9 landscape with the same content.
    FOLLOW-UP once the deliverable-flow exercise lands: slide 8's caption in
    `deck/data.json` and the matching README note say the first live send
    bypassed the room's own commands; update them if the flow gets exercised.
