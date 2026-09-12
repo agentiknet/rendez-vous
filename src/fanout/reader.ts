@@ -1,6 +1,7 @@
 import type { RoomStore } from "../rooms/store.ts"
 import type { Ask, Member, Room } from "../rooms/types.ts"
 import type { TtsProvider } from "../media/openai.ts"
+import { env } from "../env.ts"
 import { publicArtifactUrl, publicMediaUrl } from "../service/artifact-proxy.ts"
 import type { MediaRecord, SaveMediaInput } from "../service/media-store.ts"
 import {
@@ -22,6 +23,54 @@ import { renderWhisperForMember, resolveWhisperSegments, type ResolvedSegment } 
 
 const INITIAL_BACKOFF_MS = 250
 const MAX_BACKOFF_MS = 5000
+
+/** The attachment URL is behind our own tunnel on a box we control — if it
+ *  has not answered in two seconds, it is not going to answer. */
+const PROBE_TIMEOUT_MS = 2000
+
+/** Whether a URL actually serves something right now. Injected so tests
+ *  never touch the network; the default probes over HTTP (see
+ *  `probeArtifactUrl`). A probe that throws — timeout, DNS, anything — is a
+ *  failure: an attachment is only ever delivered on a confirmed 2xx. */
+export type ArtifactProbe = (url: string) => Promise<boolean>
+
+/** Default probe: `HEAD` with a short timeout, falling back to a ranged `GET`
+ *  when the upstream rejects `HEAD` (405) or the `HEAD` itself fails at the
+ *  transport level. Only a 2xx answer counts as "served". */
+export async function probeArtifactUrl(url: string): Promise<boolean> {
+  try {
+    const head = await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) })
+    if (head.ok) return true
+    if (head.status !== 405) return false
+  } catch {
+    // Fall through to the ranged GET: some servers refuse HEAD outright, and
+    // the GET is the authoritative answer either way.
+  }
+  try {
+    const range = await fetch(url, { headers: { Range: "bytes=0-0" }, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) })
+    return range.ok
+  } catch {
+    return false
+  }
+}
+
+/** Where the agent is told to put a file it wants members to receive — the
+ *  directory the artifact app actually serves. */
+export function servedDir(): string {
+  return `${env.artifactAppDir}/.agentproto/ui`
+}
+
+/** What the AGENT sees when an attachment URL probed dead. Names the file,
+ *  the URL that 404'd, and the one directory that works — everything it
+ *  needs to fix this without guessing. */
+function unservableCorrection(name: string, url: string): string {
+  return `[system · artifact] The file "${name}" from your "[[attach ${name}]]" did NOT reach any member: nothing is served at ${url}. Members only receive files that exist in ${servedDir()} — write it there, then attach it again.`
+}
+
+/** What the MEMBER sees instead of a dead link: short, honest, no URL. */
+function unservableNotice(name: string): string {
+  return `Sorry — the room said it attached "${name}", but the file was not actually sent. Nothing to download yet; the room has been told to fix it.`
+}
 
 type Source = (sessionId: string, since: number, signal: AbortSignal) => AsyncIterable<FanoutRecord>
 /** Checked once the source's read loop ends (error or clean close), before
@@ -101,6 +150,13 @@ export class RoomFanout {
   private readonly tts: TtsProvider | undefined
   private readonly mediaStore: SpeechMediaStore | undefined
 
+  private readonly probeUrl: ArtifactProbe
+  /** Fan-in callback for "this attachment is not actually being served",
+   *  wired by `RoomService` to the same `queue: true` prompt path a member
+   *  message takes. The agent is the only party that can fix a missing
+   *  artifact, so it is the only party that must be told. */
+  private readonly reportUnservable: ((code: string, correction: string) => Promise<void>) | undefined
+
   constructor(opts: {
     store: RoomStore
     transport: Transport
@@ -108,6 +164,8 @@ export class RoomFanout {
     isAlive?: IsAlive
     tts?: TtsProvider
     mediaStore?: SpeechMediaStore
+    probeUrl?: ArtifactProbe
+    reportUnservable?: (code: string, correction: string) => Promise<void>
   }) {
     this.store = opts.store
     this.transport = opts.transport
@@ -115,6 +173,8 @@ export class RoomFanout {
     this.isAlive = opts.isAlive ?? (async () => true)
     this.tts = opts.tts
     this.mediaStore = opts.mediaStore
+    this.probeUrl = opts.probeUrl ?? probeArtifactUrl
+    this.reportUnservable = opts.reportUnservable
   }
 
   start(code: string): void {
@@ -298,6 +358,30 @@ export class RoomFanout {
     }
   }
 
+  /** One correction into the room's session per missing file, via the
+   *  injected fan-in callback (RoomService's `queue: true` prompt path — the
+   *  same path a member message takes, so it queues mid-turn instead of
+   *  being lost). Never throws: a failed correction is logged, and the
+   *  members' honest line has already gone out regardless. */
+  private async reportUnservableArtifacts(
+    code: string,
+    unserved: ReadonlyArray<{ attachment: ParsedAttachment; url: string }>,
+  ): Promise<void> {
+    const report = this.reportUnservable
+    if (report === undefined) return
+    for (const { attachment, url } of unserved) {
+      try {
+        await report(code, unservableCorrection(attachment.name, url))
+      } catch (error: unknown) {
+        console.error(
+          `failed to report unserved attachment ${attachment.name} in ${code}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+      }
+    }
+  }
+
   private async sendAttachment(member: Member, code: string, parsed: ParsedAttachment): Promise<void> {
     const attachment: OutboundAttachment = {
       url: attachmentUrl(publicArtifactUrl(code), parsed.name),
@@ -333,6 +417,28 @@ export class RoomFanout {
     const { text, spoken } = parseSpeech(withoutAttachments.text)
     const attachments = withoutAttachments.attachments
     const voiceNotes = await this.renderSpeech(code, spoken)
+
+    // Nothing is claimed without proof: each attachment URL is probed once
+    // per turn (not once per member) and only confirmed-alive files go out.
+    // A 404 here is exactly how the MilanoTripItinerary bug happened — the
+    // agent attached a name it never wrote into the served directory, and
+    // every member got a dead link plus a confident "sent!" from the agent.
+    const served: ParsedAttachment[] = []
+    const unserved: Array<{ attachment: ParsedAttachment; url: string }> = []
+    for (const attachment of attachments) {
+      const url = attachmentUrl(publicArtifactUrl(code), attachment.name)
+      let alive = false
+      try {
+        alive = await this.probeUrl(url)
+      } catch {
+        alive = false
+      }
+      if (alive) served.push(attachment)
+      else unserved.push({ attachment, url })
+    }
+    if (unserved.length > 0) {
+      await this.reportUnservableArtifacts(code, unserved)
+    }
 
     // The raw `room.artifactUrl` is the box's own ephemeral URL — never sent
     // to a member (architecture.md §9.3b). Everyone gets the room-code-keyed
@@ -370,8 +476,14 @@ export class RoomFanout {
         // Attachments go to everyone, after the text, and are independent of
         // it: a turn that is nothing BUT an attachment still delivers the
         // file, even though `renderForTier` had no text to render.
-        for (const attachment of attachments) {
+        for (const attachment of served) {
           await this.sendAttachment(member, code, attachment)
+        }
+        // A file that probed dead is never replaced by a link or a fallback:
+        // members get the honest one-liner instead, because the room said it
+        // was sending a file and did not.
+        for (const { attachment } of unserved) {
+          await this.transport.send(member, { text: unservableNotice(attachment.name), artifactUrl: undefined })
         }
         for (const note of voiceNotes) {
           await this.deliverAttachment(member, code, note)

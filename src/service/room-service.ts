@@ -3,7 +3,7 @@ import type { TranscriptRecord } from "../daemon/records.ts"
 import { AgentpushToolClient } from "../channels/agentpush/tools-client.ts"
 import { env } from "../env.ts"
 import { fanIn } from "../fanin/index.ts"
-import { RoomFanout } from "../fanout/reader.ts"
+import { RoomFanout, type ArtifactProbe } from "../fanout/reader.ts"
 import type { Transport } from "../fanout/types.ts"
 import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
 import { ensureMembership, handleCommand, parseCommand } from "../rooms/commands.ts"
@@ -192,6 +192,10 @@ export class RoomService {
      *  both together in that case. */
     mediaStore?: MediaStore
     deliverable?: DeliverableService
+    /** Overrides the attachment-URL probe the fan-out reader uses before
+     *  delivering an `[[attach …]]` — inject a stub in tests so they never
+     *  depend on whether something answers at `env.publicUrl`. */
+    probeUrl?: ArtifactProbe
   }) {
     this.store = opts.store
     this.client = opts.client
@@ -222,8 +226,33 @@ export class RoomService {
       transport: new DeliverableAwareTransport(this.transport, this.deliverable, this.store),
       source: (sessionId, since, signal) => this.client.events(sessionId, since, signal),
       isAlive: (sessionId) => isSessionAlive(this.daemon, sessionId),
+      // An attachment that probed dead is fed back into the room's session
+      // over the ordinary fan-in path (queue: true — the agent may be
+      // mid-turn; omitting it loses the message, STATE.md finding #1).
+      reportUnservable: (code, correction) => this.reportUnservableArtifact(code, correction),
+      ...(opts.probeUrl !== undefined ? { probeUrl: opts.probeUrl } : {}),
       ...(openaiKey !== undefined ? { tts: new OpenAiTtsProvider(openaiKey), mediaStore: this.mediaStore } : {}),
     })
+  }
+
+  /** Fan an attachment-verification failure back into the room's session,
+   *  the same way `DeliverableService.postSystemNote` records delivery
+   *  events: an attributed system prompt with `queue: true`, so it lands on
+   *  the transcript even when the agent is mid-turn. */
+  private async reportUnservableArtifact(code: string, correction: string): Promise<void> {
+    const room = this.store.get(code)
+    if (room === undefined || room.sessionId === undefined) {
+      console.warn(`[fanout] room ${code} has no live session — not reporting an unserved attachment: ${correction}`)
+      return
+    }
+    const result = await this.client.prompt(room.sessionId, {
+      prompt: correction,
+      queue: true,
+      origin: "rdv:system",
+    })
+    if (!result.ok) {
+      console.error(`[fanout] failed to report an unserved attachment in room ${code}'s transcript: ${result.message}`)
+    }
   }
 
   /** Start fan-out for every active room with a live session, and the idle sweep. */

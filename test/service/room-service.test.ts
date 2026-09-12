@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, test } from "node:test"
+import { env } from "../../src/env.ts"
 import { DaemonClient } from "../../src/daemon/client.ts"
 import type { OutboundMessage, Transport } from "../../src/fanout/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
@@ -49,14 +50,21 @@ interface Harness {
   daemon: ExtendedFakeDaemon
 }
 
-async function buildHarness(): Promise<Harness> {
+async function buildHarness(opts: { probeUrl?: (url: string) => Promise<boolean> } = {}): Promise<Harness> {
   const dir = await freshDir()
   const daemon = await freshDaemon()
   const store = await RoomStore.open(dir)
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
   const transport = new MemoryTransport()
-  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    ...(opts.probeUrl !== undefined ? { probeUrl: opts.probeUrl } : {}),
+  })
   services.push(service)
   return { service, store, transport, daemon }
 }
@@ -839,4 +847,44 @@ test("two concurrent fan-ins to a room with a dead session trigger exactly one r
   const finalRoom = store.get(code)
   assert.equal(finalRoom?.state, "active")
   assert.equal(finalRoom?.sandboxId, "box-resumed-1", "the store must hold the one resume's sandboxId, not a clobbered second one")
+})
+
+test("a fan-out turn attaching a file nothing serves fans a queue:true correction back into the session", async () => {
+  // A probe that always fails: the file is genuinely not being served,
+  // which is exactly the MilanoTripItinerary shape.
+  const { service, transport, daemon } = await buildHarness({ probeUrl: () => Promise.resolve(false) })
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+  const sessionId = created.room.sessionId
+  assert.ok(sessionId !== undefined)
+  if (sessionId === undefined) return
+
+  const promptsBefore = daemon.requestsReceived.filter((r) => r.path.endsWith("/prompt")).length
+  daemon.pushRecord(sessionId, { seq: 1, kind: "text-delta", text: "Here you go.\n[[attach MilanoTripItinerary.txt]]" })
+  daemon.pushRecord(sessionId, { seq: 2, kind: "turn-end", reason: "completed" })
+
+  await waitFor(() => daemon.requestsReceived.filter((r) => r.path.endsWith("/prompt")).length > promptsBefore)
+
+  const correctionRequests = daemon.requestsReceived.filter(
+    (r) => r.path.endsWith("/prompt") && isRecord(r.body) && typeof r.body.prompt === "string" && r.body.prompt.includes("MilanoTripItinerary.txt"),
+  )
+  assert.equal(correctionRequests.length, 1, "exactly one correction for the one missing file")
+  const body = correctionRequests[0]?.body
+  assert.ok(isRecord(body))
+  if (!isRecord(body)) return
+  assert.equal(body.queue, true, "the correction must queue mid-turn, never be lost (STATE.md finding #1)")
+  assert.equal(body.origin, "rdv:system")
+  const correction = body.prompt
+  assert.ok(typeof correction === "string")
+  assert.ok(correction.includes("MilanoTripItinerary.txt"), "the agent is told which file failed")
+  assert.ok(correction.includes(`${env.artifactAppDir}/.agentproto/ui`), "the agent is told the directory to write into")
+
+  // And the member got the honest line, not a link.
+  const notice = transport.sends.find((send) => send.message.text.includes("MilanoTripItinerary.txt"))
+  assert.ok(notice !== undefined, "members are told the attachment failed")
+  assert.ok(!notice.message.text.includes("http"))
+
+  await service.stop()
 })
