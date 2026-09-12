@@ -1,167 +1,139 @@
 [
   {
-    "type": "title",
-    "isTitle": true,
-    "title": "Rendez-vous",
-    "subtitle": "One room, one agent, one artifact — many humans, on the surfaces they already use.",
-    "page": "1 / 13"
-  },
-  {
     "type": "statement",
     "isStatement": true,
-    "eyebrow": "The problem",
+    "eyebrow": "Rendez-vous — one room, one agent, one artifact, many humans",
     "title": "Work is multiplayer. Agents are single-player.",
     "bullets": [
-      "Every agent lives in exactly one person's window."
-    ],
-    "page": "2 / 13"
-  },
-  {
-    "type": "statement",
-    "isStatement": true,
-    "eyebrow": "The consequence",
-    "title": "So the human becomes the integration layer.",
-    "bullets": [
-      "Copy-paste relay between two separate chat windows.",
-      "Screenshots of chats, forwarded to the other side.",
-      "“Let me ask the AI and get back to you.”",
+      "Every agent you use today lives in exactly one person's window.",
+      "So the human becomes the integration layer: copy-paste between two chat windows.",
+      "A screenshot forwarded to the other side. “Let me ask the AI and get back to you.”",
       "The second person never sees the context.",
       "The deliverable dies inside one private thread."
     ],
-    "page": "3 / 13"
+    "page": "1 / 6"
   },
   {
-    "type": "statement",
-    "isStatement": true,
-    "eyebrow": "The solution",
-    "title": "One agent. Many humans. No new app.",
-    "bullets": [
-      "One agent session, many humans, on their own surfaces.",
-      "No install. No shared login. No new app."
+    "type": "ladder",
+    "isLadder": true,
+    "eyebrow": "The room",
+    "title": "Four members. Four surfaces. One session.",
+    "ladderHead": ["Member", "Surface", "Sends", "Receives", "Joined by"],
+    "ladderRows": [
+      {
+        "tier": "Alice",
+        "surface": "phone — Telegram",
+        "sends": "text, voice notes, photos",
+        "receives": "terse replies, voice, files",
+        "latency": "texting “new”"
+      },
+      {
+        "tier": "Bob",
+        "surface": "laptop — room web view",
+        "sends": "text",
+        "receives": "full transcript + the live artifact",
+        "latency": "scanning a QR"
+      },
+      {
+        "tier": "Atlas",
+        "surface": "local desktop agent — a machine",
+        "sends": "what only a local machine knows",
+        "receives": "the same transcript as the humans",
+        "latency": "the same two endpoints"
+      },
+      {
+        "tier": "the inbox",
+        "surface": "email",
+        "sends": "reply-to-thread",
+        "receives": "a per-turn digest, deliverables",
+        "latency": "replying once"
+      }
     ],
-    "highlight": "Sandboxes are now commodity — nine partners, one API call, each single-principal.",
-    "page": "4 / 13"
+    "caption": "No install. No shared login. No new app. The room models members, not humans — which is why a machine joins the same way a person does.",
+    "page": "2 / 6"
   },
   {
     "type": "timeline",
     "isTimeline": true,
-    "eyebrow": "The product working",
-    "title": "Two people, two surfaces, one artifact, attributed.",
+    "eyebrow": "It works — live, on real surfaces",
+    "title": "Not a mock. A real phone, a real thread, a real artifact.",
     "timelineItems": [
       { "time": "0s", "label": "A real phone types “new” on Telegram — the room exists" },
-      { "time": "86.5s", "label": "Cold boot — session and artifact ready" },
-      { "time": "+~20s", "label": "A second person joins from the laptop" },
-      { "time": "live", "label": "Every message attributed: [Bob · room-web], [phone · messenger]" },
-      { "time": "~33s", "label": "The agent finds the artifact and edits it, unaided" }
+      { "time": "86.5s", "label": "Cold boot: agent session and shared artifact both ready" },
+      { "time": "join", "label": "A second person joins from a laptop; a desktop agent joins as a member" },
+      { "time": "voice in", "label": "A voice note is transcribed and attributed to whoever sent it" },
+      { "time": "image in", "label": "A photo is described by the agent and written into the artifact" },
+      { "time": "private", "label": "“@me” — one member gets the answer, the others see only that a whisper happened" },
+      { "time": "out", "label": "The agent replies with a voice note, and attaches real files" },
+      { "time": "resume", "label": "Killed mid-session, the room comes back still knowing what was discussed" }
     ],
-    "caption": "Delivery confirmed on the phone.",
-    "page": "5 / 13"
+    "caption": "Every row observed end to end on live infrastructure, not described.",
+    "page": "3 / 6"
   },
   {
     "type": "code",
     "isCode": true,
-    "eyebrow": "How we built it",
-    "title": "Every message becomes one artifact.",
+    "eyebrow": "The stack",
+    "title": "One pipeline, four layers, one seam that matters.",
     "bullets": [
-      "Messenger — WhatsApp, Telegram: quick text in, terse replies out.",
-      "Email — reply-to-thread turns, a per-turn digest back.",
-      "Room-web — laptop, full transcript, the live artifact."
+      "agentpush — every channel behind one API, in and out. The room never learns a provider's quirks.",
+      "Rendez-vous — the room: members, attribution, fan-out by presence tier, the authority to send.",
+      "agentproto — our own open-source agent runtime. Unmodified, straight from npm.",
+      "e2b — one sandbox per room, holding the shared artifact. OpenAI for voice and vision, canvakit for the PDF."
     ],
-    "code": "agentpush ingress\n  → room  (many contacts, one session)\n  → fan-out  (by presence tier)\n  → e2b sandbox\n  → artifact URL",
-    "highlight": "Built on our own open-source runtime — unmodified, from npm.",
-    "page": "6 / 13"
-  },
-  {
-    "type": "statement",
-    "isStatement": true,
-    "eyebrow": "The designed call",
-    "title": "Credentials are per-member, not per-room.",
-    "bullets": [
-      "A shared room key is shared with anyone holding the code.",
-      "Each member attaches their own tools over rendezvous — nothing inherited.",
-      "Revocation is an unpair, not a key rotation."
-    ],
-    "page": "7 / 13"
+    "code": "  Telegram · WhatsApp · Email · Web · a desktop agent\n                    │\n              [ agentpush ]        ingress + egress, one API\n                    │\n             [ RENDEZ-VOUS ]       members · attribution · fan-out\n                    │\n              [ agentproto ]       the agent runtime — swappable\n                    │\n                 [ e2b ]           one sandbox, one artifact URL",
+    "highlight": "The runtime sits under a clean seam. That is the whole claim: swap it and the room does not move.",
+    "caption": "Built against five silent upstream failures we found and fixed on the way — none of which crashed, all of which lost data or reported success while doing nothing.",
+    "page": "4 / 6"
   },
   {
     "type": "findings",
     "isFindings": true,
-    "eyebrow": "Work leaves the room",
-    "title": "Work leaves the room — on purpose.",
+    "eyebrow": "Work leaves the room — on purpose",
+    "title": "A room with a notion of authority, not a relay.",
     "findingsItems": [
-      { "n": "1", "label": "Jeremy asks the room to build a presentation, then reviews it live at the artifact URL" },
-      { "n": "2", "label": "He asks for a PDF" },
-      { "n": "3", "tag": "the confirmation gate", "label": "the room previews it first — recipient, channel, subject, the rendered artifact — and sends only when a member explicitly confirms" },
-      { "n": "4", "label": "the PDF reaches Jeremy's own messenger, and by email, a client who is not a member of the room" },
-      { "n": "5", "label": "every send lands in the shared transcript: who asked, who confirmed, what was sent, to whom" }
+      { "n": "1", "label": "A member asks the room for the deliverable — a PDF of what everyone just built" },
+      { "n": "2", "tag": "the confirmation gate", "label": "the room previews it first: recipient, channel, subject, the rendered document — and sends nothing until a member explicitly confirms" },
+      { "n": "3", "label": "it lands on a phone as a real file, and in an inbox, addressed to someone who was never in the room" },
+      { "n": "4", "label": "the send is written into the shared transcript: who asked, who confirmed, what, to whom" }
     ],
-    "highlight": "Every other capability keeps work inside the room. This one lets it leave — with authority, not just relay.",
-    "caption": "Run end-to-end through the room's own commands — the email leg verified.",
-    "page": "8 / 13"
+    "highlight": "Every other capability keeps work inside the room. This one lets it leave — under the members' control, on the record.",
+    "page": "5 / 6"
   },
   {
     "type": "closing",
     "isClosing": true,
     "title": "The room is the primitive.",
     "subtitle": "The runtime is a detail.",
-    "page": "9 / 13"
+    "page": "6 / 6"
   },
   {
     "type": "findings",
     "isFindings": true,
-    "eyebrow": "Appendix — the five findings",
-    "title": "One shape, five independent bugs.",
+    "eyebrow": "Appendix — failure handling",
+    "title": "One shape, five independent silent failures.",
     "findingsItems": [
-      { "n": "1", "tag": "found live, tonight", "label": "a killed session still answers 200 — resume reported success doing nothing" },
-      { "n": "2", "label": "queue: true omitted — a mid-turn prompt is silently dropped" },
-      { "n": "3", "label": "the resume cursor freezes — every reply after it vanishes" },
-      { "n": "4", "label": "an account-pinned route never fires — filtered out silently" },
-      { "n": "5", "label": "the agent proposes rebuilding a Gmail capability it already had" }
+      { "n": "1", "tag": "found live, on a phone", "label": "a killed session still answers 200 — resume reported success in 0.7s having resumed nothing" },
+      { "n": "2", "label": "omit queue: true and a message arriving mid-turn is rejected and lost" },
+      { "n": "3", "label": "the fan-out cursor freezes on resume — every reply after it vanishes" },
+      { "n": "4", "label": "an account-pinned inbound route is filtered out and never fires" },
+      { "n": "5", "label": "the agent proposes rebuilding a Gmail capability the workspace already brokered" }
     ],
-    "highlight": "Four of these five lost data quietly. This one reported success while doing nothing.",
-    "caption": "None crash. All look like working code or correct config.",
-    "page": "10 / 13"
+    "highlight": "Four of these lost data quietly. One reported success while doing nothing. None crash; all look like working code or correct configuration.",
+    "caption": "Each one is fixed, with a regression test. This is why the room records who asked and who confirmed.",
+    "page": "Appendix"
   },
   {
     "type": "list",
     "isList": true,
     "eyebrow": "Appendix — honest limits",
-    "title": "Four things we haven't proven yet.",
+    "title": "What we have not proven.",
     "bullets": [
-      "Resume-after-kill: fixed, but not yet re-proved on a phone.",
-      "Paused sandboxes expire in 20 to 60 minutes.",
-      "WhatsApp: not provisioned — no number, no key.",
-      "Shared inbound routing risks a responder double reply."
+      "Paused sandboxes expire in 20–60 minutes. One did, live, mid-rehearsal — the room advertised a dead link until we made box liveness its own fact.",
+      "WhatsApp is not provisioned: no number, no key. The room is channel-agnostic by construction, so it is a config change, not code.",
+      "We share an existing workspace's Telegram routing; a catch-all route there could fire alongside ours.",
+      "Swapping the runtime for Codex failed at the auth gate, not the swap — a fresh box has no login. The credential model is the real work."
     ],
-    "page": "11 / 13"
-  },
-  {
-    "type": "code",
-    "isCode": true,
-    "eyebrow": "Appendix — the codex verdict",
-    "title": "It failed at the auth gate, not the swap.",
-    "bullets": [
-      "Tested live: the swap alone hit a login wall first.",
-      "installAdapters installs the binary — not a login."
-    ],
-    "code": "agent_start({ adapter: \"codex\", model: \"gpt-5.2-codex\", ... })\n\n→ 500 sandbox_proxy_failed\n   \"no codex login found — run `codex login`\"\n\nbox destroyed on failure — boots used: 1 of 1",
-    "highlight": "The credential model — device-auth — is the real second-brain work, not the adapter swap.",
-    "caption": "docs/CODEX-FLIP.md — variant A only; B and C untested (1-boot budget).",
-    "page": "12 / 13"
-  },
-  {
-    "type": "findings",
-    "isFindings": true,
-    "eyebrow": "Appendix — the middleman arc",
-    "title": "Why a room, not two people and one bot.",
-    "findingsItems": [
-      { "n": "1", "label": "the agent asks Alice for the product shot" },
-      { "n": "2", "label": "the agent asks Bob for the one-line positioning" },
-      { "n": "3", "label": "each answers on their own channel, in their own time" },
-      { "n": "4", "label": "the agent synthesizes both into the deck — sent as a PDF" }
-    ],
-    "highlight": "The agent addresses each member individually and reconciles what they contribute.",
-    "caption": "Specced, not yet built.",
-    "page": "13 / 13"
+    "page": "Appendix"
   }
 ]

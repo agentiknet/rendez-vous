@@ -1,10 +1,8 @@
 # Rendez-vous pitch deck
 
-13 slides — 9-slide pitch arc (problem, consequence, solution, how we built
-it, the product working, the designed call, work leaves the room, close)
-plus a 4-slide appendix for Q&A. Every number is sourced from
-`docs/REHEARSAL.md` or `docs/ARCHITECTURE.md` (see `SCRIPT.md` for the
-speaker read and shot list).
+**6 pages**, plus 2 appendix pages held for Q&A and explicitly marked as not
+part of the six. Written backwards from the closing line: page 6 is the claim,
+pages 5 → 1 exist to make it unarguable by the time a judge reaches it.
 
 Built with [canvakit](../../../products/agentik/agentik-studio/tools/canvakit/README.md).
 `_design/` (the `agentik` / `agentik-dark` design kits) is copied into this
@@ -13,21 +11,32 @@ directory because `kit:` refs resolve relative to the CWD.
 ## Files
 
 - `rendez-vous.canvakit.html` — the template
-- `data.json` — the 13 slides' content
-- `rendez-vous.pdf` — rendered output, light kit (13 pages)
-- `out/rendez-vous-light.pdf`, `out/rendez-vous-dark.pdf` — both kits rendered
-- `SCRIPT.md` — ~4 minute speaker script + shot list for the recording
+- `data.json` — the 6 pages + 2 appendix pages
+- `rendez-vous.pdf` — rendered output, light kit
+- `out/rendez-vous-light.pdf`, `out/rendez-vous-dark.pdf` — both kits
+- `SCRIPT.md` — speaker read (~2:30) + the demo video beat sheet
+- `SUBMISSION.md` — the written submission, structured against the four
+  judging criteria
+- `REVIEW-fable.md`, `REVIEW-glm.md` — independent critiques of the above
+
+## The six pages
+
+| # | Page | Carries |
+| --- | --- | --- |
+| 1 | The problem | Work is multiplayer, agents are single-player; the human becomes the integration layer |
+| 2 | The room | The cast table: 4 members, 4 surfaces, one session — including a **machine** member |
+| 3 | It works | The live run: cold boot 86.5 s, voice in, image in, private replies, media out, resume with continuity |
+| 4 | The stack | agentpush → Rendez-vous → agentproto → e2b, and the seam that makes the runtime swappable |
+| 5 | Work leaves the room | The confirmation gate and the audit line: who asked, who confirmed, what, to whom |
+| 6 | Close | *The room is the primitive. The runtime is a detail.* |
+
+Appendix: the five silent upstream failures (the failure-handling evidence the
+rubric rewards) and the honest limits.
 
 ## Render command
 
-Pages render as 16:9 landscape slides (1920×1080 px = 1440×810 pt), set by
-the template frontmatter:
-
-```yaml
-page:
-  size: "1920px 1080px"
-  margin: "0"
-```
+Pages render as 16:9 landscape slides (1920×1080 px = 1440×810 pt), set by the
+template frontmatter.
 
 From this directory:
 
@@ -46,48 +55,21 @@ node /Volumes/SSDExternalMacStudio/Code/products/agentik/agentik-studio/projects
 `rendez-vous.pdf` at the top level is a copy of the light render, kept for
 whatever pulls that path directly (e.g. the deliverable-flow send).
 
-## Notes on content sourcing
+## Template note
 
-- Slides 1–9 are the pitch arc: problem → consequence → solution → the
-  product working (Run 3, real Telegram + web) → how it's built → the
-  credential design → the deliverable flow → close. Slides 10–13 are
-  appendix, each headed "Appendix", held for Q&A.
-- Slide 5 ("The product working") is Run 3's real Telegram + web session,
-  reframed as an observed product fact, not a test report: real phone,
-  cold boot at 86.5s, a second member from the laptop, attribution on
-  every message, the agent finding and editing the artifact unaided,
-  delivery confirmed on the phone (`docs/REHEARSAL.md`, "Run 3 — real
-  Telegram + web: COMPLETED live").
-- Slide 8 ("Work leaves the room") keeps the substance of the deliverable
-  flow (`docs/DELIVERABLE.md`): preview, explicit member confirm, PDF to
-  messenger and mail,   every send in the transcript. Caption reflects `docs/REHEARSAL.md`'s
-  "Deliverable flow, first real exercise (through the flow)": the flow ran
-  end-to-end through the room's own `send pdf to`/`confirm` commands, with
-  the email leg verified.
-- Appendix slide 10 (the five findings) orders the liveness-by-existence
-  bug first — it's `docs/UPSTREAM.md` finding 9, found live on a real
-  phone during the Run 3 continuation — then the other four in the order
-  they were found: `queue: true`, the resume cursor, account-pinned
-  routes, and broker-blind planning (the Gmail rebuild proposal).
-- Appendix slide 11 (honest limits) sources the resume-after-kill status
-  from `docs/REHEARSAL.md`'s Run 3 continuation, "Step 3 — resume-after-
-  kill: FAILED, root cause identified" — the fix has since landed
-  (`4e73786`) but a fresh re-proof on a phone is still pending; the
-  paused-sandbox expiry and the dead-artifact-link risk are
-  `docs/ARCHITECTURE.md` §9.3b, confirmed live when box
-  `i7jos61ixgkcfrekmi1vl` expired mid-rehearsal; the routing risk is
-  `docs/AGENTPUSH.md` ("Do not pin a route to a bot account") plus
-  `docs/WORKSPACE-OPTION.md` (the demo runs on the shared `default`
-  workspace).
-- Appendix slide 12 (the codex verdict) reflects `docs/CODEX-FLIP.md`'s
-  verdict: the one-parameter claim does not hold as stated — a fresh box
-  has no codex credentials, `installAdapters` installs the binary not the
-  login, and the tested boot failed at the auth gate before the
-  mechanical swap could be observed. Framed as the credential model
-  (architecture.md §9.3, device-auth) being the real second-brain work,
-  not the adapter swap.
-- Appendix slide 13 (the middleman arc) is operator-specified directly, no
-  doc anchor yet beyond `docs/ARCHITECTURE.md` §2.5 and `docs/MIDDLEMAN.md`.
-  Marked "specced, not yet built" on-slide.
-- No slide required an "ASK" placeholder — every number traced to
-  `docs/REHEARSAL.md` or `docs/ARCHITECTURE.md`.
+The `ladder` layout's column headers come from `ladderHead` (five strings in
+`data.json`) rather than being hardcoded, so the five-column table can carry
+more than one kind of slide. Row fields keep their original names: `tier` is
+the first, accent-styled cell, then `surface`, `sends`, `receives`, `latency`
+in column order.
+
+## Content sourcing
+
+Every number traces to `docs/REHEARSAL.md`, `docs/STATE.md` or
+`docs/ARCHITECTURE.md`. Two claims are newer than the rehearsal doc and are
+sourced from the commits that landed them: the media round trip (voice and
+image in, voice and files out) and resume-with-transcript-continuity, proven
+in a local harness and then live from a phone. The machine-member row on page
+2 is `scripts/room-agent.ts` (commit `e471b41`) — the bridge that joins a
+local desktop agent session to a room through the same two endpoints the
+laptop web view uses.

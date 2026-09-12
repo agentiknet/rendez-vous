@@ -320,10 +320,14 @@ page:
       {{#isLadder}}
       <div class="eyebrow">{{eyebrow}}</div>
       <h1>{{title}}</h1>
+      <!-- Headers come from `ladderHead` (5 strings) so one table layout can
+           carry more than one kind of five-column slide. The row fields keep
+           their original names — `tier` is the first, accent-styled cell,
+           then `surface`, `sends`, `receives`, `latency` in column order. -->
       <table class="ladder">
         <thead>
           <tr>
-            <th>Tier</th><th>Surface</th><th>Sends</th><th>Receives</th><th>Latency</th>
+            {{#ladderHead}}<th>{{.}}</th>{{/ladderHead}}
           </tr>
         </thead>
         <tbody>
