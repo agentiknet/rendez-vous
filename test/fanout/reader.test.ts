@@ -302,6 +302,38 @@ test("a reader keeps retrying with backoff when isAlive still reports the sessio
   await fanout.stopAll()
 })
 
+test("a whisper reaches only its target with the private prefix; other members get a marker, the web member gets nothing pushed", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const alice = await store.addMember(room.code, memberInput("Alice", "messenger", "+1"))
+  const bob = await store.addMember(room.code, memberInput("Bob", "messenger", "+2"))
+  await store.addMember(room.code, memberInput("Chloe", "room-web", "chloe@x.test"))
+  await store.update(room.code, { sessionId: "sess-1" })
+
+  const source = new FakeSource()
+  const transport = new FakeTransport()
+  const fanout = new RoomFanout({ store, transport, source: source.read() })
+
+  const reply = ["Hi both.", "[[whisper to Alice]]", "reconciled it your way", "[[/whisper]]", "done."].join("\n")
+  source.push({ seq: 1, kind: "text-delta", text: reply })
+  source.push({ seq: 2, kind: "turn-end" })
+
+  fanout.start(room.code)
+
+  // Only the two messenger members get pushed at all; room-web is skipped by
+  // renderForTier regardless (its transcript comes from the raw daemon
+  // stream directly — src/web/page.ts renders the whisper marker itself).
+  await waitFor(() => transport.sends.length === 2)
+
+  const toAlice = transport.sends.find((send) => send.memberId === alice.id)
+  const toBob = transport.sends.find((send) => send.memberId === bob.id)
+  assert.equal(toAlice?.text, "Hi both.\n(private) reconciled it your way\ndone.")
+  assert.equal(toBob?.text, "Hi both.\n(the agent whispered to Alice)\ndone.")
+
+  await fanout.stopAll()
+})
+
 test("artifact url is not repeated on a later flush when it has not changed", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)

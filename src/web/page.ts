@@ -100,10 +100,85 @@ function script(code: string, room: Room): string {
       artifactPlaceholder.style.display = "none";
     }
 
+    let currentMembers = INITIAL_ROOM.members;
     function renderRoster(members) {
+      currentMembers = members;
       rosterEl.textContent = members.length === 0
         ? "No one here yet."
         : members.map((m) => m.displayName + " (" + m.tier + ")").join(", ");
+    }
+
+    function findMemberByName(name) {
+      const needle = name.trim().toLowerCase();
+      return currentMembers.find(function (m) { return m.displayName.toLowerCase() === needle; });
+    }
+
+    // Same convention the service's fan-out understands (src/fanout/whisper.ts):
+    // a "[[whisper to <name>]]" / "[[/whisper]]" pair, each delimiter on its
+    // own line. This page reads the raw daemon transcript directly, so it does
+    // its own parsing rather than the already-resolved per-member text the
+    // fan-out sends to messenger/email members.
+    function parseWhisperBlocks(text) {
+      const lines = text.split("\\n");
+      const segments = [];
+      let broadcastLines = [];
+      let i = 0;
+      function flush() {
+        const joined = broadcastLines.join("\\n");
+        if (joined.length > 0) segments.push({ kind: "broadcast", text: joined });
+        broadcastLines = [];
+      }
+      while (i < lines.length) {
+        const line = lines[i];
+        const open = /^\\[\\[whisper to (.+)\\]\\]$/.exec(line.trim());
+        if (!open) {
+          broadcastLines.push(line);
+          i += 1;
+          continue;
+        }
+        let closeIndex = -1;
+        for (let j = i + 1; j < lines.length; j++) {
+          if (/^\\[\\[\\/whisper\\]\\]$/.test(lines[j].trim())) { closeIndex = j; break; }
+        }
+        if (closeIndex === -1) {
+          broadcastLines = broadcastLines.concat(lines.slice(i));
+          break;
+        }
+        flush();
+        segments.push({ kind: "whisper", targetName: open[1].trim(), text: lines.slice(i + 1, closeIndex).join("\\n") });
+        i = closeIndex + 1;
+      }
+      flush();
+      return segments;
+    }
+
+    function renderTurnBody(turn) {
+      turn.textEl.innerHTML = "";
+      parseWhisperBlocks(turn.raw).forEach(function (segment) {
+        if (segment.kind === "broadcast") {
+          if (segment.text.length === 0) return;
+          const span = document.createElement("span");
+          span.textContent = segment.text;
+          turn.textEl.appendChild(span);
+          return;
+        }
+        const target = findMemberByName(segment.targetName);
+        const marker = document.createElement("div");
+        marker.className = "whisper-marker";
+        marker.textContent = "whispered to " + (target ? target.displayName : segment.targetName);
+        turn.textEl.appendChild(marker);
+
+        const details = document.createElement("details");
+        details.className = "whisper-toggle";
+        const summary = document.createElement("summary");
+        summary.textContent = "private, visible here because the web room has no member auth yet";
+        const content = document.createElement("div");
+        content.className = "whisper-content";
+        content.textContent = segment.text;
+        details.appendChild(summary);
+        details.appendChild(content);
+        turn.textEl.appendChild(details);
+      });
     }
 
     async function refreshRoom() {

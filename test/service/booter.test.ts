@@ -35,6 +35,16 @@ test("openingPrompt has no artifact path when called with no appDir (LocalBooter
   assert.ok(!prompt.includes(".agentproto/ui/index.html"), "LocalBooter has no artifact to point at")
 })
 
+test("openingPrompt explains the whisper syntax and its visibility rule", () => {
+  const prompt = openingPrompt(fakeRoom("RDV-7F3K"))
+  assert.ok(prompt.includes("[[whisper to"), "should mention the opening delimiter")
+  assert.ok(prompt.includes("[[/whisper]]"), "should mention the closing delimiter")
+  assert.ok(
+    prompt.includes("but not what you said"),
+    "should tell the agent that a whisper is visible as an event but not its content",
+  )
+})
+
 test("openingPrompt with an appDir (e2b) names the exact served-page path to edit", () => {
   const prompt = openingPrompt(fakeRoom("RDV-7F3K"), { appDir: "/home/user/apps/rdv-hello" })
   assert.ok(

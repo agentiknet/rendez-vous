@@ -58,6 +58,16 @@ test("email always includes the artifact link when present, regardless of artifa
   assert.equal(changed?.text, "Room update\n\nthe body\n\nhttps://x.test")
 })
 
+test("messenger renders an already-resolved whisper marker line like any other text", () => {
+  const message = renderForTier("messenger", "broadcast part\n(the agent whispered to Alice)", undefined, false)
+  assert.equal(message?.text, "broadcast part\n(the agent whispered to Alice)")
+})
+
+test("email renders an already-resolved private whisper body inside the digest", () => {
+  const message = renderForTier("email", "(private) the actual private text", undefined, false)
+  assert.equal(message?.text, "Room update\n\n(private) the actual private text")
+})
+
 test("email omits the artifact link when there is no url", () => {
   const message = renderForTier("email", "the body", undefined, true)
   assert.equal(message?.text, "Room update\n\nthe body")

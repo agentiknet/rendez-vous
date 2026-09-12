@@ -1,6 +1,7 @@
 import type { RoomStore } from "../rooms/store.ts"
 import { renderForTier } from "./render.ts"
 import type { FanoutRecord, Transport } from "./types.ts"
+import { renderWhisperForMember, resolveWhisperSegments } from "./whisper.ts"
 
 const INITIAL_BACKOFF_MS = 250
 const MAX_BACKOFF_MS = 5000
@@ -130,9 +131,17 @@ export class RoomFanout {
     const artifactChanged = hasSeenArtifact ? previousArtifactUrl !== room.artifactUrl : room.artifactUrl !== undefined
     this.lastArtifactUrl.set(code, room.artifactUrl)
 
+    // A whisper is a convention in the agent's own text, not a separate
+    // record kind (the box has no tool access to target a member directly —
+    // see architecture.md §9.3). Resolve it once per flush, then render each
+    // member's own view of the same turn: broadcast text verbatim, their own
+    // whisper in full, everyone else's collapsed to a visible marker.
+    const segments = resolveWhisperSegments(text, room.members)
+
     await Promise.allSettled(
       room.members.map(async (member) => {
-        const message = renderForTier(member.tier, text, room.artifactUrl, artifactChanged)
+        const memberText = renderWhisperForMember(segments, member)
+        const message = renderForTier(member.tier, memberText, room.artifactUrl, artifactChanged)
         if (message === undefined) return
         await this.transport.send(member, message)
       }),

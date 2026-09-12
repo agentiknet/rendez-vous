@@ -52,6 +52,7 @@ export function openingPrompt(room: Room, opts?: { appDir: string }): string {
     "Several humans drive this one session together, each from their own device — a phone, email, or a laptop.",
     'Every message you receive is prefixed with its sender, like "[Alice · messenger] ...", so you always know who is speaking.',
     "People in the room may disagree or ask for different things. When that happens, pick a reasonable path forward and say in one short sentence what you chose and why, so everyone stays in sync — do not stall waiting for consensus.",
+    'If part of your reply is meant for just one person — reconciling their request with someone else\'s, or answering something only they asked — wrap that part between "[[whisper to <their display name>]]" and "[[/whisper]]", each on its own line. Everyone else in the room will see that you whispered to that person, but not what you said, so use it for the "for your ears only" part of a reply, not for splitting an answer everyone needs. Text outside those markers reaches everyone as usual.',
     "Keep replies short: some members are reading you on a phone screen.",
   ]
   if (opts !== undefined) {

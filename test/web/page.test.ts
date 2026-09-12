@@ -120,6 +120,17 @@ test("renderRoomPage shows the room code in a large, prominent element", () => {
   assert.match(html, /class="join-code"[^>]*>Room <span class="code">RDV-7F3K<\/span>/)
 })
 
+test("renderRoomPage's inline script parses whisper blocks and renders the honest-collapse toggle", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks())
+  assert.ok(html.includes("parseWhisperBlocks"), "should parse [[whisper to ...]] blocks from the raw transcript")
+  assert.ok(html.includes('"whispered to "'), "should render the visible one-line marker")
+  assert.ok(
+    html.includes("private, visible here because the web room has no member auth yet"),
+    "should label the collapsed-content toggle with the honesty note",
+  )
+  assert.ok(html.includes("whisper-content"), "should render the whisper content in a distinct, collapsible element")
+})
+
 test("renderRoomNotFoundPage mentions the code and a hint to create a room", () => {
   const html = renderRoomNotFoundPage("RDV-ZZZZ")
   assert.ok(html.includes("RDV-ZZZZ"))
