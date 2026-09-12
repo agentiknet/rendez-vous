@@ -91,14 +91,15 @@
   {
     "type": "code",
     "isCode": true,
-    "eyebrow": "Phase 2",
-    "title": "Second brain is a parameter",
+    "eyebrow": "Phase 2 — tested, corrected",
+    "title": "The swap needs a login first",
     "bullets": [
-      "Same box. Same filesystem. Same public artifact URL.",
-      "19 installed adapters, all ACP, verified via adapter_list."
+      "Tested live: the boot failed at the auth gate, before the adapter swap could even be observed.",
+      "installAdapters installs the codex binary — not a login. Nothing is sent to a box automatically."
     ],
-    "code": "agent_start({\n  adapter: \"codex\",\n  model:   \"gpt-5.2-codex\",\n  sandbox: { provider: \"e2b\" },\n  appServe: { dir: \"...\", port: 3210 },\n})",
-    "caption": "Pending the codex proof — not yet run live.",
+    "code": "agent_start({ adapter: \"codex\", model: \"gpt-5.2-codex\", ... })\n\n→ 500 sandbox_proxy_failed\n   \"no codex login found — run `codex login`\"\n\nbox destroyed on failure — boots used: 1 of 1",
+    "highlight": "Same box, same seed, same port with a different CLI is plausible from source, but unobserved. The real second-brain work is the credential model (§9.3, device-auth) — not the adapter swap.",
+    "caption": "docs/CODEX-FLIP.md — variant A only; B and C untested (1-boot budget).",
     "page": "8 / 12"
   },
   {

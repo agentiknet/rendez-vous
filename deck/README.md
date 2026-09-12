@@ -28,9 +28,12 @@ node /Volumes/SSDExternalMacStudio/Code/products/agentik/agentik-studio/projects
 
 ## Notes on content sourcing
 
-- Slide 8 ("Second brain is a parameter") is marked pending on-slide —
-  `docs/CODEX-FLIP.md` does not exist yet. If it lands, replace the slide's
-  caption with its verdict verbatim and drop the "pending" framing.
+- Slide 8 ("The swap needs a login first") reflects `docs/CODEX-FLIP.md`'s
+  verdict: the one-parameter claim does not hold as stated — a fresh box
+  has no codex credentials, `installAdapters` installs the binary not the
+  login, and the tested boot failed at the auth gate before the mechanical
+  swap could be observed. Framed as the credential model (§9.3,
+  device-auth) being the real second-brain work, not the adapter swap.
 - Slide 10's "responder double reply" risk is sourced from
   `docs/AGENTPUSH.md` ("Do not pin a route to a bot account" — routes
   evaluate independently, not first-match-wins) and `docs/WORKSPACE-OPTION.md`

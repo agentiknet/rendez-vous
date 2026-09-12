@@ -63,34 +63,36 @@ code. Our position: each member attaches their own tools over rendezvous
 — nothing inherited. Revocation is an unpair, not a key rotation, because
 there was never a shared secret to rotate."
 
-## 2:14 — Slide 8: Second brain is a parameter
+## 2:14 — Slide 8: The swap needs a login first
 
-"Same box, same filesystem, same public artifact URL — swap one parameter
-and the brain changes. Nineteen adapters are already installed, all
-speaking the same protocol. This is pending the codex proof — the next
-thing we ship, not a claim we're making today."
+"We tested this live, and the one-parameter claim doesn't hold as stated.
+A fresh box has no codex credentials — installAdapters installs the
+binary, not the login — so the boot failed at the auth gate before the
+swap itself could even run. The mechanical part, same box, same seed, same
+port, a different CLI, is plausible from the source, but unobserved. The
+real second-brain work is the credential model — device-auth — not the
+adapter swap."
 
-## 2:28 — Slide 9: Built on our own runtime
+## 2:38 — Slide 9: Built on our own runtime
 
 "Rendez-vous runs on our own open-source runtime, unmodified, from npm —
-no fork, no vendored copy. The room layer on top is every line that's new,
-the judged artifact. Along the way we found eight bugs in our own runtime
-and wrote them up for our own maintainers."
+no fork, no vendored copy. The room layer is every line that's new — the
+judged artifact. We also found eight bugs in our own runtime and wrote
+them up for our own maintainers."
 
-## 2:42 — Slide 10: Honest limits
+## 2:52 — Slide 10: Honest limits
 
 "Two rehearsals were simulated — no phone, no real workspace. Run three
 was real: Telegram and web, live. Paused sandboxes expire in twenty to
 sixty minutes, and tonight that happened live too — a box expired
 mid-rehearsal and the room kept advertising its dead artifact link,
 exactly as predicted. That fix, and resume-after-kill, are fixed after
-this rehearsal but not yet re-proved live; a room-scoped proxied artifact
-URL is now being built to close that gap for good. We also share an
-existing workspace's Telegram routing, so its catch-all route can fire
-alongside ours, risking a double reply. WhatsApp was never provisioned,
-and the phase-two credential pairing is designed but untested."
+this rehearsal but not yet re-proved live. We also share an existing
+workspace's Telegram routing, so its catch-all route can fire alongside
+ours, risking a double reply. WhatsApp was never provisioned, and the
+phase-two credential pairing is designed but untested."
 
-## 3:17 — Slide 11: The deliverable flow
+## 3:21 — Slide 11: The deliverable flow
 
 "One more thing, because it's the sharpest test of what a room can
 actually do. In the room, Jeremy asks for a presentation, reviews it live
@@ -104,7 +106,7 @@ produce a work product that leaves it, and that confirmation gate is a
 room with a notion of authority, not just relay. This is being built, not
 yet observed."
 
-## 3:58 — Slide 12: Close
+## 4:03 — Slide 12: Close
 
 "The room is the primitive. The runtime is a detail."
 
@@ -125,7 +127,7 @@ yet observed."
 | 9 | Back to the run summary | Slide 5 | — |
 | 10 | The silent-failure argument | Slide 6 | — |
 | 11 | Credentials position | Slide 7 | — |
-| 12 | Second-brain parameter | Slide 8 | — |
+| 12 | Second brain: credential, not swap | Slide 8 | — |
 | 13 | Runtime honesty | Slide 9 | — |
 | 14 | Limits, unvarnished | Slide 10 | — |
 | 15 | Deliverable flow — ask for the PDF | Live screen | Telegram thread (phone) |
