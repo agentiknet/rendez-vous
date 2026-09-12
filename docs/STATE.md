@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 03:12 UTC (05:12 local). Repo: this directory,
+Last updated: 2026-09-12 03:16 UTC (05:16 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -139,11 +139,12 @@ Last updated: 2026-09-12 03:12 UTC (05:12 local). Repo: this directory,
 6. Middleman (agent solicits from each member, asks recorded in the room,
    never stalls) — SPEC DONE (`25f453b`, `docs/MIDDLEMAN.md`, architecture
    §2.5); build after item 3.
-7. Multimodal — SPEC DONE (`docs/MULTIMODAL.md`); INGRESS IMPLEMENTATION IN
-   PROGRESS (executor rdv-multimodal-ingress, `sess_b3541f0a`, GLM): media
-   becomes text plus a stored media ref before enqueue, null STT/vision
-   providers tonight. Middleman BUILD starts once rdv-box-liveness releases
-   room-service.ts.
+7. Multimodal — SPEC DONE (`docs/MULTIMODAL.md`); INGRESS DONE (`b769180`):
+   inbound voice and images become text plus a stored media ref before enqueue,
+   attribution `[Name · channel · voice|image]`, served by `GET /r/:code/media/:id`;
+   STT and vision providers are null tonight (unavailable lines carry the media
+   ref); real providers plug in via env later. Middleman BUILD starts once
+   rdv-box-liveness releases room-service.ts.
 8. Deck — REBUILT as a pitch at `dbf938b` (13 pages: 9-slide arc problem /
    consequence / solution / it works / how / per-member credentials / work
    leaves the room / close, plus a 4-slide appendix). Both kits in `deck/out/`.
@@ -188,9 +189,6 @@ re-proven on a phone after `4e73786`.
   artifactReady gates in `src/fanout/reader.ts` and the http.ts sanitize helper; owns deliverable.ts, rooms types/store, fanout/reader.ts.
 - `sess_0f657dd5` rdv-room-page, GLM: `src/web/**`, the `GET /r/:code/state` route only in
   `src/service/http.ts`, one helper in `daemon-extra.ts` if needed, `test/web/**`, `test/service/http.test.ts`.
-- `sess_b3541f0a` rdv-multimodal-ingress, GLM: `src/channels/media-ingress.ts`, channel
-  inbound parsers, the two webhook handlers and media route in `http.ts`, `media-store.ts`,
-  additive `src/env.ts`, their tests, the status section of `docs/MULTIMODAL.md`.
 - `sess_9726365f` rdv-box-liveness, sonnet: `src/service/box-liveness.ts`,
   `room-service.ts`, `booter.ts`, `src/sandbox/boot.ts`, their tests, one
   RUNBOOK section. Fenced from fanout, web, http.ts, artifact-proxy, deliverable.
