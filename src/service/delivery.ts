@@ -131,7 +131,7 @@ export class DeliveryEngine {
   /** Per-room serialization for drains (same shape as `RoomService`'s
    *  `withRoomLock`): a background drain kicked by `accept` and a caller's
    *  explicit `drain` must never attempt the same record concurrently —
-   *  two readers of the same `attempts` counter would lose an increment
+   *  two readers of the same `failures` counter would lose an increment
    *  and could double-send. Each slot holds only the tail of that room's
    *  own chain. */
   private readonly locks = new Map<string, Promise<void>>()
@@ -182,7 +182,7 @@ export class DeliveryEngine {
         kind,
         text,
         status: "pending",
-        attempts: 0,
+        failures: 0,
         lastError: undefined,
         createdAt: now,
         deliveredAt: undefined,
@@ -231,7 +231,7 @@ export class DeliveryEngine {
     const room = this.store.get(code)
     if (room === undefined) return
     const pending = (room.deliveries ?? []).filter(
-      (delivery) => delivery.status === "pending" && delivery.attempts < MAX_DELIVERY_ATTEMPTS,
+      (delivery) => delivery.status === "pending" && delivery.failures < MAX_DELIVERY_ATTEMPTS,
     )
     for (const delivery of pending) {
       await this.attempt(code, delivery)
@@ -239,7 +239,7 @@ export class DeliveryEngine {
   }
 
   /** One delivery to one member. A member who left between acceptance and
-   *  drain is an ordinary failure (attempts + 1, retry, then `failed`) —
+   *  drain is an ordinary failure (failures + 1, retry, then `failed`) —
    *  their text is never broadcast to anyone else. */
   private async attempt(code: string, delivery: Delivery): Promise<void> {
     const room = this.store.get(code)
@@ -252,14 +252,22 @@ export class DeliveryEngine {
     } else {
       const message = this.renderFor(code, delivery, member)
       if (message === undefined) {
-        // The room-web tier gets nothing over the transport (render.ts) —
-        // the shared screen already saw the tool call. Nothing left to do.
+        // The pull tier gets nothing over the transport (render.ts) — the
+        // record sits in the outbox where the member drains it. It is
+        // delivered-and-unconfirmed: no `confirmedBy`, because an SSE flush
+        // proves sending, not receipt (PLAN-02 §3-D2, amendment F8).
         await this.mark(code, delivery.id, { status: "delivered", deliveredAt: this.now() })
         return
       }
       try {
         await withTimeout(this.transport.send(member, message), this.sendTimeoutMs)
-        await this.mark(code, delivery.id, { status: "delivered", deliveredAt: this.now() })
+        // A push hand-off the provider accepted is confirmed by the
+        // transport — the only confirmation that exists today (D2/F8).
+        await this.mark(code, delivery.id, {
+          status: "delivered",
+          deliveredAt: this.now(),
+          confirmedBy: "transport",
+        })
         if (delivery.kind === "whisper") {
           await this.announceWhisper(code, member)
         }
@@ -269,14 +277,14 @@ export class DeliveryEngine {
       }
     }
 
-    const attempts = delivery.attempts + 1
-    const failed = attempts >= MAX_DELIVERY_ATTEMPTS
+    const failures = delivery.failures + 1
+    const failed = failures >= MAX_DELIVERY_ATTEMPTS
     await this.mark(code, delivery.id, {
-      attempts,
+      failures,
       status: failed ? "failed" : "pending",
       lastError,
     })
-    if (failed) await this.reportFinalFailure(code, delivery, attempts, lastError)
+    if (failed) await this.reportFinalFailure(code, delivery, failures, lastError)
   }
 
   /** The content-free notice every OTHER member sees once a whisper has
@@ -329,7 +337,7 @@ export class DeliveryEngine {
   private async mark(
     code: string,
     deliveryId: string,
-    patch: Partial<Pick<Delivery, "status" | "attempts" | "lastError" | "deliveredAt">>,
+    patch: Partial<Pick<Delivery, "status" | "failures" | "confirmedBy" | "lastError" | "deliveredAt">>,
   ): Promise<void> {
     const room = this.store.get(code)
     if (room === undefined) return
@@ -363,14 +371,14 @@ export class DeliveryEngine {
   private async reportFinalFailure(
     code: string,
     delivery: Delivery,
-    attempts: number,
+    failures: number,
     lastError: string | undefined,
   ): Promise<void> {
     const report = this.reportFailure
     if (report === undefined) return
     const correction =
       `[system · delivery] A ${delivery.kind} message you sent did NOT reach member ${delivery.memberId}: ` +
-      `the transport failed ${attempts} times (last error: ${lastError ?? "unknown"}). ` +
+      `the transport failed ${failures} times (last error: ${lastError ?? "unknown"}). ` +
       `Re-read the roster — the member may have left — and send it again if it still matters.`
     try {
       await report(code, correction)

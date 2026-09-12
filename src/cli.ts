@@ -16,7 +16,7 @@ function buildTransport(): { transport: Transport; description: string } {
   const email = new EmailTransport({ baseUrl: env.agentpushUrl, apiKey: env.agentpushKey })
   return {
     transport: new CompositeTransport(agentpush, new ConsoleTransport(), email),
-    description: "agentpush (whatsapp/telegram/sms) + email + console fallback",
+    description: "agentpush (whatsapp/telegram/sms) + email; pull members drain their outbox",
   }
 }
 

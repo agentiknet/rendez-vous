@@ -62,6 +62,21 @@ export function roomAudienceToken(code: string, secret: string): string {
   return createHmac("sha256", secret).update(`audience:${code}`).digest("hex").slice(0, 40)
 }
 
+/** The per-member bearer token for `GET /rooms/:code/outbox` (PLAN-02
+ *  §3-D3), same family as `roomAudienceToken` above and `roomRenderToken`:
+ *  HMAC over the room's `roomTokenSecret`, 40 hex chars, deterministic in
+ *  the secret so it is recomputed per request — never stored, never
+ *  handed to the agent. `memberId`s are public within the room (the roster
+ *  hands them to the agent), so they can never authorize anything; this
+ *  token can.
+ *
+ *  Revocation is per room only (rotating the room's secret), and identity is
+ *  a display name typed into a public page — the impersonation risk D3
+ *  records and does not solve. */
+export function memberToken(code: string, memberId: string, secret: string): string {
+  return createHmac("sha256", secret).update(`member:${code}:${memberId}`).digest("hex").slice(0, 40)
+}
+
 /**
  * The token rides in BOTH the `authorization` header and a `?t=` query
  * parameter, and the endpoint accepts either.
@@ -176,13 +191,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-function bearerOf(authorization: string | undefined): string | undefined {
+export function bearerOf(authorization: string | undefined): string | undefined {
   if (authorization === undefined) return undefined
   const match = /^Bearer\s+(.+)$/i.exec(authorization.trim())
   return match?.[1]?.trim() ?? undefined
 }
 
-function tokensMatch(a: string, b: string): boolean {
+/** Constant-time comparison, shared with the outbox endpoint (http.ts). */
+export function tokensMatch(a: string, b: string): boolean {
   const bufA = Buffer.from(a, "utf8")
   const bufB = Buffer.from(b, "utf8")
   return bufA.length === bufB.length && timingSafeEqual(bufA, bufB)

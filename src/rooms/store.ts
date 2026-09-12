@@ -2,7 +2,20 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { generateCode, normalizeCode } from "./code.ts"
-import type { Address, Ask, AskStatus, Delivery, DeliveryTarget, Member, PendingDelivery, Room, RoomState, Tier } from "./types.ts"
+import {
+  deliveryFromAddress,
+  type Address,
+  type Ask,
+  type AskStatus,
+  type Delivery,
+  type DeliveryTarget,
+  type Member,
+  type MemberDelivery,
+  type PendingDelivery,
+  type Room,
+  type RoomState,
+  type Tier,
+} from "./types.ts"
 
 interface RoomFile {
   rooms: Room[]
@@ -40,14 +53,26 @@ function isTier(value: unknown): value is Tier {
   return typeof value === "string" && (TIERS as readonly string[]).includes(value)
 }
 
-function isObject(value: unknown): value is object {
-  return typeof value === "object" && value !== null
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 function isAddress(value: unknown): value is Address {
   if (!isObject(value)) return false
   if (!("provider" in value) || !("source" in value) || !("contactRef" in value)) return false
   return isString(value.provider) && isString(value.source) && isString(value.contactRef)
+}
+
+function isMemberDelivery(value: unknown): value is MemberDelivery {
+  if (!isObject(value)) return false
+  if (value.mode === "pull") return true
+  if (value.mode !== "push") return false
+  if (!("provider" in value) || !isString(value.provider)) return false
+  if (value.provider === "telegram" || value.provider === "whatsapp" || value.provider === "sms") {
+    return "contactRef" in value && isString(value.contactRef)
+  }
+  if (value.provider === "email") return "address" in value && isString(value.address)
+  return value.provider === "console"
 }
 
 function isMember(value: unknown): value is Member {
@@ -61,11 +86,15 @@ function isMember(value: unknown): value is Member {
   ) {
     return false
   }
+  // `delivery` is optional: members persisted before the field round-trip
+  // without the key (same rule as lastError/deliveredAt on a Delivery).
+  const delivery = "delivery" in value ? value.delivery : undefined
   return (
     isString(value.id) &&
     isString(value.displayName) &&
     isTier(value.tier) &&
     isAddress(value.address) &&
+    (delivery === undefined || isMemberDelivery(delivery)) &&
     isString(value.joinedAt)
   )
 }
@@ -148,11 +177,16 @@ function isDelivery(value: unknown): value is Delivery {
     !("kind" in value) ||
     !("text" in value) ||
     !("status" in value) ||
-    !("attempts" in value) ||
     !("createdAt" in value)
   ) {
     return false
   }
+  // `failures` (renamed from `attempts`, PLAN-02 §3-D2) is accepted under
+  // either name here because validation runs BEFORE the read-time migration
+  // in `open()` has renamed it; `confirmedBy` is optional (see isMember).
+  const failures = "failures" in value ? value.failures : undefined
+  const legacyFailureCount = "attempts" in value ? value.attempts : undefined
+  const confirmedBy = "confirmedBy" in value ? value.confirmedBy : undefined
   // lastError/deliveredAt are optional: JSON.stringify drops undefined values,
   // so a persisted delivery round-trips with those keys absent (same rule as
   // `isAsk` above).
@@ -164,11 +198,63 @@ function isDelivery(value: unknown): value is Delivery {
     (value.kind === "say" || value.kind === "whisper") &&
     isString(value.text) &&
     isDeliveryStatus(value.status) &&
-    typeof value.attempts === "number" &&
+    ((typeof failures === "number" && failures >= 0) ||
+      (failures === undefined && typeof legacyFailureCount === "number" && legacyFailureCount >= 0)) &&
+    (confirmedBy === undefined || confirmedBy === "transport" || confirmedBy === "recipient") &&
     isStringOrUndefined(lastError) &&
     isString(value.createdAt) &&
     isStringOrUndefined(deliveredAt)
   )
+}
+
+/** The pre-rename failure count key, read off the raw record. */
+function legacyAttempts(record: object): unknown {
+  return "attempts" in record ? record.attempts : undefined
+}
+
+/** Read-time migration for one room (PLAN-02 §3-D1/D2): members persisted
+ *  before `Member.delivery` existed get it derived from their address, and a
+ *  delivery still carrying the pre-rename `attempts` key gets it mapped to
+ *  `failures`. In-memory only: nothing is rewritten to disk here — the room
+ *  is migrated again on its next persist. Runs before `isRoom` validation,
+ *  so the migrated shape is re-validated wholesale. */
+function migrateRoomRaw(room: unknown): unknown {
+  if (!isObject(room) || !Array.isArray(room.members)) return room
+  return {
+    ...room,
+    members: room.members.map((member: unknown) => {
+      if (!isObject(member)) return member
+      const existing = "delivery" in member ? member.delivery : undefined
+      if (existing !== undefined || !isObject(member.address) || !isAddress(member.address)) return member
+      const address = member.address
+      try {
+        return { ...member, delivery: deliveryFromAddress(address) }
+      } catch {
+        // An address with no delivery mode stays unmigrated — `isMember` then
+        // accepts the member (no `delivery` key) and the routing layer throws
+        // the loud "unrouted" error when someone tries to send to them, which
+        // is exactly where the failure belongs.
+        return member
+      }
+    }),
+    deliveries: Array.isArray(room.deliveries)
+      ? room.deliveries.map((delivery: unknown) => {
+          if (!isObject(delivery)) return delivery
+          if ("failures" in delivery) return delivery
+          const attempts = legacyAttempts(delivery)
+          if (typeof attempts !== "number") return delivery
+          const { attempts: _dropped, ...rest } = delivery
+          void _dropped
+          return { ...rest, failures: attempts }
+        })
+      : room.deliveries,
+  }
+}
+
+/** Read-time migration for the whole file. */
+function migrateRoomFile(value: unknown): unknown {
+  if (!isObject(value) || !Array.isArray(value.rooms)) return value
+  return { ...value, rooms: value.rooms.map(migrateRoomRaw) }
 }
 
 // JSON.stringify drops object keys whose value is `undefined`, so a persisted room with an
@@ -269,10 +355,11 @@ export class RoomStore {
         const message = error instanceof Error ? error.message : String(error)
         throw new Error(`corrupt room store at ${filePath}: invalid JSON (${message})`)
       }
-      if (!isRoomFile(parsed)) {
+      const migrated = migrateRoomFile(parsed)
+      if (!isRoomFile(migrated)) {
         throw new Error(`corrupt room store at ${filePath}: unexpected shape`)
       }
-      for (const room of parsed.rooms) {
+      for (const room of migrated.rooms) {
         rooms.set(room.code, room)
       }
     }
@@ -353,6 +440,11 @@ export class RoomStore {
       displayName: input.displayName,
       tier: input.tier,
       address: input.address,
+      // The single construction point for members: every member in memory has
+      // a delivery mode, derived from the address when the caller (whose
+      // `InboundInput` predates the field) did not set one. Throws on a
+      // provider with no delivery mode — loud, per D1.
+      delivery: input.delivery ?? deliveryFromAddress(input.address),
       joinedAt: now,
     }
     room.members.push(member)

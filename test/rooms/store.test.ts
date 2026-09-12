@@ -90,7 +90,7 @@ test("addMember adds distinct members for distinct addresses", async () => {
   await store.addMember(room.code, {
     displayName: "Bob",
     tier: "email",
-    address: { provider: "agentpush", source: "mail", contactRef: "bob@example.com" },
+    address: { provider: "email", source: "agentpush", contactRef: "bob@example.com" },
   })
 
   const stored = store.get(room.code)
@@ -399,6 +399,96 @@ test("open rejects a room whose asks entry is not the right shape", async () => 
   }
   await writeFile(join(dir, "rooms.json"), JSON.stringify({ rooms: [room] }), "utf8")
   await assert.rejects(() => RoomStore.open(dir), /corrupt room store/i)
+})
+
+test("addMember derives the member's delivery from their address", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+
+  const alice = await store.addMember(room.code, aliceInput())
+  assert.deepEqual(alice.delivery, { mode: "push", provider: "whatsapp", contactRef: "+15551234567" })
+
+  const web = await store.addMember(room.code, {
+    displayName: "Chloe",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+  })
+  assert.deepEqual(web.delivery, { mode: "pull" })
+
+  // And it persists.
+  const reopened = await RoomStore.open(dir)
+  const loaded = reopened.get(room.code)
+  assert.deepEqual(loaded?.members[0]?.delivery, { mode: "push", provider: "whatsapp", contactRef: "+15551234567" })
+  assert.deepEqual(loaded?.members[1]?.delivery, { mode: "pull" })
+})
+
+test("addMember throws on an address with no delivery mode — unrouted recipients are loud, not console-written", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  await assert.rejects(
+    () => store.addMember(room.code, {
+      displayName: "Ghost",
+      tier: "messenger",
+      address: { provider: "slack", source: "somewhere", contactRef: "x" },
+    }),
+    /unrouted delivery/,
+  )
+})
+
+test("open migrates a pre-delivery rooms.json: delivery is derived from addresses and attempts is renamed to failures, in memory", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const alice = await store.addMember(room.code, aliceInput())
+  const web = await store.addMember(room.code, {
+    displayName: "Chloe",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+  })
+  await store.update(room.code, {
+    deliveries: [
+      {
+        id: "d1",
+        memberId: alice.id,
+        kind: "whisper",
+        text: "persisted before the rename",
+        status: "delivered",
+        failures: 2,
+        lastError: undefined,
+        createdAt: "2026-09-12T10:00:00.000Z",
+        deliveredAt: "2026-09-12T10:00:01.000Z",
+      },
+    ],
+  })
+
+  // Rewrite the file to its pre-field shape: no `delivery` key on members,
+  // `attempts` instead of `failures` on deliveries.
+  const filePath = join(dir, "rooms.json")
+  const parsed = JSON.parse(await readFile(filePath, "utf8")) as {
+    rooms: { members: Record<string, unknown>[]; deliveries: Record<string, unknown>[] }[]
+  }
+  for (const member of parsed.rooms[0]!.members) delete member.delivery
+  for (const delivery of parsed.rooms[0]!.deliveries) {
+    delivery.attempts = delivery.failures
+    delete delivery.failures
+  }
+  await writeFile(filePath, JSON.stringify(parsed, null, 2), "utf8")
+
+  const reopened = await RoomStore.open(dir)
+  const loaded = reopened.get(room.code)
+  assert.ok(loaded !== undefined)
+  // The alice address derives push; the room-web one derives pull.
+  assert.deepEqual(loaded.members[0]?.delivery, { mode: "push", provider: "whatsapp", contactRef: "+15551234567" })
+  assert.deepEqual(loaded.members[1]?.delivery, { mode: "pull" })
+  assert.equal(loaded.members[0]?.id, alice.id)
+  assert.equal(loaded.members[1]?.id, web.id)
+  // `attempts` came back as `failures`.
+  const record = loaded.deliveries?.[0]
+  assert.ok(record !== undefined)
+  assert.equal(record.failures, 2)
+  assert.ok(!JSON.stringify(record).includes('"attempts"'), "the pre-rename key does not survive the load")
 })
 
 test("writes are atomic: no partial rooms.json is ever left behind", async () => {  const dir = trackDir(await freshDir())

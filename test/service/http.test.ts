@@ -6,9 +6,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, test } from "node:test"
 import { DaemonClient } from "../../src/daemon/client.ts"
+import { env } from "../../src/env.ts"
+import type { Delivery, Member } from "../../src/rooms/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import { LocalBooter, type SessionBooter } from "../../src/service/booter.ts"
 import { createHttpServer } from "../../src/service/http.ts"
+import { memberToken } from "../../src/service/mcp-room.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
@@ -643,4 +646,180 @@ test("GET /r/:code for a paused room shows the paused pill, the paused artifact 
   assert.ok(html.includes("artifact paused, the link will come back when the room wakes"))
   assert.ok(!html.includes(`/r/${code}/artifact/`), "no dead artifact link is rendered at all")
   assert.match(html, /id="artifact-frame"[^>]*style="display:none"/)
+})
+
+
+// --- GET /rooms/:code/outbox (PLAN-02 step 2: the D3 member token, D4
+// --- server-side per-member scoping, and the D6 pruned gap marker) --------
+
+async function outboxHarness(): Promise<{
+  store: RoomStore
+  baseUrl: string
+  code: string
+  alice: Member
+  bob: Member
+}> {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport: new MemoryTransport(),
+    daemon: { baseUrl: daemon.url, token: undefined },
+  })
+  services.push(service)
+
+  const room = await store.create()
+  const alice = await store.addMember(room.code, {
+    displayName: "Chloe",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+  })
+  const bob = await store.addMember(room.code, {
+    displayName: "Bob",
+    tier: "messenger",
+    address: { provider: "telegram", source: "agentpush", contactRef: "700" },
+  })
+  const baseUrl = await listenOnRandomPort(service)
+  return { store, baseUrl, code: room.code, alice, bob }
+}
+
+function outboxDelivery(
+  id: string,
+  memberId: string,
+  text: string,
+  status: Delivery["status"] = "pending",
+): Delivery {
+  return {
+    id,
+    memberId,
+    kind: "say",
+    text,
+    status,
+    failures: 0,
+    lastError: undefined,
+    createdAt: "2026-09-12T10:00:00.000Z",
+    ...(status === "delivered" ? { deliveredAt: "2026-09-12T10:00:01.000Z" } : { deliveredAt: undefined }),
+  }
+}
+
+function aliceHeaders(code: string, alice: Member): { authorization: string } {
+  return { authorization: `Bearer ${memberToken(code, alice.id, env.roomTokenSecret)}` }
+}
+
+test("GET /rooms/:code/outbox refuses a wrong or absent member token, and 404s an unknown room", async () => {
+  const { baseUrl, code, alice } = await outboxHarness()
+
+  const absent = await fetch(`${baseUrl}/rooms/${code}/outbox`)
+  assert.equal(absent.status, 401)
+
+  const wrong = await fetch(`${baseUrl}/rooms/${code}/outbox`, {
+    headers: { authorization: `Bearer ${memberToken(code, alice.id, "wrong-secret")}` },
+  })
+  assert.equal(wrong.status, 401)
+  assert.equal((await readJson(wrong)).error, "unauthorized")
+
+  // A token minted for another room must not resolve here either.
+  const wrongRoom = await fetch(`${baseUrl}/rooms/${code}/outbox`, {
+    headers: { authorization: `Bearer ${memberToken("RDV-OTHER", alice.id, env.roomTokenSecret)}` },
+  })
+  assert.equal(wrongRoom.status, 401)
+
+  const unknown = await fetch(`${baseUrl}/rooms/RDV-ZZZZ/outbox`, { headers: aliceHeaders(code, alice) })
+  assert.equal(unknown.status, 404)
+})
+
+test("GET /rooms/:code/outbox never puts another member's record on the wire (D4, filtered before the bytes leave)", async () => {
+  const { store, baseUrl, code, alice, bob } = await outboxHarness()
+  await store.update(code, {
+    deliverySeq: 2,
+    deliveries: [
+      outboxDelivery("d1", alice.id, "for Chloe's eyes only"),
+      outboxDelivery("d2", bob.id, "for Bob's phone only"),
+    ],
+  })
+
+  const body = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox`, { headers: aliceHeaders(code, alice) }))
+
+  assert.equal(body.memberId, alice.id)
+  const deliveries = isArrayOf(body.deliveries, (v): v is Record<string, unknown> => isRecord(v)) ? body.deliveries : []
+  assert.deepEqual(
+    deliveries.map((record) => record.id),
+    ["d1"],
+  )
+  assert.ok(!JSON.stringify(body).includes("for Bob's phone only"), "member B's record must not be on the wire")
+  assert.equal(body.pruned, false)
+  assert.equal(body.cursor, 2)
+})
+
+test("GET /rooms/:code/outbox answers ?since with exactly the tail, id > since, in order (D7)", async () => {
+  const { store, baseUrl, code, alice } = await outboxHarness()
+  await store.update(code, {
+    deliverySeq: 3,
+    deliveries: [
+      outboxDelivery("d1", alice.id, "one"),
+      outboxDelivery("d2", alice.id, "two", "delivered"),
+      outboxDelivery("d3", alice.id, "three"),
+    ],
+  })
+
+  const omitted = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox`, { headers: aliceHeaders(code, alice) }))
+  const everything = isArrayOf(omitted.deliveries, (v): v is Record<string, unknown> => isRecord(v)) ? omitted.deliveries : []
+  assert.deepEqual(everything.map((record) => record.id), ["d1", "d2", "d3"])
+
+  const sinceTwo = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=2`, { headers: aliceHeaders(code, alice) }))
+  const tail = isArrayOf(sinceTwo.deliveries, (v): v is Record<string, unknown> => isRecord(v)) ? sinceTwo.deliveries : []
+  assert.deepEqual(tail.map((record) => record.id), ["d3"], "since replays exactly the records after it")
+
+  const sinceThree = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=3`, { headers: aliceHeaders(code, alice) }))
+  assert.deepEqual(isArrayOf(sinceThree.deliveries, (v): v is Record<string, unknown> => isRecord(v)) ? sinceThree.deliveries : [], [])
+  assert.equal(sinceThree.pruned, false, "a since at the newest id is 'nothing new', not 'you lost something'")
+})
+
+test("GET /rooms/:code/outbox fires the pruned gap marker when since predates what survived (D6)", async () => {
+  const { store, baseUrl, code, alice, bob } = await outboxHarness()
+  // Alice's d1..d4 were pruned; the oldest retained delivery FOR HER is d5.
+  // Bob's record (d2) still sits in the tail, which must not mask her gap.
+  await store.update(code, {
+    deliverySeq: 5,
+    deliveries: [
+      outboxDelivery("d2", bob.id, "his phone got this one", "delivered"),
+      outboxDelivery("d5", alice.id, "oldest she still has", "delivered"),
+      outboxDelivery("d6", alice.id, "the newest"),
+    ],
+  })
+
+  const sinceTwo = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=2`, { headers: aliceHeaders(code, alice) }))
+  assert.equal(sinceTwo.pruned, true, "her cursor points below what survived — the response must say so")
+  const tail = isArrayOf(sinceTwo.deliveries, (v): v is Record<string, unknown> => isRecord(v)) ? sinceTwo.deliveries : []
+  assert.deepEqual(tail.map((record) => record.id), ["d5", "d6"])
+
+  // At the oldest retained id there is no gap to report.
+  const sinceFive = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=5`, { headers: aliceHeaders(code, alice) }))
+  assert.equal(sinceFive.pruned, false)
+})
+
+test("GET /rooms/:code/outbox answers Accept: text/event-stream with the same records, as a meta frame plus one frame per record", async () => {
+  const { store, baseUrl, code, alice } = await outboxHarness()
+  await store.update(code, {
+    deliverySeq: 2,
+    deliveries: [outboxDelivery("d1", alice.id, "first", "delivered"), outboxDelivery("d2", alice.id, "second")],
+  })
+
+  const res = await fetch(`${baseUrl}/rooms/${code}/outbox`, {
+    headers: { ...aliceHeaders(code, alice), accept: "text/event-stream" },
+  })
+  assert.equal(res.status, 200)
+  assert.match(res.headers.get("content-type") ?? "", /text\/event-stream/)
+
+  const frames = await readSseRecords(res, 3)
+  assert.equal(frames[0]?.id, "d1", "the replay comes first, same records as the JSON reading")
+  assert.equal(frames[1]?.id, "d2")
+  assert.equal(frames[2]?.memberId, alice.id, "the meta frame carries the cursor and the gap marker")
+  assert.equal(frames[2]?.pruned, false)
+  assert.equal(frames[2]?.cursor, 2)
 })

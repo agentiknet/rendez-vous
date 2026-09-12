@@ -67,7 +67,7 @@ async function harness(protocol: "tools" | "markers" | undefined): Promise<Harne
   const bob = await store.addMember(room.code, {
     displayName: "Bob",
     tier: "email",
-    address: { provider: "mail", source: "agentpush", contactRef: "bob@x.test" },
+    address: { provider: "email", source: "agentpush", contactRef: "bob@x.test" },
   })
   await store.update(room.code, {
     sessionId: "sess-1",
@@ -198,7 +198,7 @@ test("a tools room whose agent DID call say (a Delivery record exists) logs no w
         kind: "say",
         text: "delivered via the tool",
         status: "delivered",
-        attempts: 1,
+        failures: 1,
         lastError: undefined,
         createdAt: new Date().toISOString(),
         deliveredAt: new Date().toISOString(),
@@ -235,7 +235,7 @@ test("a tools room at the prune cap: the array length is unchanged but the count
     kind: "say" as const,
     text: "one of many",
     status: "delivered" as const,
-    attempts: 1,
+    failures: 1,
     lastError: undefined,
     createdAt: at,
     deliveredAt: at,

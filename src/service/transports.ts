@@ -1,6 +1,6 @@
 import type { AttachmentKind } from "../fanout/attach.ts"
 import type { OutboundMessage, Transport } from "../fanout/types.ts"
-import type { Member } from "../rooms/types.ts"
+import { deliveryFromAddress, type Member, type MemberDelivery } from "../rooms/types.ts"
 
 /** A file the agent asked to send (`[[attach …]]`, src/fanout/attach.ts),
  *  already addressable at a public, room-keyed URL the provider fetches
@@ -90,29 +90,60 @@ export class MemoryTransport implements MediaTransport {
   }
 }
 
-/** Routes by `member.address.provider`: `whatsapp`/`telegram`/`sms` go to
- *  `messenger` (an `AgentpushTransport` in production), `email` goes to
- *  `email` when one is configured (an `EmailTransport` in production),
- *  everything else (room-web, or `email` with no transport wired) goes to
- *  `fallback`. `sendMedia` delegates to whichever side handled the `send`,
- *  falling back to a caption-only text send when that side doesn't support
- *  media. */
+/** Routes by `member.delivery` (PLAN-02 §3-D1): `telegram`/`whatsapp`/`sms`
+ *  push to `messenger` (an `AgentpushTransport` in production), `email` push
+ *  to `email` when one is configured, `console` push to the explicit console
+ *  target cli.ts wires for local/dev rooms. There is NO fallback arm and no
+ *  `default` branch: a `pull` recipient has no push transport at all — their
+ *  drain is the outbox (`GET /rooms/:code/outbox`) — and a push provider with
+ *  no wired transport throws, so "nobody routed this" can never masquerade as
+ *  "delivered" again. `sendMedia` delegates to whichever side handled the
+ *  `send`, falling back to a caption-only text send when that side doesn't
+ *  support media. */
 export class CompositeTransport implements MediaTransport {
   private readonly messenger: Transport
-  private readonly fallback: Transport
+  private readonly consoleTarget: Transport
   private readonly email: Transport | undefined
 
-  constructor(messenger: Transport, fallback: Transport, email?: Transport) {
+  /** `consoleTarget` is the explicit target of a `console` delivery mode in
+   *  local/dev rooms — never a catch-all: only a member whose delivery (or
+   *  legacy address provider) says `console` reaches it. */
+  constructor(messenger: Transport, consoleTarget: Transport, email?: Transport) {
     this.messenger = messenger
-    this.fallback = fallback
+    this.consoleTarget = consoleTarget
     this.email = email
   }
 
   private routeFor(member: Member): Transport {
-    const provider = member.address.provider
-    if (provider === "whatsapp" || provider === "telegram" || provider === "sms") return this.messenger
-    if (provider === "email" && this.email !== undefined) return this.email
-    return this.fallback
+    const delivery = member.delivery ?? deliveryFromAddress(member.address)
+    switch (delivery.mode) {
+      case "push":
+        return this.routePush(member, delivery)
+      case "pull":
+        // Not a fallback: a pull recipient is drained from their outbox
+        // (GET /rooms/:code/outbox), never pushed. Reaching a push transport
+        // with one is a caller bug, so it fails loudly.
+        throw new Error(`unrouted delivery: member ${member.id} is a pull recipient and has no push transport`)
+    }
+    return unrouted(member, delivery)
+  }
+
+  private routePush(member: Member, delivery: Extract<MemberDelivery, { mode: "push" }>): Transport {
+    switch (delivery.provider) {
+      case "telegram":
+      case "whatsapp":
+      case "sms":
+        return this.messenger
+      case "email": {
+        if (this.email === undefined) {
+          throw new Error(`unrouted delivery: member ${member.id} is push/email but no email transport is wired`)
+        }
+        return this.email
+      }
+      case "console":
+        return this.consoleTarget
+    }
+    return unrouted(member, delivery)
   }
 
   async send(member: Member, message: OutboundMessage): Promise<void> {
@@ -134,8 +165,19 @@ export class CompositeTransport implements MediaTransport {
       await target.sendAttachment(member, attachment)
       return
     }
-    // room-web and any transport with no media concept still get the file —
-    // as its URL, in the transcript. Never a dropped attachment.
+    // Any routed push transport with no attachment concept still gets the
+    // file — as its URL, in the record. Never a dropped attachment. (A pull
+    // recipient never gets here at all: `routeFor` throws for them — their
+    // drain is the outbox.)
     await target.send(member, { text: attachmentFallbackText(attachment), artifactUrl: undefined })
   }
+}
+
+/** The documented exhaustiveness assert (PLAN-02 §3-D1): every arm above
+ *  returns or throws, so both `switch`es leave `delivery` narrowed to
+ *  `never` here — and if a `MemberDelivery` variant is ever added without a
+ *  routing arm, passing it to this `never`-typed parameter fails
+ *  `pnpm check-types`. Unreachable when exhaustive. */
+function unrouted(member: Member, delivery: never): never {
+  throw new Error(`unrouted delivery: member ${member.id} has delivery ${JSON.stringify(delivery)}`)
 }

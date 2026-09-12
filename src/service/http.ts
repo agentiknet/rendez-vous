@@ -15,12 +15,12 @@ import { OpenAiSttProvider, OpenAiVisionProvider } from "../media/openai.ts"
 import type { TranscriptRecord } from "../daemon/records.ts"
 import { env } from "../env.ts"
 import { joinLinks } from "../links/index.ts"
-import type { Room, Tier } from "../rooms/types.ts"
+import type { Room, Tier, Delivery, Member } from "../rooms/types.ts"
 import { renderRoomNotFoundPage, renderRoomPage } from "../web/page.ts"
 import { proxyArtifact, publicArtifactUrl } from "./artifact-proxy.ts"
 import { ArtifactRenderStore } from "./artifact-renders.ts"
 import { createMcpCanvakitHandler, defaultMcpCanvakitDeps, type McpResponse } from "./mcp-canvakit.ts"
-import { createMcpRoomHandler } from "./mcp-room.ts"
+import { bearerOf, createMcpRoomHandler, memberToken, tokensMatch } from "./mcp-room.ts"
 import { getSessionBusy, type DaemonExtraOptions } from "./daemon-extra.ts"
 import type { RoomService } from "./room-service.ts"
 import { MediaStore, type IngressMediaRecord } from "./media-store.ts"
@@ -480,6 +480,155 @@ async function handleRoomSend(
   sendJson(res, 200, outcome.result)
 }
 
+/** How long the outbox SSE drain waits between looks at the room's store for
+ *  records accepted after its replay. The store has no subscription
+ *  mechanism (the session event stream is a different pipe), so the live
+ *  half of the drain is a poll — coarse by design, because `accept` returns
+ *  long before the agent's turn ends. */
+const OUTBOX_POLL_MS = 1000
+
+/** `Delivery.id` → its position in the room's monotonic `deliverySeq`. Ids
+ *  are `d<seq>` (`DeliveryEngine.accept`); a room that predates the counter
+ *  has exactly those ids too. Anything unparseable sorts as 0, so it is
+ *  replayed only when `since` is omitted-and-zero, and never skipped into a
+ *  silently-replayed position. */
+function deliverySeqOf(id: string): number {
+  const match = /^d(\d+)$/.exec(id)
+  return match === null ? 0 : Number.parseInt(match[1] ?? "0", 10)
+}
+
+/** What one outbox response carries. `deliveries` is already scoped to the
+ *  requesting member, server-side, before the bytes leave the process
+ *  (PLAN-02 §3-D4). */
+export interface OutboxPayload {
+  memberId: string
+  /** The room's current `deliverySeq` — the cursor the client's next
+   *  `since` should be one past (D7: at-least-once; dedupe on
+   *  `Delivery.id`). */
+  cursor: number
+  /** The gap marker (PLAN-02 §3-D6): true when the requested `since` is
+   *  below the oldest delivery id still retained FOR THIS MEMBER. `since` is
+   *  answered by filtering survivors, so without this a destroyed backlog is
+   *  indistinguishable from "nothing new". `false` never means "you are up
+   *  to date" — it means nothing observable was lost. Fires only for an
+   *  explicitly presented `since`: omitting it means "give me everything
+   *  retained", which is a request nothing can be lost from. */
+  pruned: boolean
+  deliveries: Delivery[]
+}
+
+function outboxFor(room: Room, member: Member, since: number, sinceGiven: boolean): OutboxPayload {
+  const mine = (room.deliveries ?? []).filter((delivery) => delivery.memberId === member.id)
+  let oldestRetained: number | undefined
+  for (const delivery of mine) {
+    const seq = deliverySeqOf(delivery.id)
+    if (oldestRetained === undefined || seq < oldestRetained) oldestRetained = seq
+  }
+  return {
+    memberId: member.id,
+    cursor: room.deliverySeq ?? 0,
+    pruned: sinceGiven && oldestRetained !== undefined && since < oldestRetained,
+    deliveries: mine.filter((delivery) => deliverySeqOf(delivery.id) > since),
+  }
+}
+
+/** Resolve the member a `memberToken` names: recompute the expected token
+ *  per member of THIS room and compare constant-time (`tokensMatch`), the
+ *  same recompute-and-compose binding the room MCP endpoint uses. The token
+ *  is not reversible, so the room is fixed by the URL and the member by the
+ *  recomputation — a token for member A matches member A and nothing else,
+ *  here or on any other endpoint. */
+function resolveOutboxMember(room: Room, code: string, authorization: string | undefined): Member | undefined {
+  const provided = bearerOf(authorization)
+  if (provided === undefined) return undefined
+  for (const candidate of room.members) {
+    if (tokensMatch(provided, memberToken(code, candidate.id, env.roomTokenSecret))) return candidate
+  }
+  return undefined
+}
+
+/** `GET /rooms/:code/outbox?since=<seq>` (PLAN-02 §3-D3/D4/D6) — one pull
+ *  member's ordered delivery backlog, authorized by that member's
+ *  `memberToken` bearer. Authorization: header ONLY — no `?t=` query arm;
+ *  that workaround is `/mcp/room`'s (PLAN-02 §4.1) and is not to be
+ *  propagated. Answers SSE (`Accept: text/event-stream`) or JSON by the
+ *  same cursor and the same records — two readings of one endpoint. */
+async function handleRoomOutbox(
+  service: RoomService,
+  req: IncomingMessage,
+  res: ServerResponse,
+  encodedCode: string,
+  since: number,
+  sinceGiven: boolean,
+): Promise<void> {
+  const code = decodeURIComponent(encodedCode)
+  const room = service.getRoom(code)
+  if (room === undefined) {
+    sendJson(res, 404, { error: "not_found" })
+    return
+  }
+  const member = resolveOutboxMember(room, code, req.headers.authorization)
+  if (member === undefined) {
+    // A wrong or absent token must reveal nothing — not even the roster.
+    sendJson(res, 401, { error: "unauthorized" })
+    return
+  }
+
+  const wantsSse = (req.headers.accept ?? "").includes("text/event-stream")
+  if (!wantsSse) {
+    const snapshot = service.getRoom(code) ?? room
+    sendJson(res, 200, outboxFor(snapshot, member, since, sinceGiven))
+    return
+  }
+
+  // The SSE reading: replay the same answer as a meta frame plus one frame
+  // per record, then follow the room's outbox for records accepted later.
+  // The client dedupes on `Delivery.id` (D7) — a reconnect repeats records.
+  const controller = new AbortController()
+  req.on("close", () => controller.abort())
+
+  res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache",
+    connection: "keep-alive",
+  })
+  res.flushHeaders()
+
+  try {
+    let lastSent = since
+    const sendFrame = (payload: object, event?: string): void => {
+      res.write(`${event !== undefined ? `event: ${event}\n` : ""}data: ${JSON.stringify(payload)}\n\n`)
+    }
+    const snapshot = service.getRoom(code) ?? room
+    const initial = outboxFor(snapshot, member, since, sinceGiven)
+    for (const delivery of initial.deliveries) {
+      const seq = deliverySeqOf(delivery.id)
+      if (seq > lastSent) lastSent = seq
+      sendFrame(delivery)
+    }
+    sendFrame({ memberId: member.id, cursor: initial.cursor, pruned: initial.pruned }, "meta")
+
+    while (!controller.signal.aborted) {
+      await new Promise<void>((resolve) => setTimeout(resolve, OUTBOX_POLL_MS))
+      if (controller.signal.aborted) break
+      const fresh = service.getRoom(code)
+      if (fresh === undefined) break
+      for (const delivery of (fresh.deliveries ?? []).filter(
+        (delivery) => delivery.memberId === member.id && deliverySeqOf(delivery.id) > lastSent,
+      )) {
+        const seq = deliverySeqOf(delivery.id)
+        if (seq > lastSent) lastSent = seq
+        sendFrame(delivery)
+      }
+    }
+  } catch {
+    // The client disconnected mid-drain — the EventSource reconnects from
+    // its own last-seen `since`; nothing to do here.
+  } finally {
+    res.end()
+  }
+}
+
 /** `GET /r/:code/media/:id` (docs/DELIVERABLE.md) — the link every delivery
  *  preview points at, extended to also serve ingress media records
  *  (docs/MULTIMODAL.md) with their stored mime. An unknown room or media id
@@ -821,6 +970,17 @@ async function handle(
       return
     }
     await handleRoomStream(service, req, res, encodedCode, parseSince(url.searchParams.get("since")))
+    return
+  }
+
+  const outboxMatch = /^\/rooms\/([^/]+)\/outbox$/.exec(url.pathname)
+  if (outboxMatch !== null && req.method === "GET") {
+    const encodedCode = outboxMatch[1]
+    if (encodedCode === undefined) {
+      sendJson(res, 400, { error: "invalid_code" })
+      return
+    }
+    await handleRoomOutbox(service, req, res, encodedCode, parseSince(url.searchParams.get("since")), url.searchParams.has("since"))
     return
   }
 

@@ -6,11 +6,60 @@ export interface Address {
   contactRef: string
 }
 
+/** How one member receives what the room sends them (PLAN-02 §3-D1).
+ *
+ *  The axis is push vs pull: a push recipient has a durable address a third
+ *  party holds (we hand off, they hold); a pull recipient has no address at
+ *  all (we hold — they connect and drain their outbox). Routing is a `switch`
+ *  over this union with NO fallback arm (src/service/transports.ts): a member
+ *  nobody routed is a compile error, never a console write — that fallback is
+ *  what made room-web members silently "delivered" to stdout (PLAN-02 §1).
+ *
+ *  A future `{ mode: "push"; provider: "webhook"; url; secret }` slots in
+ *  here without redesign. Do not add it before something consumes it
+ *  (PLAN-02 §6). */
+export type MemberDelivery =
+  | { readonly mode: "push"; readonly provider: "telegram" | "whatsapp" | "sms"; readonly contactRef: string }
+  | { readonly mode: "push"; readonly provider: "email"; readonly address: string }
+  /** Local/dev rooms only — the explicit target of `ConsoleTransport` in
+   *  cli.ts, never a catch-all: nothing derives this from an unknown
+   *  provider. */
+  | { readonly mode: "push"; readonly provider: "console" }
+  | { readonly mode: "pull" }
+
+/** Derive a member's delivery from their legacy persisted address, for
+ *  members written before `Member.delivery` existed (PLAN-02 §3-D1's
+ *  migration rule). Also the fallback when a `Member` was built by hand
+ *  without the field. Throws on a provider with no delivery mode: the whole
+ *  point of D1 is that an unrouted recipient must be LOUD — deriving a
+ *  catch-all here would be the `default`-branch fault of PLAN-02 §1 again. */
+export function deliveryFromAddress(address: Address): MemberDelivery {
+  switch (address.provider) {
+    case "telegram":
+    case "whatsapp":
+    case "sms":
+      return { mode: "push", provider: address.provider, contactRef: address.contactRef }
+    case "email":
+      return { mode: "push", provider: "email", address: address.contactRef }
+    case "console":
+      return { mode: "push", provider: "console" }
+    case "room-web":
+      return { mode: "pull" }
+  }
+  throw new Error(`unrouted delivery: no delivery mode for provider "${address.provider}"`)
+}
+
 export interface Member {
   id: string
   displayName: string
   tier: Tier
   address: Address
+  /** Optional key, absent on members persisted before the field existed —
+   *  same JSON round-trip rule as `pendingDeliveries` and `asks`. Derived
+   *  from `address` on read (`RoomStore.open`'s migration) and at write time
+   *  (`addMember`), so a member in memory always has one; routing falls back
+   *  to `deliveryFromAddress` only for members built by hand without it. */
+  delivery?: MemberDelivery
   joinedAt: string
 }
 
@@ -80,7 +129,19 @@ export interface Delivery {
   readonly kind: "say" | "whisper"
   readonly text: string
   readonly status: "pending" | "delivered" | "failed"
-  readonly attempts: number
+  /** Failure count, not attempt count: it only moves when a send fails, and
+   *  a delivered record carries `0` (PLAN-02 §3-D2). Renamed from `attempts`
+   *  while the type was open — `attempts` counted failures. */
+  readonly failures: number
+  /** Who confirmed the delivery (PLAN-02 §3-D2). `"transport"` = the push
+   *  provider accepted the hand-off. The union names a `"recipient"` variant
+   *  — the client advanced its cursor past the record — but nothing may set
+   *  it: an SSE flush proves the server SENT, not that anyone received, and
+   *  making `"recipient"` real needs a cursor-acknowledgement write (a POST
+   *  of last-seen-seq) that does not exist yet (PLAN-02 §3-D2 amendment F8).
+   *  Pull deliveries are therefore delivered-and-unconfirmed: `confirmedBy`
+   *  stays absent on them. Absent on records persisted before the field. */
+  readonly confirmedBy?: "transport" | "recipient"
   readonly lastError: string | undefined
   readonly createdAt: string
   readonly deliveredAt: string | undefined

@@ -66,14 +66,14 @@ async function roomWith(): Promise<{
   return { store, code: created.code, alice, bob, screen }
 }
 
-function pendingDelivery(id: string, memberId: string, text: string, attempts = 0): Delivery {
+function pendingDelivery(id: string, memberId: string, text: string, failures = 0): Delivery {
   return {
     id,
     memberId,
     kind: "say",
     text,
     status: "pending",
-    attempts,
+    failures,
     lastError: undefined,
     createdAt: "2026-09-12T10:00:00.000Z",
     deliveredAt: undefined,
@@ -126,7 +126,30 @@ test("say with an explicit `to` list makes no transport call for anyone else", a
   const record = deliveriesOf(store.get(code))[0]
   assert.equal(record?.status, "delivered")
   assert.ok(record?.deliveredAt !== undefined)
+  // A push hand-off the provider accepted is confirmed by the transport —
+  // the only confirmation that ships today (PLAN-02 §3-D2, amendment F8).
+  assert.equal(record?.confirmedBy, "transport")
   void alice
+})
+
+test("a pull member's delivery completes with no transport call and honestly no confirmation (D2/F8)", async () => {
+  const { store, code, screen } = await roomWith()
+  const transport = new FakeTransport()
+  const eng = engine(store, transport)
+
+  await eng.accept(code, "whisper", "the vault code is 44-21", [screen.id])
+  await eng.drain(code)
+
+  const record = deliveriesOf(store.get(code)).find((delivery) => delivery.memberId === screen.id)
+  assert.equal(record?.status, "delivered")
+  assert.ok(record?.deliveredAt !== undefined)
+  assert.equal(
+    record?.confirmedBy,
+    undefined,
+    "an SSE flush proves the server sent, not that anyone received — no guessed confirmation",
+  )
+  assert.ok(!JSON.stringify(record).includes('"confirmedBy"'))
+  void transport
 })
 
 test("say accepts every member when the handler expands the omitted `to`, and room-web draws no transport call", async () => {
@@ -182,7 +205,7 @@ test("a transport that throws for one member still delivers to the others; at th
   // Bob went out on the very first drain despite Alice's provider failing.
   assert.deepEqual(sends.map((send) => send.memberId), [bob.id])
   let record = deliveriesOf(store.get(code)).find((d) => d.memberId === alice.id)
-  assert.equal(record?.attempts, 1)
+  assert.equal(record?.failures, 1)
   assert.equal(record?.status, "pending")
   assert.ok(record?.lastError !== undefined)
 
@@ -191,7 +214,7 @@ test("a transport that throws for one member still delivers to the others; at th
     await eng.drain(code)
   }
   record = deliveriesOf(store.get(code)).find((d) => d.memberId === alice.id)
-  assert.equal(record?.attempts, MAX_DELIVERY_ATTEMPTS)
+  assert.equal(record?.failures, MAX_DELIVERY_ATTEMPTS)
   assert.equal(record?.status, "failed")
   assert.equal(corrections.length, 1)
   assert.ok(!corrections[0]!.includes("weather"), "the correction must not echo the message text")
@@ -219,10 +242,10 @@ test("a pending record present at boot is re-attempted; one already at the cap i
   const records = deliveriesOf(store.get(code))
   assert.equal(records.find((d) => d.id === "d1")?.status, "delivered")
   assert.equal(records.find((d) => d.id === "d2")?.status, "pending", "an at-cap record is left exactly as it was")
-  assert.equal(records.find((d) => d.id === "d2")?.attempts, MAX_DELIVERY_ATTEMPTS)
+  assert.equal(records.find((d) => d.id === "d2")?.failures, MAX_DELIVERY_ATTEMPTS)
 })
 
-test("a hanging provider send times out, increments attempts, and does not block the other member", async () => {
+test("a hanging provider send times out, increments failures, and does not block the other member", async () => {
   const { store, code, alice, bob } = await roomWith()
   const sends: RecordedSend[] = []
   const hanging: Transport = {
@@ -238,7 +261,7 @@ test("a hanging provider send times out, increments attempts, and does not block
 
   assert.equal(sends.find((send) => send.memberId === bob.id)?.text, "slow provider")
   const record = deliveriesOf(store.get(code)).find((d) => d.memberId === alice.id)
-  assert.equal(record?.attempts, 1)
+  assert.equal(record?.failures, 1)
   assert.match(record?.lastError ?? "", /timed out/)
 })
 
@@ -255,7 +278,7 @@ test("a member who left between acceptance and drain is an ordinary failure — 
 
   assert.equal(transport.sends.length, 0)
   const record = deliveriesOf(store.get(code))[0]
-  assert.equal(record?.attempts, 1)
+  assert.equal(record?.failures, 1)
   assert.equal(record?.status, "pending")
   assert.match(record?.lastError ?? "", /no longer in the room/)
 })
@@ -404,7 +427,7 @@ test("a Room round-trips through the store with deliveries", async () => {
     kind: "whisper",
     text: "persisted whisper",
     status: "delivered",
-    attempts: 1,
+    failures: 1,
     lastError: undefined,
     createdAt: "2026-09-12T10:00:00.000Z",
     deliveredAt: "2026-09-12T10:00:01.000Z",
@@ -516,7 +539,7 @@ test("GET /rooms/:code exposes no Delivery text for a room holding a whisper del
         kind: "whisper",
         text: "the secret whisper body",
         status: "pending",
-        attempts: 0,
+        failures: 0,
         lastError: undefined,
         createdAt: "2026-09-12T10:00:00.000Z",
         deliveredAt: undefined,
