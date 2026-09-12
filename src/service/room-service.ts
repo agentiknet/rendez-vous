@@ -54,12 +54,19 @@ export type RoomWebSendOutcome =
 
 const RESUMING_TEXT = "Resuming room, one moment…"
 
+/** The one line of "how to use me" every member gets. It earns its place:
+ *  `@me` is invisible otherwise, and a capability nobody knows about is not
+ *  a capability. Kept to a single short line because most members read this
+ *  on a phone. */
+const AUDIENCE_HINT = "Everything you send goes to the whole room. Start with `@me` to get an answer only you can see."
+
 function welcomeText(prefix: string, room: Room): string {
   const lines = [`${prefix}: ${room.code}`]
   const artifactUrl = memberFacingArtifactUrl(room)
   if (artifactUrl !== undefined) {
     lines.push(artifactUrl)
   }
+  lines.push(AUDIENCE_HINT)
   return lines.join("\n")
 }
 
