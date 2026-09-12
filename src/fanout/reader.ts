@@ -143,12 +143,21 @@ export class RoomFanout {
   private readonly readers: Map<string, ActiveReader> = new Map()
   /** Per-room, in-process only: reset on restart, so the first flush after boot is always treated as an artifact change (see start of `flush`). Keyed on the PUBLIC artifact URL (`publicArtifactUrl`), not the raw box URL — the public one never changes for a room, so a box replacement (architecture.md §9.3b) no longer trips this and re-sends. */
   private readonly lastArtifactUrl: Map<string, string | undefined> = new Map()
-  /** Per-room, in-process only: how many `say`/`whisper` `Delivery` records
-   *  the room held at the last flush of a `"tools"` room. A turn that ends
-   *  with the count unchanged means the agent called neither tool — nobody's
-   *  phone received anything (PLAN risk R2). Logged, not fixed: the web
-   *  transcript still shows the turn, so a human can see why. */
-  private readonly lastToolDeliveries: Map<string, number> = new Map()
+  /** Per-room, in-process only: `room.deliverySeq` as of the last flush of a
+   *  `"tools"` room. A turn that ends with it unchanged means the agent
+   *  called neither `say` nor `whisper` — nobody's phone received anything
+   *  (PLAN risk R2). Logged, not fixed: the web transcript still shows the
+   *  turn, so a human can see why.
+   *
+   *  It reads the COUNTER, never `deliveries.length`. The array is a work
+   *  queue that keeps a short tail, not a log: `pruneDeliveries` drops
+   *  `delivered` records past `MAX_RETAINED_DELIVERED`, so its length stops
+   *  growing once a room is busy — and a length compared against the
+   *  previous length then matches on every single turn, warning "no phone
+   *  received anything" precisely when the agent IS addressing people. A
+   *  detector that cries wolf permanently is worse than none, and this is
+   *  the only handle we have on R2. `deliverySeq` never goes backwards. */
+  private readonly lastDeliverySeq: Map<string, number> = new Map()
 
   /** Both undefined unless TTS is configured. `[[say …]]` needs somewhere to
    *  put the rendered audio (the media store, which the artifact-independent
@@ -187,6 +196,13 @@ export class RoomFanout {
     if (this.readers.has(code)) return
     const room = this.store.get(code)
     if (room === undefined || room.sessionId === undefined) return
+
+    // Seed the R2 detector from where the room already is, so the first flush
+    // after a restart compares against the counter's real value rather than
+    // against 0 — otherwise a resumed room with prior deliveries looks active
+    // on its first turn no matter what the agent did, and a genuinely silent
+    // first turn goes unreported.
+    this.lastDeliverySeq.set(code, room.deliverySeq ?? 0)
 
     const controller = new AbortController()
     const done = this.runLoop(code, controller.signal).catch(() => undefined)
@@ -516,17 +532,16 @@ export class RoomFanout {
     )
 
     // PLAN risk R2: for a `"tools"` room, delivery depends on the agent
-    // actually calling `say`/`whisper` — counted via the `Delivery` records
-    // the tool handlers wrote this turn. A turn that added none left every
-    // phone silent while the web page looks healthy; say so, loudly.
+    // actually calling `say`/`whisper`. The counter moved during the turn if
+    // it did (the tool handlers write before turn-end, and this room was read
+    // at the top of `flush`, after it). A turn that left it where it was sent
+    // nothing to anyone's phone while the web page looks healthy; say so.
     if (textGated) {
-      const toolDeliveries = (room.deliveries ?? []).filter(
-        (delivery) => delivery.kind === "say" || delivery.kind === "whisper",
-      ).length
-      if (toolDeliveries === (this.lastToolDeliveries.get(code) ?? 0)) {
+      const seq = room.deliverySeq ?? 0
+      if (seq === (this.lastDeliverySeq.get(code) ?? 0)) {
         console.warn(`room ${code}: turn ended with zero say/whisper tool calls — no phone received anything this turn`)
       }
-      this.lastToolDeliveries.set(code, toolDeliveries)
+      this.lastDeliverySeq.set(code, seq)
     }
 
     // Cursor is persisted only after the flush attempt: a crash between send and

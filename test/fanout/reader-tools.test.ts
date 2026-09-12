@@ -179,10 +179,18 @@ test("a tools room: a turn with zero say/whisper deliveries logs a warning namin
 
 test("a tools room whose agent DID call say (a Delivery record exists) logs no warning", async () => {
   const h = await harness("tools")
-  // Simulate the tool handler's accept: one say Delivery written this turn.
   const room = h.store.get(h.code)
   assert.ok(room !== undefined)
+  // Establish the baseline first: in production the reader is already running
+  // when a tool call lands, so the detector's reference point predates the
+  // delivery. A fixture that writes the delivery before the reader starts has
+  // it counted in the baseline instead, and the turn then looks silent.
+  await flushTurn(h, "first turn, before the agent addressed anyone")
+  // Now simulate the tool handler's accept: one say Delivery AND the counter
+  // it advances. `DeliveryEngine.accept` writes both in one patch — a fixture
+  // that sets only the array is not simulating an accept.
   await h.store.update(h.code, {
+    deliverySeq: 1,
     deliveries: [
       {
         id: "d1",
@@ -209,6 +217,53 @@ test("a tools room whose agent DID call say (a Delivery record exists) logs no w
   }
 
   assert.equal(warnings.length, 0)
+})
+
+// The R2 detector must read `deliverySeq`, never `deliveries.length`. The
+// array is a work queue with a short tail, not a log: `pruneDeliveries` drops
+// `delivered` records past `MAX_RETAINED_DELIVERED`, so on a busy room its
+// length stops growing. A length-based detector then matches its own previous
+// value on every turn and warns "no phone received anything" exactly when the
+// agent IS addressing people — a detector that cries wolf permanently is
+// worse than none. Caught by review across two parallel commits (the prune
+// and the detector were written without seeing each other).
+test("a tools room at the prune cap: the array length is unchanged but the counter moved — no warning", async () => {
+  const h = await harness("tools")
+  const at = new Date().toISOString()
+  const delivered = {
+    memberId: h.aliceId,
+    kind: "say" as const,
+    text: "one of many",
+    status: "delivered" as const,
+    attempts: 1,
+    lastError: undefined,
+    createdAt: at,
+    deliveredAt: at,
+  }
+  // A room whose pruned tail is already full: the agent called `say` again
+  // this turn, the prune dropped the oldest record, so the array is the same
+  // LENGTH as at the last flush while the counter advanced.
+  const tail = Array.from({ length: 20 }, (_, index) => ({ ...delivered, id: `d${index + 41}` }))
+  await h.store.update(h.code, { deliverySeq: 60, deliveries: tail })
+  await flushTurn(h, "first turn, establishes the baseline")
+
+  await h.store.update(h.code, {
+    deliverySeq: 61,
+    deliveries: [...tail.slice(1), { ...delivered, id: "d61" }],
+  })
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "))
+  }
+  try {
+    await flushTurn(h, "thinking, plus the say above")
+  } finally {
+    console.warn = original
+  }
+
+  assert.equal(warnings.length, 0, "the counter moved, so the agent did address someone")
 })
 
 test("a markers room behaves exactly as today: bare text, artifact line appended, same wording", async () => {
