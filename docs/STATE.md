@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 02:13 UTC (04:13 local). Repo: this directory,
+Last updated: 2026-09-12 02:16 UTC (04:16 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -122,7 +122,8 @@ Last updated: 2026-09-12 02:13 UTC (04:13 local). Repo: this directory,
    room-service.ts.
 8. Deck — DONE and current at `58da294` (13 pages, `deck/rendez-vous.pdf`,
    includes the deliverable beat, the codex verdict and the "why a room" slide).
-9. Repo publish — DONE (private, 59 commits matched at publish time).
+9. Repo publish — DONE (private); README rewritten for the morning (`e7a2af8`).
+   Push after every landing and verify zero ahead.
 10. Codex flip — DONE: the one-parameter claim does NOT hold; the boot failed
     at the auth gate (`docs/CODEX-FLIP.md`, architecture §9.3).
 11. Upstream agentproto PRs, each in its own worktree with a regression test
@@ -153,7 +154,6 @@ re-proven on a phone after `4e73786`.
   Jeremy's own contact and mailbox via the simulated inbound route; edits only
   docs/REHEARSAL.md, docs/STATE.md and `.env.local` (allowlist line).
 - `sess_d233dc3a` rdv-up-app-serve-ui-path, GLM: worktree `wt/app-serve-ui-path` (upstream PR).
-- `sess_3ad776d9` rdv-readme, GLM: README.md only (rewrite for the morning).
 - `sess_b3541f0a` rdv-multimodal-ingress, GLM: `src/channels/media-ingress.ts`, channel
   inbound parsers, the two webhook handlers and media route in `http.ts`, `media-store.ts`,
   additive `src/env.ts`, their tests, the status section of `docs/MULTIMODAL.md`.
