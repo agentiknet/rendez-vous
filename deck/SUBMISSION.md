@@ -1,254 +1,206 @@
-# Rendez-vous — written submission (draft)
+# Submission form: copy-paste ready
 
-Companion to `rendez-vous.pdf` (6 pages) and `SCRIPT.md` (speaker read + video
-beat sheet). This file is the text a judge reads, written against the four
-scored criteria.
-
-Two kinds of claim appear below and they are kept apart on purpose. **Observed**
-means it ran on real infrastructure and the rehearsal log has the timestamp.
-**Shown** means it is built, tested, and demonstrated in the video. Nothing else
-is claimed. Anchors: `docs/REHEARSAL.md`, `docs/STATE.md`, `docs/UPSTREAM.md`,
-`docs/ARCHITECTURE.md`.
+Deadline: today 16:30 CEST. Every field below maps to one field on the form.
 
 ---
 
-## One line
-
-**Rendez-vous turns a group chat into a shared agent room:** several people —
-and machines — on the surfaces they already use, driving one agent session and
-one living artifact together.
-
-## The problem
-
-Work is multiplayer. Agents are single-player. Every agent available today
-lives in exactly one person's window, so the human becomes the integration
-layer: copy-paste between two chat windows, a screenshot forwarded to the
-other side, "let me ask the AI and get back to you." The second person never
-sees the context. The deliverable dies inside one private thread.
-
-## What we built
-
-A room. One agent session, one shared artifact, many members — each on the
-surface they already live in. You text `new` to a Telegram bot and you have a
-room. You send someone the code and they join from their phone, their laptop,
-or by replying to an email. Nobody installs anything, nobody shares a login,
-nobody learns a new app.
-
-Inside the room, every message carries who said it and from where. Members can
-send voice notes and photos; the agent transcribes and describes them into the
-shared context. The agent can answer one member privately while the others see
-only that a private answer happened. It can reply with a voice note. It can
-attach real files. And when the work is done, it can send the deliverable out
-of the room — but only after a member confirms, and the send is written into
-the shared transcript.
-
----
-
-## Criterion 1 — Core requirements and functionality
-
-**The environment is messaging people already live in.** Telegram and email
-are not a wrapper around a chatbox; they are where the conversation already
-happens, and the room meets it there. The laptop web view is a third surface
-on the same session, not a separate product.
-
-**The core workflow runs end to end on live infrastructure.** We separate what
-was observed on a real phone, with a timestamp in the rehearsal log, from what
-was built and is shown in the video. A submission that blurs the two is asking
-to be disbelieved about both.
-
-*Observed on a real phone, logged with timestamps:*
-
-- A real phone texts `new` on real Telegram; 86.5 s later, cold boot, the agent
-  session and its shared artifact are both ready.
-- A second person joins from a laptop and sees the full transcript plus the
-  live artifact; every message on every surface is attributed to its sender
-  and its surface, and one agent reply reaches both surfaces.
-- The agent edits the shared artifact on request; the edit is confirmed live on
-  the proxied URL while the phone conversation continues.
-- A PDF is previewed, confirmed by a member with a token, rendered, and lands
-  in the inbox — byte-matched against the mailbox.
-- A sandbox deleted out from under the room through the e2b API is caught by
-  the liveness sweep and the room is revived by the next inbound message.
-
-*Built since, and shown in the video:* voice in (transcribed and attributed),
-photo in (described into the artifact), a private `@me` reply, a voice reply,
-real files attached, a local desktop agent joining as a member, and resume
-handing the prior transcript to the new session as a recap.
-
-**Known limits, stated plainly.** WhatsApp is not provisioned (no number, no
-key) — the room is channel-agnostic by construction, so adding it is
-configuration, not code. Paused sandboxes expire on the provider side in
-20–60 minutes, which we handle by treating box liveness as its own fact rather
-than trusting a stored URL.
-
-## Criterion 2 — Innovation and theme alignment
-
-**The environment is not a wrapper; it is the entire point.** Every agent
-product in this space is *single-principal*: one user, one session, one
-window. Sandboxes are now a commodity — nine providers, one API call — and all
-of them inherit that assumption. The uncontested ground is not the sandbox, it
-is the **room around it**.
-
-**What cannot be reproduced in a standalone chatbox:**
-
-- Two people in two different apps contributing to the same agent turn, each
-  seeing the other's contribution attributed.
-- An agent that addresses members *individually* — asking Alice for the
-  product shot and Bob for the positioning line, each answering on their own
-  channel in their own time — then reconciling both into one deliverable.
-- A private answer to one member inside a shared conversation, where the
-  others see that a whisper happened but not its contents.
-- A deliverable that leaves the conversation under the members' explicit
-  authority, with the send on the record.
-
-**The generalisation we did not expect to find.** The room does not model
-*humans*, it models *members* — anything that can speak and listen through two
-HTTP endpoints. So a **local desktop agent joins the room exactly the way a
-person does**: the same two endpoints, the same cursor, the same queueing
-discipline, attributed in the transcript like anyone else. The room cannot
-tell the difference, because there is no difference to tell.
-
-In the video the room asks that machine member for the commit log on the
-laptop — something no sandbox can know — using the same `ask` it used thirty
-seconds earlier to ask Alice for the product shot. Same verb, same line in the
-transcript, no special case.
-
-That is the pattern we would put forward as the surprising one: multiplayer is
-not a feature you add to an agent, it is a layer above one — and once that
-layer exists, the distinction between a human member and an agent member stops
-mattering. Every sandbox provider is racing to be the best single-principal
-box. None of them has the room.
-
-## Criterion 3 — Technical execution and integration
-
-**Architecture.** One pipeline, four layers, with the seam in a deliberate
-place:
+## Project Name
 
 ```
-Telegram · WhatsApp · Email · Web · a desktop agent
-                 │
-           [ agentpush ]      ingress + egress — every channel behind one API
-                 │
-          [ RENDEZ-VOUS ]     members · attribution · fan-out by presence tier
-                 │
-           [ agentproto ]     the agent runtime — unmodified, from npm
-                 │
-              [ e2b ]         one sandbox per room, one artifact URL
+Rendez-vous
 ```
-
-- **agentpush** is our messaging layer: Telegram, WhatsApp, email and SMS
-  behind one API, inbound and outbound, so the room never learns a single
-  provider's quirks.
-- **Rendez-vous** is the room itself — the registry of members and tiers, the
-  attributed fan-in, the tier-aware fan-out, the artifact proxy, and the
-  authority to send work outward.
-- **agentproto** is our own open-source agent runtime, consumed **unmodified**
-  from npm. A hard constraint from day one: never fork, never vendor, never
-  patch. Every upstream bug we hit was written up with a repro instead of
-  worked around locally.
-- **e2b** provides one sandbox per room holding the shared artifact; OpenAI
-  does speech-to-text, vision and text-to-speech; canvakit renders the PDF.
-
-**Depth of integration, not surface.** Three examples where the integration is
-the engineering:
-
-1. *Presence tiers.* `messenger | email | room-web` is a first-class property
-   of a member. The same agent turn becomes a terse reply on a phone, a
-   per-turn digest in an inbox, and a full transcript beside a live artifact
-   on a laptop — one fan-out, three renderings.
-2. *Media, both directions, without leaking a credential.* Telegram delivers
-   inbound media as an opaque `file_id` that only the bot token can resolve.
-   Resolving it inline would embed that token in a URL posted to every
-   downstream consumer, so resolution stays server-side in the messaging layer
-   and the token never leaves it. A regression test asserts the token appears
-   nowhere in the returned value.
-3. *Liveness as its own fact.* A sandbox can expire while the room still holds
-   its URL. The room therefore never advertises a stored artifact link — it
-   advertises a proxied, room-keyed URL and gates it on a probe result, so a
-   dead box produces no clickable link anywhere.
-
-**Thoughtful failure handling — earned the hard way.** We found five
-independent upstream bugs while building, all of the same shape: *silent*.
-
-| # | Failure | Why it was invisible |
-| --- | --- | --- |
-| 1 | A killed session still answers `200`, so resume reported success in 0.7 s having resumed nothing | success response, no error |
-| 2 | Omit `queue: true` and a message arriving mid-turn is rejected and lost | the sender sees their message sent |
-| 3 | The fan-out cursor freezes on resume — every reply after it vanishes | the agent keeps answering, nobody receives |
-| 4 | An account-pinned inbound route is filtered out and never fires | correct-looking configuration |
-| 5 | The agent proposes rebuilding a capability the workspace already brokered | a plausible plan |
-
-None crash. Four lost data quietly; one reported success while doing nothing.
-
-Each one is written up with a reproduction. Where the fix belongs in the room,
-it is fixed here with a regression test. Where it belongs in the runtime, we
-did not work around it locally and quietly move on — **we opened seven pull
-requests against our own open-source runtime**, each carrying a test that
-reproduces the silent failure before fixing it: queue-by-default on the prompt
-path, a session liveness signal, a sandbox liveness signal, the `app serve`
-UI-path fix, an auth gate on an ungated mutating route, reaping orphaned
-sandboxes, and pausing a box whose reconnect failed instead of leaving it
-running and billing.
-
-That is the real answer to "how does this handle failure": the constraint we
-set on day one was *never fork, never vendor, never patch* the runtime. Eight
-upstream findings later, that constraint held — the fixes went upstream, with
-repros, instead of into a private patch nobody else benefits from.
-
-This is also *why* the room records who asked, who confirmed, and what was
-sent: in a system whose failures are silent, the transcript is the only thing
-that can be checked afterwards.
-
-**Credentials are per-member, not per-room** — a deliberate design call. A
-shared room key is a key shared with everyone who has the room code, so there
-is no room key: each member attaches their own tools, and revocation is an
-unpair rather than a rotation.
-
-## Criterion 4 — Usefulness and agentic experience
-
-**The use case, concretely.** Alice and Bob have twenty minutes before a client
-call and no one-page brief. Alice sends a voice note from a taxi. Bob drops the
-product shot from his laptop. The room asks Bob's own machine for the current
-version number. It writes the brief while all three watch it change. Alice says
-"send us the PDF", Bob confirms, and it is on her phone and in the inbox before
-the call starts. Nobody opened a new app and nobody relayed anything.
-
-That shape generalises to any work more than one person has an opinion about
-and that has to end in an artifact — a spec between a founder and an engineer,
-a quote between an agency and a client, a plan between two people who are not
-at the same desk. Today all of it is relayed by hand between private agent
-windows. Here it happens once, in front of everyone.
-
-**Native to the environment.** There is no app to open. You send a message
-where you already send messages. Joining is a code or a QR. A phone member
-gets short replies sized for a phone; a laptop member gets the transcript and
-the document side by side; an inbox member gets a digest they can reply to.
-Nobody is asked to move to where the agent lives — the agent comes to where
-they already are.
-
-**Control stays with the members.** Nothing leaves the room without an
-explicit confirmation from a member, and the preview shows exactly what would
-go and to whom before anyone commits. Every send is recorded in the shared
-transcript with who asked and who confirmed. A member can ask for a private
-answer without leaving the room, and the room tells the others that a private
-exchange happened — control without a hidden back channel.
 
 ---
 
-## The demo video
+## Project Description
 
-One 4-up frame, about 90 seconds, one clock running across all four quadrants,
-because the product *is* simultaneity and a linear screencast cannot show it.
+```
+Rendez-vous turns any messaging app into a shared agent room. Several people,
+and other agents, drive one agent session and one live document together, from
+whatever app they already have open.
 
-| | |
-| --- | --- |
-| ↖ Alice — phone, Telegram | ↗ Bob — laptop, room web view |
-| ↙ Atlas — local desktop agent | ↘ The artifact, being written |
+THE PROBLEM. AI is already in your pocket, but it is only ever in one pocket at
+a time. Two colleagues working on the same thing have two separate assistants
+that never talk to each other. So the human becomes the integration layer:
+screenshot one chat, paste it into the other, relay what was agreed. The second
+person never sees the context, and the deliverable dies inside one private
+thread.
 
-The two beats that carry it: the room solicits the **machine** member with the
-same verb it used on a human thirty seconds earlier; and a private `@me`
-answer makes the quadrants visibly diverge — one member sees the answer, the
-others see only that a whisper happened. Full beat sheet in `SCRIPT.md`.
+THE ENVIRONMENT IS THE POINT. You text "new" to a Telegram bot and a room
+exists. You send someone the code or a QR and their phone is in the room too.
+Nothing to install, no account to create, no login to share. The agent comes to
+where people already are instead of asking them to move.
 
-Real screens only, no re-enactment. Rehearsed beat by beat against the local
-simulator at zero cost, then shot in one take.
+WHAT ONLY A ROOM CAN DO. The orchestrator agent is the only party that sees
+every thread, so it can do things no single-thread chatbot can. In our demo
+Julie sets a 12k budget from her phone while Tom sends a photo of a 16k venue
+from his; the agent detects the conflict, says so out loud, and arbitrates
+until they converge. It addresses members individually when only one of them
+has what it needs. It can answer one member privately while the others see that
+a private answer happened, but not what it said. Every message carries who sent
+it and from where.
+
+MEMBERS, NOT HUMANS. The room models members, so a local desktop agent joins
+through the same two HTTP endpoints as a person and is treated identically. The
+room cannot tell the difference, because there is no difference to tell.
+
+A REAL MACHINE, NOT AN API. Each room gets its own e2b sandbox: nobody's
+laptop, a real terminal, a real filesystem, and a public URL. When the agent
+builds a PDF or puts a website online, everyone opens the same link and can
+change what they see. The agent renders through an MCP tool we expose, so the
+design system is enforced by construction rather than by asking a model to stay
+on brand.
+
+WORK LEAVES THE ROOM, UNDER CONTROL. Before anything is sent outside, the room
+previews the recipient, the channel, the subject and the rendered document, and
+waits for a member to confirm. The send is written into the shared transcript:
+who asked, who confirmed, what, to whom.
+
+TECHNICAL EXECUTION. TypeScript on Node 20, no framework, native fetch and
+native SSE. agentpush (our messaging layer) puts Telegram, WhatsApp, email and
+SMS behind one API, inbound and outbound. agentproto, our own open-source agent
+runtime, is consumed unmodified from npm: a hard constraint from day one, never
+fork, never vendor, never patch. e2b provides the sandbox. OpenAI does
+speech-to-text, vision and text-to-speech; OpenRouter ran the GLM 5.3 executors
+that wrote much of the code. Fan-in attributes every inbound message and posts
+it with queue:true, which is load-bearing: without it a message arriving
+mid-turn is silently dropped. Fan-out holds one SSE reader per room and renders
+one agent turn three ways, terse on a phone, a digest in an inbox, full
+transcript beside the live document on a laptop. 500 tests, all green.
+
+WHAT WE FOUND ALONG THE WAY. Eight failures, every one of them silent. A killed
+session still answers 200, so resume reported success in 0.7s having resumed
+nothing. A paused sandbox expires while the room keeps handing people its dead
+link. We did not work around them locally: seven pull requests are open against
+our own open-source runtime, each carrying a test that reproduces the failure
+before fixing it.
+```
+
+---
+
+## Products & Tools Used
+
+Tick: **OpenAI**, **OpenRouter**, **AI Tinkerers**
+
+Other Products field:
+
+```
+e2b (sandbox per room), Telegram Bot API, Cloudflare Tunnel, agentpush (our own
+messaging layer), agentproto (our own open-source agent runtime, from npm),
+canvakit (our own template + design-kit renderer), Anthropic Claude and
+z-ai GLM 5.3 via OpenRouter
+```
+
+---
+
+## Team Contributions
+
+```
+Jeremy ANDRE (lead): everything in the Rendez-vous repo. Architecture and the
+room model (members, presence tiers, attributed fan-in, tier-aware fan-out).
+The agentpush integration for Telegram inbound and outbound, including a fix
+upstream in agentpush so inbound Telegram media can be read at all. The e2b
+sandbox boot, artifact serving and liveness handling. The MCP endpoint that
+gives the sandboxed agent a render tool. Multimodal in and out through the
+OpenAI API: Whisper for voice notes, vision for photos, TTS for spoken replies.
+The deliverable flow and its confirmation gate. Seven pull requests upstream to
+agentproto. Orchestration of GLM 5.3 coding agents over OpenRouter for parts of
+the implementation, with every result verified by hand before it landed.
+```
+
+---
+
+## Prior Work
+
+State this plainly. It is the honest answer and judges reward it.
+
+```
+Three components pre-date the hackathon and were used as dependencies, not
+built during it:
+
+- agentproto, our open-source agent runtime, consumed unmodified from npm. We
+  did not fork or patch it. The eight bugs we hit were written up with repros
+  and fixed via seven pull requests opened upstream during the hackathon.
+- agentpush, our messaging layer. One fix landed in it during the hackathon:
+  Telegram inbound media could not be read by any consumer, because the
+  provider never implemented attachment fetch.
+- canvakit, our template and design-kit renderer, used to produce the PDF and
+  the live site from one data file.
+
+Everything else was built during the hackathon: the entire Rendez-vous room
+service, the multimodal ingress and egress, the private-reply and solicitation
+protocols, the deliverable flow with its confirmation gate, the room web view,
+the MCP render tool, the desktop-agent bridge, and the 500-test suite.
+```
+
+---
+
+## Additional Links
+
+```
+https://github.com/agentiknet/rendez-vous
+```
+
+(Repo is private. Make it public before pasting, or drop this field.)
+
+---
+
+## Social Post
+
+X version, under the limit:
+
+```
+Rendez-vous: your AI is in your pocket, but only ever one pocket at a time.
+
+We put several people AND several agents in one shared room, from the messaging
+app they already use. The agent sees every thread, so it can tell Julie her
+12k budget does not fit the 16k venue Tom just sent.
+
+Built with @OpenAI @openrouter, e2b sandboxes and our own open-source runtime.
+Thanks @AITinkerers @CopilotKit @exaailabs @auth0 @ambiguousio @triggerdotdev
+@mozillaAI
+
+#AgentsEverywhere
+```
+
+LinkedIn version, company names instead of handles:
+
+```
+AI is already in your pocket. It is just only ever in one pocket at a time.
+
+Two colleagues working on the same thing have two separate assistants that
+never talk. So the human becomes the relay: screenshot one chat, paste it into
+the other, carry the context by hand.
+
+For Agents, Everywhere we built Rendez-vous. You text "new" to a bot and a
+shared room exists. Send someone the code and their phone is in it too. Nothing
+to install, no account to share. Several people and several agents drive one
+session and one live document together.
+
+The part we did not expect: because the orchestrator is the only one that sees
+every thread, it can catch what no single-thread chatbot can. Julie sets a 12k
+budget from her phone. Tom sends a photo of a 16k venue from his. The agent
+spots the conflict and arbitrates.
+
+Each room runs in its own isolated sandbox with a real terminal and a public
+URL, so when it builds a PDF or puts a site online, everyone opens the same
+link. Nothing leaves the room until a member confirms what is being sent and to
+whom.
+
+Built with OpenAI, OpenRouter, e2b, and our own open-source agent runtime,
+consumed unmodified. We hit eight silent failures on the way and opened seven
+pull requests upstream rather than patching around them.
+
+Thanks to AI Tinkerers, OpenAI, CopilotKit, OpenRouter, Exa, Auth0, Ambiguous
+AI, Trigger.dev, Mozilla.ai and Google Cloud.
+
+#AgentsEverywhere
+```
+
+---
+
+## Video
+
+Two minutes maximum, longer loses points. The official guide is explicit that
+production values do not affect scoring: a screen recording with clear audio is
+enough. See `STORYBOARD.md` for the beat sheet, and cut it to 2:00.

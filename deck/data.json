@@ -16,8 +16,8 @@
       "You screenshot one and paste it into the other.",
       "You are the middleman. Nothing you agreed reaches either of them."
     ],
-    "illustration": "Two phones side by side, each with its own AI chat, a screenshot travelling from one to the other. Buildable without a shoot.",
-    "page": "2 / 7"
+    "page": "2 / 7",
+    "image": "img/p2-two-phones.png"
   },
   {
     "type": "statement",
@@ -29,8 +29,8 @@
       "In the messaging app they already have open.",
       "An agent in the middle, sorting out who wants what."
     ],
-    "illustration": "The money shot. The 4-up frame mid-conflict: Julie's phone, Tom's phone, the room view carrying the agent's \"Tom's villa is 16k, Julie's cap is 12k\", and the document.",
-    "page": "3 / 7"
+    "page": "3 / 7",
+    "image": "img/p3-one-room.png"
   },
   {
     "type": "statement",
@@ -42,8 +42,8 @@
       "Send someone the code and their phone is in the room too.",
       "An agent joins exactly the way a person does."
     ],
-    "illustration": "One phone texting \"new\", the room code and QR coming straight back. A second phone joins. Two real screens.",
-    "page": "4 / 7"
+    "page": "4 / 7",
+    "image": "img/p4-join.png"
   },
   {
     "type": "hub",

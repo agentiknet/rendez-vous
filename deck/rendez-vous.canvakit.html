@@ -334,6 +334,17 @@ page:
         margin-top: 0.35rem;
       }
 
+      /* The finished artwork, in the slot the placeholder used to hold. */
+      .illo-img {
+        position: absolute;
+        right: 4rem;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 29rem;
+        height: auto;
+        border-radius: 14px;
+      }
+
       /* Reserved space for a screenshot that does not exist yet. Sits on the
          right half, which every layout in this deck leaves empty. */
       .illo {
@@ -557,6 +568,9 @@ page:
            the real image exists, so the layout is already reserved and nobody
            discovers at export time that the page has no room for it. Swap the
            placeholder for an <img> once the take is shot. -->
+      {{#image}}
+      <img class="illo-img" src="{{image}}" alt="" />
+      {{/image}}
       {{#illustration}}
       <div class="illo">
         <div class="illo-tag">ILLUSTRATION</div>
