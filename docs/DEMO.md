@@ -197,31 +197,41 @@ A `room.code` in the reply means fan-in, session spawn, and (if
 
 ## 9. Recovery moves
 
-**Resume-after-kill is NOT demo-safe as of 2026-09-12.** Ground-truthed live
-on a real phone (docs/REHEARSAL.md, Run 3 continuation): after a session was
-killed out of band, the next real Telegram message got back, verbatim,
-*"Could not deliver your message: sessionnotalive"* — no resume, no retry.
-Root cause reported by the fix executor: `isSessionAlive` treats a `200`
+**Resume-after-pause is demo-safe as of 2026-09-12 07:54 UTC.** Proven live
+from Jeremy's own phone, end to end over a real transport: room `RDV-NG7F`
+had been `paused` since 02:14 with its box gone. A real Telegram message
+from `6371794295` flipped it `paused → active` at 07:54:11, and the room
+answered back on the phone — agentpush counted **3 inbound / 3 outbound**
+over the exchange. The room kept its place in the conversation
+(`cursor: 15` carried across) and the artifact came back ready on the
+stable proxy URL, not a raw e2b host.
+
+**What "resume" actually does — say this accurately on stage.** It boots a
+**fresh** box (`icc84uy0qdas650d1sntl` here, a new id), it does not
+reconnect to the paused one. That is the designed path since `0af9580`
+(*boot fresh when the reconnect itself reports the box gone*), after the
+reconnect-and-retry route failed in both simulated runs. So:
+
+- **Transcript continuity holds** — the room resumes mid-conversation.
+- **Filesystem continuity does not** — anything the previous box had on
+  disk and never wrote into the artifact is gone. Don't promise "it picks
+  up exactly where it left off" in the file sense.
+
+The earlier failure this replaces: `isSessionAlive` treated a `200`
 descriptor response with `status: "killed"` as alive, so the resume path
-never triggers. It failed loudly (the member was told, nothing was
-swallowed) — but the recovery half of that story doesn't exist yet. **Do
-not build a stage moment around a session dying and the room bringing
-itself back** until this is re-proven end to end on a real phone. If a
-session does die mid-demo, `resume <code>` is **not** a proven fix either
-(next bullet shares the same bug) — the honest move is to say so out loud
-and switch to the simulated-channel fallback (below) to keep the demo
-moving, not to imply the room self-healed.
+never triggered and the member got back, verbatim, *"Could not deliver
+your message: sessionnotalive"*. That bug is fixed and the fix is now
+proven on a real phone, not just in the harness.
 
 - **Room paused** (idle sweep, RUNBOOK.md §3) → any message from a known
-  member is *supposed to* resume it automatically; **unverified as of this
-  writing** given the bug above.
+  member resumes it automatically. **Proven live 2026-09-12 07:54 UTC.**
+  Budget for it: a resume spends one e2b boot.
 - **Daemon restarted, or session dies any other way** → sending `resume
-  <code>` calls the **same** `reviveIfSessionDied` → `isSessionAlive` check
-  as the automatic path (`src/service/room-service.ts`), so it inherits the
-  same bug — do not assume it's a safer fallback than the automatic path
-  above until the fix lands and is re-proven live. Manual `resume <code>`
-  worked in an earlier rehearsal (Run 1, before this liveness check
-  existed) but that result no longer reflects the current code.
+  <code>` goes through the **same** `reviveIfSessionDied` path in
+  `src/service/room-service.ts` as the automatic resume above, so it
+  inherits the same fix. Not separately exercised on 2026-09-12 — the
+  automatic path is the one with a live proof behind it, so prefer letting
+  a message trigger the resume rather than typing `resume <code>`.
 - **Tunnel died** → rerun `scripts/tunnel.sh --named rendez-vous`. The
   hostname (`rdv.clipgen.co`) is stable across restarts, so `RDV_PUBLIC_URL`
   and the agentpush routes from step 5 stay valid — no re-export, no rerun.
