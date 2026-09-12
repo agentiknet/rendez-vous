@@ -5,10 +5,23 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 03:22 UTC (05:22 local; earlier "UTC" stamps in this
+Last updated: 2026-09-12 03:36 UTC (05:36 local; earlier "UTC" stamps in this
 file's history ran about an hour ahead of real UTC — trust git commit times).
 Repo: this directory, `main`, published private at
 https://github.com/agentiknet/rendez-vous.
+
+## SCOPE CLOSED by the operator at 03:11 UTC
+
+The operator declared the night's work done: no new scope, no new executors,
+no e2b boot (Jeremy re-proves resume on his phone), no outbound message to
+anyone. Jeremy is awake and already has the morning report. The supervisor
+had spawned four executors between 03:13 and 03:25 UTC before that brief
+arrived; they were wound down as follows: rdv-deck-caption finished
+(`2022217`); rdv-up-reconnect-pause finished (PR 1286); rdv-middleman was
+stopped after steps i and ii landed green (`b793097`, `d258b13`) and its
+uncommitted step-iii edit to `room-service.ts` was reverted; rdv-ask-panel
+was stopped and its two uncommitted edits reverted. No executors are
+running. The tree is clean and origin/main is in sync.
 
 ## Hard limits (verbatim from the operator; never work around them)
 
@@ -77,8 +90,10 @@ https://github.com/agentiknet/rendez-vous.
   then check `/health` locally and at https://rdv.clipgen.co/health and that
   `/r/RDV-NG7F/state` still lists the members. Old worktrees:
   `git worktree remove /private/tmp/rdv-serve/<sha>` once nothing runs there.
-- Live room `RDV-NG7F`, session `sess_059b885d`, box `i7jos61ixgkcfrekmi1vl`,
-  members: Jeremy (telegram 6371794295) and Bob (web). Jeremy may use it.
+- Rooms `RDV-NG7F` (members: Jeremy via telegram 6371794295, Bob via web,
+  plus the synthetic "Exercise" contact) and `RDV-8WLG` are both PAUSED with
+  no live session or box. The next message to either boots a FRESH box and
+  spends one of the remaining boots.
 - `.env.local` (gitignored, mode 600) holds the agentpush key, webhook secrets,
   bot name, public URL, booter and daemon token. Never print it.
 
@@ -96,10 +111,22 @@ https://github.com/agentiknet/rendez-vous.
   (`i6s6gs…`, deleted by the proof) plus 1 for its restore box
   (`i3htjrl6af3yzfo95c93b`, paused 01:54 UTC); plus `iw1ylk7jshrtfj9bvsqw2`
   (01:48, unclaimed by any executor, an upstream test-gate box; KILLED 03:00 UTC).
-  Plus `ieqlkzycc8b8qclxbl6kz` (template agentproto-workstation, started
-  02:42 UTC, no daemon session and no room references it, no executor was
-  active then; PAUSED by the supervisor 03:14 UTC, expires on its own).
-  Count: 7 of 10. Remaining: 3. The raced double revive is fixed by the
+  Operator's verified count at 03:11 UTC: 6 of 10 spent, 4 remain. One more
+  box existed then that the operator did not count: `ieqlkzycc8b8qclxbl6kz`
+  (template agentproto-workstation, started 02:42 UTC, no daemon session and
+  no room references it, no executor was active then; PAUSED by the
+  supervisor 03:14 UTC, expires on its own). A SECOND box of the same shape,
+  `imves98ljrhxdwt73inzf` (agentproto-workstation, no metadata, 45-minute
+  lifetime, started 03:24 UTC, no daemon session, no room, no boot in the
+  service log), appeared while the upstream executor's agentproto gate was
+  running with `env -u E2B_API_KEY`; PAUSED by the supervisor 03:39 UTC.
+  `packages/sandbox-e2b/src/provider.ts` reads the key only from
+  `process.env.E2B_API_KEY`, so the source of these two boxes is NOT
+  established; the hypothesis is the agentproto test gate through some other
+  path (`~/.e2b/config.json` holds a team API key). OPEN QUESTION for the
+  operator: check e2b's dashboard for who created `imves98…` before running
+  any agentproto gate again. If both were ours, 2 remain; plan the demo on 2.
+  Zero boxes running at 03:39 UTC. The raced double revive is fixed by the
   per-room revive lock (`8a69856`) and the probe-then-reconnect race by
   `0af9580` (a not-found reconnect boots fresh inside the same locked call).
 - Boxes e2b currently lists (state filter is unreliable; treat all as
@@ -163,13 +190,14 @@ https://github.com/agentiknet/rendez-vous.
 5. Whisper, N addressed messages per turn — DONE (`741fe35`, `dc1b178`).
 6. Middleman (agent solicits from each member, asks recorded in the room,
    never stalls) — SPEC DONE (`25f453b`, `docs/MIDDLEMAN.md`, architecture
-   §2.5). BUILD IN PROGRESS: executor rdv-middleman (`sess_8389db7e`, GLM)
-   builds §7 steps i (Ask record on Room), ii (`[[ask <name>]]` parser and
-   marker in fan-out), iii (answer tagging on fan-in, `skip`) and vi (opening
-   prompt), one commit per step; step i landed (`b793097`). Step iv (web
-   "Outstanding" panel) runs in parallel on rdv-ask-panel (`sess_51add8b9`).
-   NEXT executor once rdv-middleman lands: step v (nudge and proceed timers,
-   `skip`, service-originated proceed turn, the never-answered test).
+   §2.5). BUILD PARTIAL, stopped by the operator's scope close: §7 step i
+   (Ask record on Room, `b793097`) and step ii (`[[ask <name>]]` parser,
+   open asks recorded, delivered to the target as a whisper, one-line marker
+   to the rest, `d258b13`) are landed and green. Steps iii (answer tagging on
+   fan-in, `skip`), iv (web "Outstanding" panel), v (nudge/proceed timers) and
+   vi (opening-prompt additions) are NOT built. Until iii lands, an ask opens
+   and is delivered but nothing closes it; the agent is not yet told about
+   the syntax, so no asks are produced in the demo unless prompted.
 7. Multimodal — SPEC DONE (`docs/MULTIMODAL.md`); INGRESS DONE (`b769180`):
    inbound voice and images become text plus a stored media ref before enqueue,
    attribution `[Name · channel · voice|image]`, served by `GET /r/:code/media/:id`;
@@ -182,7 +210,9 @@ https://github.com/agentiknet/rendez-vous.
    FORMAT: re-rendered as 16:9 landscape slides at `87f4623` (both kits in
    `deck/out/`, `deck/rendez-vous.pdf` is the light kit).
    Slide 8's caption now says the flow ran end-to-end through the room's own
-   commands (`2022217`, re-rendered, still 13 pages).
+   commands (`2022217`, re-rendered, still 13 pages, 1440×810 pt). Both
+   rendered kits are now TRACKED in git (`b255004`): `deck/out/rendez-vous-light.pdf`
+   and `deck/out/rendez-vous-dark.pdf`, so they open from the repo on a phone.
 8b. Room page shows the room — DONE (`26714b3`): `GET /r/:code/state` polled
    every 3 s, DOM patched, members with tier badges, agent busy/idle, proxied
    artifact link never dead.
@@ -201,11 +231,14 @@ https://github.com/agentiknet/rendez-vous.
     (also gated POST /mcps/imports and DELETE /mcps/imports/:id); reap orphaned boxes + `sandbox gc` — PR OPEN https://github.com/agentproto/ts/pull/1278
     (phase A found 52 dead sandboxed sessions; 6 boxes still live on e2b from them);
     sandbox liveness signal — PR OPEN https://github.com/agentproto/ts/pull/1279.
-    IN PROGRESS: reconnect failure leaving the box running (finding #3,
-    executor rdv-up-reconnect-pause, `sess_636d22ec`, worktree
-    `_agentproto-worktrees/agentproto-ts/reconnect-pause`). Finding #5 (spawn
-    survives a client disconnect) is a caller-side design note; no PR planned.
-    All upstream PR bodies state the e2b live e2e tests were skipped (key unset).
+    reconnect failure leaving the box running (finding #3) — PR OPEN
+    https://github.com/agentproto/ts/pull/1286 (worktree
+    `_agentproto-worktrees/agentproto-ts/reconnect-pause`; the real defect was
+    an unguarded teardown masking the connect error). Seven PRs open in all,
+    verified with `gh pr list` at 03:33 UTC: 1273, 1274, 1277, 1278, 1279,
+    1281, 1286. Finding #5 (spawn survives a client disconnect) is a
+    caller-side design note; no PR planned. All upstream PR bodies state the
+    e2b live e2e tests were skipped (key unset). No more upstream work.
 
 12. Morning email to Jeremy (deck PDF, script, status body) to jeremy@agentik.net ONLY,
     by 02:20 UTC — DONE (executor rdv-morning-email, `sess_8cfaa0a7`, Sonnet).
@@ -218,17 +251,12 @@ re-proven on a phone after `4e73786`.
 
 ## Executors running (session id, model, owns / fenced to)
 
-- `sess_8389db7e` rdv-middleman, GLM: owns `src/rooms/types.ts`, `src/rooms/store.ts`,
-  `src/fanout/**`, `src/service/room-service.ts`, prompt text in `booter.ts`
-  (step vi, last), their tests. Fenced from web, http.ts, deliverable, sandbox.
-- `sess_51add8b9` rdv-ask-panel, GLM: Middleman step iv only; owns `src/web/**`,
-  the `GET /r/:code/state` route in `http.ts`, `test/web/**`, `test/service/http.test.ts`.
-- `sess_636d22ec` rdv-up-reconnect-pause, GLM: agentproto worktree
-  `reconnect-pause` only (upstream PR for finding #3).
-- Retired 03:13–03:20 UTC after verification: rdv-polish-gaps, rdv-room-page,
+- NONE. All executors are retired (scope closed by the operator, see top).
+  Retired 03:13–03:36 UTC after verification: rdv-polish-gaps, rdv-room-page,
   rdv-up-app-serve-ui-path, rdv-up-sandbox-liveness, rdv-box-liveness (hit
   its Claude session limit mid-edit; the supervisor finished and committed
-  its probe-race fix as `0af9580`), rdv-deck-caption.
+  its probe-race fix as `0af9580`), rdv-deck-caption, rdv-up-reconnect-pause,
+  rdv-middleman, rdv-ask-panel.
 - `sess_059b885d` was the live room's agent (now killed by the daemon; the
   room is paused and revives on the next message). Do not kill room agents.
 
@@ -253,8 +281,8 @@ re-proven on a phone after `4e73786`.
 
 ## Blocked, and on whom
 
-- Nothing is blocked on a human tonight. Jeremy is away until morning; the
-  operator checks in periodically.
+- Jeremy is awake (05:11 local) and has the morning report. Nothing further
+  runs unattended.
 - Morning items needing Jeremy: re-prove resume on a real phone; decide
   whether to re-enable route `9de0da85`; rotate the Telegram bot tokens that
   transited an executor transcript (see `docs/UPSTREAM.md` security note).
