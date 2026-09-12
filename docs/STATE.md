@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 01:31 UTC (03:31 local). Repo: this directory,
+Last updated: 2026-09-12 01:34 UTC (03:34 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -90,8 +90,8 @@ Last updated: 2026-09-12 01:31 UTC (03:31 local). Repo: this directory,
 4. Leave/switch — DONE (`cfb9aa5`).
 5. Whisper, N addressed messages per turn — DONE (`741fe35`, `dc1b178`).
 6. Middleman (agent solicits from each member, asks recorded in the room,
-   never stalls) — SPEC IN PROGRESS (executor rdv-middleman-spec), build
-   after item 3.
+   never stalls) — SPEC DONE (`25f453b`, `docs/MIDDLEMAN.md`, architecture
+   §2.5); build after item 3.
 7. Multimodal implementation — SPEC DONE (`docs/MULTIMODAL.md`), build last.
 8. Deck — DONE and current at `58da294` (13 pages, `deck/rendez-vous.pdf`,
    includes the deliverable beat, the codex verdict and the "why a room" slide).
@@ -108,7 +108,7 @@ Last updated: 2026-09-12 01:31 UTC (03:31 local). Repo: this directory,
     (app-serve ui.path, reconnect not pausing, spawn surviving disconnect).
 
 12. Morning email to Jeremy (deck PDF, script, status body) to jeremy@agentik.net ONLY,
-    by 02:20 UTC — NOT STARTED; brief at `/tmp/rdv-briefs/email-jeremy.txt` (Sonnet).
+    by 02:20 UTC — IN PROGRESS (executor rdv-morning-email, `sess_8cfaa0a7`, Sonnet).
     The only outbound email authorised overnight. Verify the attachment arrives.
 
 Demo status: run 3 on a real phone passed (attribution, fan-out, artifact
@@ -126,7 +126,8 @@ re-proven on a phone after `4e73786`.
 - `sess_9726365f` rdv-box-liveness, sonnet: `src/service/box-liveness.ts`,
   `room-service.ts`, `booter.ts`, `src/sandbox/boot.ts`, their tests, one
   RUNBOOK section. Fenced from fanout, web, http.ts, artifact-proxy, deliverable.
-- `sess_aa2f4908` rdv-middleman-spec, GLM: `docs/MIDDLEMAN.md`, architecture §2.5.
+- `sess_8cfaa0a7` rdv-morning-email, sonnet: `deck/out/` renders, `scripts/send-deck-email.ts`,
+  one line in `docs/STATE.md`, a section in `docs/REHEARSAL.md`. Recipient jeremy@agentik.net only.
 - `sess_54be45ab` rdv-up-agent-prompt-queue, GLM: worktree `wt/agent-prompt-queue`.
 - `sess_c0291dc5` rdv-up-session-liveness, GLM: worktree `wt/session-liveness`.
 - `sess_452f3bc7` rdv-up-mcp-proxy-auth, GLM: worktree `wt/mcp-proxy-auth`.
