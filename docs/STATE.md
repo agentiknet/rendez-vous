@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 01:33 UTC (03:33 local). Repo: this directory,
+Last updated: 2026-09-12 01:40 UTC (03:40 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -92,7 +92,11 @@ Last updated: 2026-09-12 01:33 UTC (03:33 local). Repo: this directory,
    `sess_9726365f`, Sonnet; will spend 1 boot on its live proof).
 3. Deliverable flow: preview → member confirm → PDF via canvakit → send to
    Jeremy's messenger AND the connected mailbox, every send in the transcript,
-   recipient allowlist enforced — IN PROGRESS (executor rdv-deliverable-flow).
+   recipient allowlist enforced — CODE DONE (`46912d3`, `docs/DELIVERABLE.md`,
+   commands `send pdf to <address>`, `confirm <token>`, `cancel <token>`).
+   First real exercise against Jeremy's own contact and mailbox: IN PROGRESS
+   (executor rdv-flow-exercise). The demo service was restarted on `46912d3`
+   at 01:38 UTC (pid 85899), so the proxy URL and the flow are live.
 4. Leave/switch — DONE (`cfb9aa5`).
 5. Whisper, N addressed messages per turn — DONE (`741fe35`, `dc1b178`).
 6. Middleman (agent solicits from each member, asks recorded in the room,
@@ -106,8 +110,11 @@ Last updated: 2026-09-12 01:33 UTC (03:33 local). Repo: this directory,
     at the auth gate (`docs/CODEX-FLIP.md`, architecture §9.3).
 11. Upstream agentproto PRs, each in its own worktree with a regression test
     that reproduces the out-of-band failure — IN PROGRESS:
-    agent_prompt queue-by-default (rdv-up-agent-prompt-queue), session
-    liveness signal (rdv-up-session-liveness), `/mcps/proxy/call` auth gate
+    agent_prompt queue-by-default — PR OPEN https://github.com/agentproto/ts/pull/1274;
+    session liveness signal — PR OPEN https://github.com/agentproto/ts/pull/1273
+    (note: agentproto/ts is its own nested git repo; worktrees live under
+    `/Volumes/SSDExternalMacStudio/Code/_agentproto-worktrees/agentproto-ts/`);
+    `/mcps/proxy/call` auth gate
     (rdv-up-mcp-proxy-auth), reap orphaned boxes + `sandbox gc`
     (rdv-up-reap-orphans), sandbox liveness signal (rdv-up-sandbox-liveness). NOT STARTED: the remaining docs/UPSTREAM.md items
     (app-serve ui.path, reconnect not pausing, spawn surviving disconnect).
@@ -124,14 +131,9 @@ re-proven on a phone after `4e73786`.
 ## Executors running (session id, model, owns / fenced to)
 
 - `sess_1114ae10` rdv-up-sandbox-liveness, GLM: worktree `wt/sandbox-liveness` (upstream PR).
-- `sess_5d7b39d2` rdv-deliverable-flow, sonnet: `src/service/deliverable.ts`,
-  `pdf-render.ts`, `media-store.ts`, their tests, `docs/DELIVERABLE.md`,
-  minimal hooks in `room-service.ts`/`http.ts`, additive `src/env.ts`.
 - `sess_9726365f` rdv-box-liveness, sonnet: `src/service/box-liveness.ts`,
   `room-service.ts`, `booter.ts`, `src/sandbox/boot.ts`, their tests, one
   RUNBOOK section. Fenced from fanout, web, http.ts, artifact-proxy, deliverable.
-- `sess_54be45ab` rdv-up-agent-prompt-queue, GLM: worktree `wt/agent-prompt-queue`.
-- `sess_c0291dc5` rdv-up-session-liveness, GLM: worktree `wt/session-liveness`.
 - `sess_452f3bc7` rdv-up-mcp-proxy-auth, GLM: worktree `wt/mcp-proxy-auth`.
 - `sess_7bcde422` rdv-up-reap-orphans, GLM: phase A read-only audit of e2b
   boxes left by dead sessions (report only), then worktree `wt/reap-failed-boots`.
