@@ -659,10 +659,22 @@ async function handleAgentpushMailWebhook(
  *  same wire shape. Per-room bearer auth is enforced inside each handler
  *  (the token binds to the room), after the body is parsed — so the handler
  *  functions stay directly testable. */
+/** Every request that reaches an MCP endpoint, one line, method + whether an
+ *  Authorization header arrived. Low volume (a handful per turn) and it is the
+ *  only way to tell the three failure modes apart from the outside: no line at
+ *  all means the client never reached us (it 404'd on discovery and went to
+ *  OAuth); a line with `auth=no` means the daemon did not forward the headers
+ *  we mounted; `auth=yes` followed by a 401 means the token itself is wrong. */
+function logMcpRequest(route: string, req: IncomingMessage): void {
+  const hasAuth = typeof req.headers.authorization === "string" && req.headers.authorization.length > 0
+  console.log(`mcp ${route}: ${req.method ?? "?"} auth=${hasAuth ? "yes" : "no"}`)
+}
+
 async function handleMcpPost(
-  handler: (body: unknown, authorization: string | undefined) => Promise<McpResponse>,
+  handler: (body: unknown, authorization: string | undefined, queryToken?: string) => Promise<McpResponse>,
   req: IncomingMessage,
   res: ServerResponse,
+  queryToken?: string,
 ): Promise<void> {
   let body: unknown
   try {
@@ -676,7 +688,11 @@ async function handleMcpPost(
     return
   }
   const authorization = req.headers.authorization
-  const mcpResponse = await handler(body, Array.isArray(authorization) ? authorization[0] : authorization)
+  const mcpResponse = await handler(
+    body,
+    Array.isArray(authorization) ? authorization[0] : authorization,
+    queryToken,
+  )
   if (mcpResponse.status === 202) {
     res.writeHead(202)
     res.end()
@@ -704,12 +720,36 @@ async function handle(
   }
 
   if (url.pathname === "/mcp/canvakit" && req.method === "POST") {
+    logMcpRequest("canvakit", req)
     await handleMcpPost(mcpCanvakit, req, res)
     return
   }
 
   if (url.pathname === "/mcp/room" && req.method === "POST") {
-    await handleMcpPost(mcpRoom, req, res)
+    logMcpRequest("room", req)
+    // `?t=` is the token's second carrier — see `roomMcpMount`. The header is
+    // still preferred; this only fires when it did not survive the box.
+    await handleMcpPost(mcpRoom, req, res, url.searchParams.get("t") ?? undefined)
+    return
+  }
+
+  // A POST-only Streamable HTTP MCP server must answer 405 on the methods it
+  // does not implement — NOT 404. This is not pedantry about status codes: an
+  // MCP client that gets a 404 on its opening `GET` concludes the endpoint
+  // does not exist and falls back to OAuth discovery, which 404s in turn
+  // (`/.well-known/*`, `/register` — we serve none), and the agent sees
+  // "Dynamic Client Registration rejected (HTTP 404)". It never POSTs, so the
+  // bearer we mounted is never sent and our handler never runs.
+  //
+  // Observed 2026-09-12 on the first live room of the tools protocol
+  // (RDV-VPBB): the agent found `roster`/`say`, called them, and every call
+  // died in that handshake. The same shape means the canvakit mount had never
+  // worked from a box either — configured since day one, never once exercised,
+  // which is exactly the silent failure this project exists to document.
+  if (url.pathname === "/mcp/canvakit" || url.pathname === "/mcp/room") {
+    logMcpRequest(url.pathname.slice("/mcp/".length), req)
+    res.writeHead(405, { "content-type": "application/json", allow: "POST" })
+    res.end(JSON.stringify({ error: "method_not_allowed", message: "This MCP endpoint is POST-only." }))
     return
   }
 

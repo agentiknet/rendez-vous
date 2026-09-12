@@ -62,12 +62,32 @@ export function roomAudienceToken(code: string, secret: string): string {
   return createHmac("sha256", secret).update(`audience:${code}`).digest("hex").slice(0, 40)
 }
 
+/**
+ * The token rides in BOTH the `authorization` header and a `?t=` query
+ * parameter, and the endpoint accepts either.
+ *
+ * The header is the right way and stays. The query parameter exists because
+ * the header does not survive the trip: observed live on 2026-09-12, every
+ * MCP request arriving from an e2b box carried `auth=no` (the
+ * `logMcpRequest` line in src/service/http.ts). The host daemon does forward
+ * the mount's `headers` to the box (`toMcpServerMounts`,
+ * agentproto/ts/packages/runtime/src/session-spawn.ts), so the loss is
+ * further down — the box daemon or the ACP client — and it is why the
+ * canvakit mount had never once worked from a box either.
+ *
+ * A bearer in a URL is weaker hygiene than a header: URLs end up in logs and
+ * referrers. Accepted deliberately here because the tunnel is ours, the token
+ * grants exactly one room's audience and nothing else, and the alternative is
+ * a capability that does not function at all. Remove the query arm the day
+ * the header survives the box.
+ */
 function roomMcpMount(code: string, base: string): McpServerMount {
+  const token = roomAudienceToken(code, env.roomTokenSecret)
   return {
     name: "room",
     transport: "http",
-    ref: `${base}/mcp/room`,
-    headers: { authorization: `Bearer ${roomAudienceToken(code, env.roomTokenSecret)}` },
+    ref: `${base}/mcp/room?t=${token}`,
+    headers: { authorization: `Bearer ${token}` },
   }
 }
 
@@ -195,8 +215,11 @@ function unauthorized(id: string | number | null): McpResponse {
 function resolveRoom(
   deps: McpRoomDeps,
   authorization: string | undefined,
+  queryToken?: string,
 ): Room | undefined {
-  const provided = bearerOf(authorization)
+  // Header first — it is the right channel. The `?t=` fallback is why this
+  // works at all from a box today; see `roomMcpMount`.
+  const provided = bearerOf(authorization) ?? (queryToken !== undefined && queryToken.length > 0 ? queryToken : undefined)
   if (provided === undefined) return undefined
   for (const room of deps.rooms()) {
     if (tokensMatch(provided, roomAudienceToken(room.code, env.roomTokenSecret))) return room
@@ -277,8 +300,8 @@ function parseAudienceArgs(
  */
 export function createMcpRoomHandler(
   deps: McpRoomDeps,
-): (body: unknown, authorization: string | undefined) => Promise<McpResponse> {
-  return async (body, authorization) => {
+): (body: unknown, authorization: string | undefined, queryToken?: string) => Promise<McpResponse> {
+  return async (body, authorization, queryToken) => {
     if (!isRecord(body) || typeof body.method !== "string") {
       return fail(null, PARSE_ERROR, "request must be a JSON-RPC 2.0 object with a method")
     }
@@ -309,7 +332,7 @@ export function createMcpRoomHandler(
     if (method === "tools/call") {
       // Token checked before anything else: a rejected call must reveal
       // nothing, not even that a room exists.
-      const room = resolveRoom(deps, authorization)
+      const room = resolveRoom(deps, authorization, queryToken)
       if (room === undefined) return unauthorized(id)
 
       if (params.name === ROSTER_TOOL.name) {

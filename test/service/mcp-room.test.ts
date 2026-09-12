@@ -231,16 +231,43 @@ test("an unknown tool or method is a JSON-RPC failure, not a roster call", async
   assert.equal(unknownMethod.error?.code, -32601)
 })
 
-test("the mounts carry the room's token: tunnel ref for e2b, loopback ref for local", () => {
+// The token rides in BOTH the header and the `?t=` query parameter, and the
+// endpoint accepts either. The header alone does not survive the trip into an
+// e2b box (observed live 2026-09-12: every MCP request arrived `auth=no`),
+// which is why the query arm exists at all — so BOTH carriers are asserted,
+// and a regression that silently drops one is a failing test rather than a
+// room that cannot address anybody.
+test("the mounts carry the room's token in both carriers: tunnel ref for e2b, loopback ref for local", () => {
+  const bare = tokenFor(ROOM_A).replace(/^Bearer /, "")
+
   const tunnel = roomMcpServer(ROOM_A)
   assert.equal(tunnel.name, "room")
   assert.equal(tunnel.transport, "http")
-  assert.equal(tunnel.ref, `${env.publicUrl}/mcp/room`)
+  assert.equal(tunnel.ref, `${env.publicUrl}/mcp/room?t=${bare}`)
   assert.equal(tunnel.headers.authorization, tokenFor(ROOM_A))
 
   const local = localRoomMcpServer(ROOM_A)
-  assert.equal(local.ref, `http://127.0.0.1:${env.port}/mcp/room`)
+  assert.equal(local.ref, `http://127.0.0.1:${env.port}/mcp/room?t=${bare}`)
   assert.equal(local.headers.authorization, tokenFor(ROOM_A))
+
+  // Same room, same token, whichever carrier and whichever base.
+  assert.equal(new URL(tunnel.ref).searchParams.get("t"), bare)
+  assert.equal(new URL(local.ref).searchParams.get("t"), bare)
+})
+
+test("the endpoint accepts the token from ?t= when no Authorization header arrives", async () => {
+  const { handler } = harness([room(ROOM_A, MEMBERS_A)])
+  const call = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "roster", arguments: {} } }
+  const bare = (code: string): string => tokenFor(code).replace(/^Bearer /, "")
+
+  const viaQuery = await handler(call, undefined, bare(ROOM_A))
+  assert.equal(viaQuery.status, 200, "a query token alone must authenticate — this is the only carrier that survives a box")
+
+  const neither = await handler(call, undefined, undefined)
+  assert.equal(neither.status, 401, "no carrier at all is still unauthorized")
+
+  const wrongRoom = await handler(call, undefined, bare(ROOM_B))
+  assert.equal(wrongRoom.status, 401, "a query token for another room binds no better than a header would")
 })
 
 test("a room round-tripped through the store with protocol 'tools' keeps it", async () => {
