@@ -551,7 +551,7 @@ async function handleAgentpushWebhook(
   const ingested = await ingestEnvelopeMedia(envelope, media)
 
   // agentpush's envelope has no name field, so `displayName` arrives as the
-  // contact ref itself — members would see each other as `8876379006` and the
+  // contact ref itself — members would see each other as `700000002` and the
   // agent would address them that way. Resolve a real name where we can
   // (src/channels/display-name.ts); never fatal, falls back to the ref.
   const displayName = await resolveDisplayName(envelope.provider, envelope.contactRef)

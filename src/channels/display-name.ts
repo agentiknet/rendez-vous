@@ -6,13 +6,13 @@
  * `InboundEnvelope.displayName` is the contact ref itself
  * (src/channels/agentpush/inbound.ts). In a room that shows every message as
  * `[Name · tier] …`, that means members appear to each other as
- * `8876379006` and `33679942048`, and the agent addresses them that way too.
+ * `700000002` and `33600000001`, and the agent addresses them that way too.
  * It reads like a database, not a conversation.
  *
  * Two sources, in this order:
  *
  * 1. **`RDV_MEMBER_NAMES`** — an explicit operator map,
- *    `"6371794295=Jeremy,33679942048=Alain"`. Wins over everything: it is the
+ *    `"6371794295=Jeremy,33600000001=Alain"`. Wins over everything: it is the
  *    escape hatch for a channel with no name API, a wrong name, or a demo
  *    where you want specific labels.
  * 2. **The provider's own directory** — for Telegram, `getChat(chat_id)`

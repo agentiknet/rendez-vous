@@ -2,7 +2,7 @@
  * `resolveDisplayName` — real names instead of raw contact refs.
  *
  * agentpush's envelope has no name field, so `displayName` arrives as the
- * contact ref and the room reads like a database: `[8876379006 · messenger]`.
+ * contact ref and the room reads like a database: `[700000002 · messenger]`.
  * These tests pin the two things that matter — that a lookup failure can
  * never break message delivery, and that the operator override always wins.
  */
@@ -83,7 +83,7 @@ test("non-telegram channels are never looked up against Telegram", async () => {
   // phone number would be a wrong answer, not a missing one.
   for (const provider of ["whatsapp", "sms", "email"]) {
     let called = false
-    const name = await resolveDisplayName(provider, "33679942048", {
+    const name = await resolveDisplayName(provider, "33600000001", {
       telegramBotToken: TOKEN,
       fetch: async () => {
         called = true
@@ -91,7 +91,7 @@ test("non-telegram channels are never looked up against Telegram", async () => {
       },
       noCache: true,
     })
-    assert.equal(name, "33679942048", `${provider} should keep the ref`)
+    assert.equal(name, "33600000001", `${provider} should keep the ref`)
     assert.equal(called, false, `${provider} must not hit the Telegram API`)
   }
 })
@@ -103,8 +103,8 @@ test("the result is cached, so the inbound hot path costs one lookup per contact
     return { ok: true, json: async () => ({ ok: true, result: { first_name: "Tomtip" } }) }
   }
 
-  const first = await resolveDisplayName("telegram", "8876379006", { telegramBotToken: TOKEN, fetch: counting })
-  const second = await resolveDisplayName("telegram", "8876379006", { telegramBotToken: TOKEN, fetch: counting })
+  const first = await resolveDisplayName("telegram", "700000002", { telegramBotToken: TOKEN, fetch: counting })
+  const second = await resolveDisplayName("telegram", "700000002", { telegramBotToken: TOKEN, fetch: counting })
 
   assert.equal(first, "Tomtip")
   assert.equal(second, "Tomtip")

@@ -145,7 +145,7 @@ export interface Env {
    */
   readonly roomTokenSecret: string
   /** Operator-supplied display names, from `RDV_MEMBER_NAMES`:
-   *  `"6371794295=Jeremy,33679942048=Alain"`. Wins over any provider lookup
+   *  `"6371794295=Jeremy,33600000001=Alain"`. Wins over any provider lookup
    *  (src/channels/display-name.ts) — the escape hatch for a channel with no
    *  name API (WhatsApp, SMS, email), a wrong name, or a demo that wants
    *  specific labels. Undefined when unset. */
