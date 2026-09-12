@@ -246,8 +246,12 @@ running. The tree is clean and origin/main is in sync.
     Morning email to Jeremy: SENT 2026-09-12T01:26:24Z, attachment verified: yes, method: manual
 
 Demo status: run 3 on a real phone passed (attribution, fan-out, artifact
-edit). Resume-after-kill is marked NOT demo-safe in `docs/DEMO.md` until
-re-proven on a phone after `4e73786`.
+edit). Resume-after-pause is now demo-safe too — proven live 2026-09-12
+07:54:11 UTC from Jeremy's phone: a real Telegram message into paused room
+`RDV-NG7F` flipped it active, 3 inbound / 3 outbound counted by agentpush,
+`cursor: 15` preserved, artifact ready on the proxy URL. Resume boots a
+FRESH box by design (`0af9580`), so transcript continuity holds but the old
+box's filesystem does not. See `docs/DEMO.md` §9.
 
 ## Executors running (session id, model, owns / fenced to)
 
