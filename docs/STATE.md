@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 01:40 UTC (03:40 local). Repo: this directory,
+Last updated: 2026-09-12 01:45 UTC (03:45 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -114,6 +114,7 @@ Last updated: 2026-09-12 01:40 UTC (03:40 local). Repo: this directory,
     session liveness signal — PR OPEN https://github.com/agentproto/ts/pull/1273
     (note: agentproto/ts is its own nested git repo; worktrees live under
     `/Volumes/SSDExternalMacStudio/Code/_agentproto-worktrees/agentproto-ts/`);
+    app serve ui.path fix (rdv-up-app-serve-ui-path);
     `/mcps/proxy/call` auth gate
     (rdv-up-mcp-proxy-auth), reap orphaned boxes + `sandbox gc`
     (rdv-up-reap-orphans), sandbox liveness signal (rdv-up-sandbox-liveness). NOT STARTED: the remaining docs/UPSTREAM.md items
@@ -131,6 +132,10 @@ re-proven on a phone after `4e73786`.
 ## Executors running (session id, model, owns / fenced to)
 
 - `sess_1114ae10` rdv-up-sandbox-liveness, GLM: worktree `wt/sandbox-liveness` (upstream PR).
+- `sess_8d869128` rdv-flow-exercise, sonnet: drives the first real deliverable send to
+  Jeremy's own contact and mailbox via the simulated inbound route; edits only
+  docs/REHEARSAL.md, docs/STATE.md and `.env.local` (allowlist line).
+- rdv-up-app-serve-ui-path (id via `sv.sh status`), GLM: worktree `wt/app-serve-ui-path` (upstream PR).
 - `sess_9726365f` rdv-box-liveness, sonnet: `src/service/box-liveness.ts`,
   `room-service.ts`, `booter.ts`, `src/sandbox/boot.ts`, their tests, one
   RUNBOOK section. Fenced from fanout, web, http.ts, artifact-proxy, deliverable.
