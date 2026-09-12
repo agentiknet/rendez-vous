@@ -670,6 +670,20 @@ per-member billing, and no pooled credential anywhere.
 Reserve `device` for a room spec that declares itself sensitive, and `profile`
 for solo or development rooms where the operator is the only human.
 
+**Tool grants belong to the room.** Everything above is about which *model*
+account authenticates the box. A separate question, easy to conflate with it:
+a room is multiplayer, so any *tool* granted to the room is granted to every
+member of it. Credentials for those tools must be scoped per member and per
+room — never inherited from whoever happened to boot the box. Concretely:
+agentpush API keys have exactly three scopes, `send-only`, `read-only`, `full`
+(`packages/core/src/domain/api-keys/schema.ts:4` in the read-only checkout) —
+none of them per-member. "Let the agent read email" as a room capability would
+hand the whole workspace mailbox to anyone who has the room code, not just the
+member who connected it. The email presence tier itself never needs this:
+inbound mail becomes a room turn through the `rendez-vous-mail` route
+(docs/AGENTPUSH.md §8.3), which is routing a message in, not granting mailbox
+access. Per-member tool scoping is phase 2, not implemented.
+
 **One consequence worth designing around:** subscription auth gates the model
 list. The `codex-local` profile allows only `gpt-5.6-luna | sol | terra` — the
 ChatGPT-tier models — while the adapter manifest lists 38 including
