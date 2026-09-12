@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 01:34 UTC (03:34 local). Repo: this directory,
+Last updated: 2026-09-12 01:44 UTC (03:44 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -41,7 +41,9 @@ Last updated: 2026-09-12 01:34 UTC (03:34 local). Repo: this directory,
   read them with `sv.sh out`, `sv.sh queue`, `sv.sh status`. Retire finished
   ones with `POST /sessions/<id>/kill`.
 - Executors commit ONLY by explicit pathspec after `git status`; never
-  `git add -A`; no AI attribution in commits or PR bodies.
+  `git add -A`; no AI attribution in commits or PR bodies. Beware: `git commit -- <file>`
+  and `git add <file>` take the WHOLE working-tree file, including another
+  executor's uncommitted edits to it; check `git show --stat HEAD` after every commit.
 - Drive the room without a phone: `POST https://rdv.clipgen.co/inbound/simulated`
   with `{provider, source, contactRef, displayName, tier, text}` using a
   synthetic contact. Use the real contactRef only when delivery to the phone
@@ -79,8 +81,12 @@ Last updated: 2026-09-12 01:34 UTC (03:34 local). Repo: this directory,
 1. Liveness/resume fix, re-proven live — DONE (`4e73786`; revived room
    RDV-NG7F on a reconnect, 13 s). Re-proof on a FRESH box: not yet done;
    folded into item 2b's live proof.
-2. Room-scoped proxied artifact URL `GET /r/:code/artifact/*` — IN PROGRESS
-   (executor rdv-artifact-proxy).
+2. Room-scoped proxied artifact URL `GET /r/:code/artifact/*` — DONE (`5daab38`;
+   members only ever see https://rdv.clipgen.co/r/<code>/artifact/, the raw
+   box URL stays inside the service, 503 self-heal page when the box is down).
+   NOTE: the running service on :8790 predates this commit; restart it
+   (`set -a; source .env.local; set +a; nohup node src/cli.ts serve >> /private/tmp/rdv-rehearsal/run3/service.log 2>&1 &`)
+   once the deliverable-flow and box-liveness commits land, so all three go live together.
    2b. Box liveness as a second fact (probe e2b; never advertise a dead box's
    URL; restore on a fresh box) — IN PROGRESS (executor rdv-box-liveness,
    `sess_9726365f`, Sonnet; will spend 1 boot on its live proof).
@@ -103,8 +109,7 @@ Last updated: 2026-09-12 01:34 UTC (03:34 local). Repo: this directory,
     agent_prompt queue-by-default (rdv-up-agent-prompt-queue), session
     liveness signal (rdv-up-session-liveness), `/mcps/proxy/call` auth gate
     (rdv-up-mcp-proxy-auth), reap orphaned boxes + `sandbox gc`
-    (rdv-up-reap-orphans). NOT STARTED: sandbox liveness signal, brief at
-    `/tmp/rdv-briefs/up3.txt`; the remaining docs/UPSTREAM.md items
+    (rdv-up-reap-orphans), sandbox liveness signal (rdv-up-sandbox-liveness). NOT STARTED: the remaining docs/UPSTREAM.md items
     (app-serve ui.path, reconnect not pausing, spawn surviving disconnect).
 
 12. Morning email to Jeremy (deck PDF, script, status body) to jeremy@agentik.net ONLY,
@@ -118,9 +123,7 @@ re-proven on a phone after `4e73786`.
 
 ## Executors running (session id, model, owns / fenced to)
 
-- `sess_74d1b273` rdv-artifact-proxy, sonnet: `src/service/artifact-proxy.ts`,
-  its test, then wiring in `src/service/http.ts`, fan-out artifact line,
-  `src/web/page.ts`.
+- rdv-up-sandbox-liveness (id via `sv.sh status`), GLM: worktree `wt/sandbox-liveness` (upstream PR).
 - `sess_5d7b39d2` rdv-deliverable-flow, sonnet: `src/service/deliverable.ts`,
   `pdf-render.ts`, `media-store.ts`, their tests, `docs/DELIVERABLE.md`,
   minimal hooks in `room-service.ts`/`http.ts`, additive `src/env.ts`.
