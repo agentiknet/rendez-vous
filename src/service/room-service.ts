@@ -98,6 +98,7 @@ function newRoomReplyText(room: Room, links: JoinLinks): string {
   if (links.whatsapp !== undefined) lines.push(links.whatsapp)
   if (links.telegram !== undefined) lines.push(links.telegram)
   if (links.sms !== undefined) lines.push(links.sms)
+  lines.push(AUDIENCE_HINT)
   return lines.join("\n")
 }
 
@@ -111,6 +112,7 @@ function joinRoomReplyText(room: Room): string {
   if (artifactUrl !== undefined) {
     lines.push(artifactUrl)
   }
+  lines.push(AUDIENCE_HINT)
   return lines.join("\n")
 }
 
