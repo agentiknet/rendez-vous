@@ -4,6 +4,33 @@ In order. `docs/RUNBOOK.md` has the full detail behind every command here;
 `docs/AGENTPUSH.md` §3/§8 has the webhook contract; `docs/ARTIFACT.md` has
 the sandbox seeding strategy.
 
+## Deploy picture
+
+**Runs locally on this Mac:** the agentproto daemon (18790), the Rendez-vous
+service itself (`node src/cli.ts serve`, port 8790), and a cloudflared
+tunnel in front of it. **The Rendez-vous service is not deployed anywhere
+else** — it only ever runs on whichever machine executes this checklist.
+
+**Deployed to a server:** agentpush prod, on Cloud Run — `api` and `worker`
+at HEAD as of 2026-09-12, base URL `https://api.agentpush.io`. `responder`
+and `web` were **not** redeployed: a dirty-tree guard blocked that deploy.
+`worker`'s own health check returns 404, and did so before this deploy too
+— unsure whether that 404 is expected (a route that simply isn't mounted) or
+a real regression; not independently re-verified against the live service
+for this checklist.
+
+**Not provisioned:** no agentpush workspace with a connected WhatsApp
+number, no agentpush API key minted, no inbound routes created. WhatsApp,
+Telegram, SMS and email are **not reachable** on stage until an operator
+completes docs/AGENTPUSH.md §3 (and §8 for mail).
+
+**Must be up before the first message can be sent:** the agentproto daemon
+and the Rendez-vous service, always. The tunnel, only if a real channel
+(WhatsApp/Telegram/email, via agentpush) is being used — a tier-3 rehearsal
+against `127.0.0.1:8790` directly needs no tunnel. An e2b account (env var
+`E2B_API_KEY`), only if `RDV_BOOTER=e2b` — otherwise `LocalBooter` needs
+none of it, at the cost of no sandbox and no artifact.
+
 ## 1. Pre-warm one e2b box
 
 ```
@@ -33,29 +60,32 @@ nothing downstream will work.
 
 ## 3. Start the tunnel
 
-Two named tunnels already exist on this machine (`~/.cloudflared/*.yml`),
-but none of them point at Rendez-vous's port — they're `postiz`, `guilde`,
-`llm-endpoint`, `local-3000`, and `agentproto-local` (the daemon itself, not
-this service). Making a new named tunnel needs a DNS route this checklist
-deliberately doesn't run. **Default to the quick tunnel**:
+**Use the named tunnel — not `--quick`.** A quick tunnel mints a fresh
+random `*.trycloudflare.com` hostname on every run, which silently
+invalidates any join link or QR already sent (architecture.md §9.3b); what
+gets rehearsed has to be what gets demoed. A dedicated tunnel now exists for
+this: `rendez-vous`, routing `rdv.clipgen.co` → `http://127.0.0.1:8790`
+(`~/.cloudflared/rendez-vous.yml`; DNS routed once via `cloudflared tunnel
+route dns --overwrite-dns <tunnel-uuid> rdv.clipgen.co` — pass the tunnel's
+UUID to `route dns`, not its name, on this machine's cloudflared build,
+which resolves a name argument against the wrong tunnel; docs/REHEARSAL.md
+has the full story). Start it with:
 
 ```
-scripts/tunnel.sh --quick
+scripts/tunnel.sh --named rendez-vous
 ```
 
-Watch stderr for the `RDV_PUBLIC_URL=https://....trycloudflare.com` line
-and export it in another shell:
+It prints `RDV_PUBLIC_URL=https://rdv.clipgen.co` immediately (no need to
+watch for a hostname to appear) — export it in another shell:
 ```
-export RDV_PUBLIC_URL=https://<the printed hostname>
+export RDV_PUBLIC_URL=https://rdv.clipgen.co
 ```
-Trade-off: zero setup, but the hostname is random per run — if the tunnel
-dies mid-demo, restarting it means updating both agentpush routes (step 5)
-with the new URL. If a stable hostname turns out to matter more than
-zero-setup on the day, `scripts/tunnel.sh --named <name>` runs one of the
-existing named tunnels instead — but none is currently pointed at this
-service's port, so that requires reconfiguring one first (out of scope
-here; not a `tunnel route dns` change, just editing that tunnel's own
-ingress, which this script doesn't do for you).
+Prove it once the service is up: `curl -s https://rdv.clipgen.co/health`.
+Stop the tunnel at the end of every session; don't leave it running.
+
+The other named tunnels on this machine (`postiz`, `guilde`, `llm-endpoint`,
+`local-3000`, `agentproto-local`) point at other services — leave them
+alone.
 
 ## 4. `.env.local` values
 
@@ -139,9 +169,9 @@ A `room.code` in the reply means fan-in, session spawn, and (if
   member resumes it automatically; nothing to do by hand.
 - **Daemon restarted** → have anyone send `resume <code>` on any tier; the
   room reconnects the sandbox and re-probes the artifact (R8).
-- **Tunnel died** → rerun `scripts/tunnel.sh --quick`, re-export
-  `RDV_PUBLIC_URL`, and re-run step 5 for both routes (the hostname
-  changed, so agentpush is still pointed at the dead one until updated).
+- **Tunnel died** → rerun `scripts/tunnel.sh --named rendez-vous`. The
+  hostname (`rdv.clipgen.co`) is stable across restarts, so `RDV_PUBLIC_URL`
+  and the agentpush routes from step 5 stay valid — no re-export, no rerun.
 
 ## 10. Venue network
 

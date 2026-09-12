@@ -39,7 +39,7 @@ case "$1" in
       echo "no config at $config" >&2
       exit 1
     fi
-    hostname=$(grep -m1 'hostname:' "$config" | awk '{print $2}')
+    hostname=$(grep -m1 'hostname:' "$config" | awk '{print $NF}')
     if [ -z "$hostname" ]; then
       echo "no hostname found in $config" >&2
       exit 1
