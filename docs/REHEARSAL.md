@@ -302,6 +302,57 @@ running** — a real human is mid-session; tearing any of it down now would
 cut off the operator's own live use, not just a rehearsal artifact. This is
 a deliberate deviation from the "leave nothing running" rule that governed
 Runs 1–2 (which were pure rehearsal); flagged explicitly rather than
-assumed. Boot budget: **4 of 4 used** — this run's cold boot was the last
-one; no more fresh boots available without operator/owner sign-off on going
-over budget.
+assumed. Boot budget: 4 of 4 used by this point; a 5th was later authorised,
+scoped only to the resume-after-kill check below if the box turns out to be
+gone rather than merely paused.
+
+**Note:** between the write-up above and the continuation below, the
+supervisor restarted the service on `b58de3d` ("Fix resume cursor, stranded
+rooms, artifact re-seed and the edit path") at 00:33Z — this is the process
+swap noted earlier as an unexplained anomaly; it's now explained, not a
+mystery. The fan-out cursor bug and the stranded-room bug this rehearsal
+found in Run 2 should therefore behave differently from here on; the
+resume-after-kill check below is the first real test of that fix on a live
+room.
+
+## Run 3 continuation — two members at once, fan-out, resume-after-kill
+
+Re-scoped by the supervisor: `new` is already observed and closed (above).
+This continuation covers only what hadn't been exercised yet on the same
+room (`RDV-NG7F`, session `sess_5a592b25`, box `i7jos61ixgkcfrekmi1vl`) — no
+new room, no fresh boot unless the resume check needs one.
+
+| # | Check | Needs Jeremy's hands | Executor-driven |
+| --- | --- | --- | --- |
+| 1 | Two members at once, visible attribution | **One Telegram message**, any time after Bob's web message below | Bob's message via `POST /rooms/RDV-NG7F/send`; read both attribution badges from `GET /rooms/RDV-NG7F/stream` |
+| 2 | Fan-out reaching both | (same message as #1) | Confirm the agent's reply after Jeremy's message appears in the web transcript AND check `service.log` for the Telegram `send_message` call/status |
+| 3 | Resume-after-kill | **One Telegram message**, sent ~20s after the executor's kill | Kill `sess_5a592b25` via `POST /sessions/:id/kill` with the daemon bearer; wait 20s; on Jeremy's message, record the "Resuming room" notice (if any), time to reply, whether the artifact URL is unchanged and still serves pre-kill content, and whether the reply reaches both members |
+
+### Step 1 & 2 — executor-driven part done, waiting on Jeremy
+
+Posted at 00:39:49.958Z via `POST /rooms/RDV-NG7F/send`:
+```
+[Bob · room-web] Bob here on the laptop room view — Jeremy, send one
+message from Telegram now so we can see both of us in the transcript at
+once.
+```
+Reply, confirmed via SSE (`seq 199`, turn-end `seq 202` at 00:39:55.850Z):
+*"Noted — standing by while Jeremy sends that from Telegram."* Attribution
+badge confirmed exactly as `[Bob · room-web]` in the raw event.
+
+**WAITING on Jeremy's one Telegram message** to complete steps 1–2. Once it
+lands: record its `[<name> · messenger]` attribution badge from the same
+stream, confirm the agent's next reply shows in the web transcript, and
+check `service.log` for the `send_message` call covering that reply (or the
+absence of a `[channels/agentpush] ... failed/blocked/error` line, per the
+logging caveat noted earlier in this doc — success still isn't logged
+explicitly as of `b58de3d`).
+
+### Step 3 — not yet started
+
+Blocked on steps 1–2 landing first (same room, same session — don't kill it
+out from under Jeremy's pending message). Once steps 1–2 are recorded, the
+executor will: kill `sess_5a592b25` via the daemon, wait 20s, then wait for
+Jeremy's second Telegram message and record the outcome as specified above.
+
+**WAITING on Jeremy's second Telegram message**, sent after the kill+wait.
