@@ -328,7 +328,7 @@ new room, no fresh boot unless the resume check needs one.
 | 2 | Fan-out reaching both | (same message as #1) | Confirm the agent's reply after Jeremy's message appears in the web transcript AND check `service.log` for the Telegram `send_message` call/status |
 | 3 | Resume-after-kill | **One Telegram message**, sent ~20s after the executor's kill | Kill `sess_5a592b25` via `POST /sessions/:id/kill` with the daemon bearer; wait 20s; on Jeremy's message, record the "Resuming room" notice (if any), time to reply, whether the artifact URL is unchanged and still serves pre-kill content, and whether the reply reaches both members |
 
-### Step 1 & 2 — executor-driven part done, waiting on Jeremy
+### Steps 1 & 2 — DONE: two members at once, attribution confirmed, fan-out confirmed in the web transcript
 
 Posted at 00:39:49.958Z via `POST /rooms/RDV-NG7F/send`:
 ```
@@ -340,19 +340,73 @@ Reply, confirmed via SSE (`seq 199`, turn-end `seq 202` at 00:39:55.850Z):
 *"Noted — standing by while Jeremy sends that from Telegram."* Attribution
 badge confirmed exactly as `[Bob · room-web]` in the raw event.
 
-**WAITING on Jeremy's one Telegram message** to complete steps 1–2. Once it
-lands: record its `[<name> · messenger]` attribution badge from the same
-stream, confirm the agent's next reply shows in the web transcript, and
-check `service.log` for the `send_message` call covering that reply (or the
-absence of a `[channels/agentpush] ... failed/blocked/error` line, per the
-logging caveat noted earlier in this doc — success still isn't logged
-explicitly as of `b58de3d`).
+Jeremy's Telegram message landed at 00:42:18.973Z, attribution confirmed via
+SSE exactly as `[6371794295 · messenger]` (`seq 204`): *"noted what ?"*.
+Reply at `seq 206`, turn-end `seq 209` (00:42:22.083Z, ~3.1s later):
+*"Just acknowledging Bob's request for you to send a Telegram message so
+you both show up in the transcript together — no action needed from me
+there."* Both attribution badges confirmed distinct and correct in the same
+stream — step 1 done.
 
-### Step 3 — not yet started
+Step 2 (fan-out reaching both): the reply above **is confirmed in the web
+transcript** (it's the same SSE stream the web view consumes). **Not
+confirmed the other half** — whether it was actually sent to, and received
+on, Telegram: `service.log` recorded nothing at all beyond its own two
+startup banners for the entire window (00:32Z onward), despite this and
+several earlier real turns. This is itself a finding, not just a gap in my
+checking: **the currently-running process (PID 84514, started by the
+supervisor's restart at 00:32:17Z) has stopped writing anything to its own
+log file past its startup banner**, console output included — I could not
+verify success or failure of any `send_message` call from the log for this
+whole session, only infer non-failure from silence. Telegram delivery of
+this specific reply is therefore attested only by Jeremy's own phone, not
+independently confirmed by this session.
 
-Blocked on steps 1–2 landing first (same room, same session — don't kill it
-out from under Jeremy's pending message). Once steps 1–2 are recorded, the
-executor will: kill `sess_5a592b25` via the daemon, wait 20s, then wait for
-Jeremy's second Telegram message and record the outcome as specified above.
+### Step 3 — resume-after-kill: FAILED, root cause identified
 
-**WAITING on Jeremy's second Telegram message**, sent after the kill+wait.
+Pre-kill artifact baseline captured at 00:43:42Z: 200, 9078 bytes, title
+"Rendez-vous room artifact", contains "Test edit applied" (the earlier live
+edit, confirmed intact).
+
+Killed `sess_5a592b25` via `POST /sessions/:id/kill` with the daemon bearer
+at 00:43:49Z (200, `{"ok":true,"sessionId":"sess_5a592b25"}`). Daemon-side
+session status immediately after: `killed`. Room store immediately after:
+still `state: "active"`, `sessionId: "sess_5a592b25"` unchanged — same
+stale-belief pattern as Run 1. Waited 20s (to 00:44:18Z); store still
+unchanged at that point.
+
+**Then Jeremy sent his one Telegram message and got back, verbatim:**
+```
+Could not deliver your message: sessionnotalive
+```
+No "Resuming room" notice, no retry, no reply reaching either member —
+confirmed by the supervisor relaying what Jeremy's phone showed; I could
+not independently time-stamp the exact moment (the message never produced
+a `user-prompt` event in the session's own SSE stream — consistent with the
+send failing before ever reaching the daemon's prompt queue, at the
+`RoomService` layer, not the daemon's).
+
+**Root cause, reported by the fix executor and consistent with reading the
+current code:** `handleMessage` and `handleResume`
+(`src/service/room-service.ts`) both now call `reviveIfSessionDied`, which
+uses `isSessionAlive` (`src/service/daemon-extra.ts`) to decide whether the
+stored `sessionId` needs reviving before use. `isSessionAlive` treats any
+`200` response from `GET /sessions/:id` as "alive" without checking the
+descriptor's own `status` field — so a `killed` session with a `200`
+descriptor is misreported as alive, `reviveIfSessionDied` does nothing, and
+the message is sent straight at a dead session, which then fails with the
+message above. **Note the wording discrepancy**: Run 1's equivalent failure
+(same underlying scenario, before this liveness check existed) read
+`session_not_alive` (with underscores, the internal error code surfacing
+directly); this run's message reads `sessionnotalive` (no underscores) —
+recorded exactly as relayed, not normalized, since the exact source of that
+specific string wasn't independently verified by this session.
+
+**What this confirms, precisely:** it failed **loudly** — the member was
+told plainly that delivery failed, nothing was silently swallowed — but
+the *recovery* half (detecting the dead session and reviving it before
+trying to use it) does not work yet, despite `b58de3d`'s intent to fix
+exactly this. A fix executor was already on it as of this writing, expected
+to restart the service on port 8790 again once landed. **Artifact
+unchanged/still-serving and reply-reaching-both were not testable** — the
+message never got far enough to matter for either.
