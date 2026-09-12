@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 02:45 UTC (04:45 local). Repo: this directory,
+Last updated: 2026-09-12 02:50 UTC (04:50 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -98,17 +98,20 @@ Last updated: 2026-09-12 02:45 UTC (04:45 local). Repo: this directory,
 ## Frozen build order and where we are
 
 1. Liveness/resume fix, re-proven live — DONE (`4e73786`; revived room
-   RDV-NG7F on a reconnect, 13 s). Re-proof on a FRESH box: not yet done;
-   folded into item 2b's live proof.
+   RDV-NG7F on a reconnect, 13 s; and on a FRESH box in item 2b's live proof).
 2. Room-scoped proxied artifact URL `GET /r/:code/artifact/*` — DONE (`5daab38`;
    members only ever see https://rdv.clipgen.co/r/<code>/artifact/, the raw
    box URL stays inside the service, 503 self-heal page when the box is down).
    NOTE: the running service on :8790 predates this commit; restart it
    (`set -a; source .env.local; set +a; nohup node src/cli.ts serve >> /private/tmp/rdv-rehearsal/run3/service.log 2>&1 &`)
    once the deliverable-flow and box-liveness commits land, so all three go live together.
-   2b. Box liveness as a second fact (probe e2b; never advertise a dead box's
-   URL; restore on a fresh box) — IN PROGRESS (executor rdv-box-liveness,
-   `sess_9726365f`, Sonnet; will spend 1 boot on its live proof).
+   2b. Box liveness as a second fact — DONE (`17e9061`): `isSandboxAlive` probes
+   e2b (alive | paused | gone | unknown, unknown never treated as gone), used in
+   `E2bBooter.resume` (boot fresh when gone) and the idle sweep (marks
+   artifactReady false and pauses the room). Verified live: room created, box
+   deleted via the e2b API, sweep marked it gone, next message revived on a
+   fresh box with the artifact serving. FOLLOW-UP in progress on the same
+   executor: a per-room revive lock for the raced double revive.
 3. Deliverable flow: preview → member confirm → PDF via canvakit → send to
    Jeremy's messenger AND the connected mailbox, every send in the transcript,
    recipient allowlist enforced — CODE DONE (`46912d3`, `docs/DELIVERABLE.md`,
