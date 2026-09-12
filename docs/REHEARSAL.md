@@ -349,18 +349,16 @@ there."* Both attribution badges confirmed distinct and correct in the same
 stream — step 1 done.
 
 Step 2 (fan-out reaching both): the reply above **is confirmed in the web
-transcript** (it's the same SSE stream the web view consumes). **Not
-confirmed the other half** — whether it was actually sent to, and received
-on, Telegram: `service.log` recorded nothing at all beyond its own two
-startup banners for the entire window (00:32Z onward), despite this and
-several earlier real turns. This is itself a finding, not just a gap in my
-checking: **the currently-running process (PID 84514, started by the
-supervisor's restart at 00:32:17Z) has stopped writing anything to its own
-log file past its startup banner**, console output included — I could not
-verify success or failure of any `send_message` call from the log for this
-whole session, only infer non-failure from silence. Telegram delivery of
-this specific reply is therefore attested only by Jeremy's own phone, not
-independently confirmed by this session.
+transcript** (it's the same SSE stream the web view consumes) **and
+operator-confirmed on Telegram** — Jeremy confirmed on his phone, at
+~2026-09-12T00:45Z, that the fan-out replies arrived. `service.log` itself
+still recorded nothing beyond its own two startup banners for the entire
+window (00:32Z onward), despite this and several earlier real turns — that
+gap is a real finding on its own (the currently-running process, PID 84514
+at the time, started by the supervisor's restart at 00:32:17Z, stopped
+writing anything to its own log file past its startup banner, console
+output included), but delivery itself is now operator-confirmed, not just
+inferred from silence.
 
 ### Step 3 — resume-after-kill: FAILED, root cause identified
 
