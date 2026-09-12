@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 01:45 UTC (03:45 local). Repo: this directory,
+Last updated: 2026-09-12 01:50 UTC (03:50 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -102,7 +102,11 @@ Last updated: 2026-09-12 01:45 UTC (03:45 local). Repo: this directory,
 6. Middleman (agent solicits from each member, asks recorded in the room,
    never stalls) — SPEC DONE (`25f453b`, `docs/MIDDLEMAN.md`, architecture
    §2.5); build after item 3.
-7. Multimodal implementation — SPEC DONE (`docs/MULTIMODAL.md`), build last.
+7. Multimodal — SPEC DONE (`docs/MULTIMODAL.md`); INGRESS IMPLEMENTATION IN
+   PROGRESS (executor rdv-multimodal-ingress, `sess_b3541f0a`, GLM): media
+   becomes text plus a stored media ref before enqueue, null STT/vision
+   providers tonight. Middleman BUILD starts once rdv-box-liveness releases
+   room-service.ts.
 8. Deck — DONE and current at `58da294` (13 pages, `deck/rendez-vous.pdf`,
    includes the deliverable beat, the codex verdict and the "why a room" slide).
 9. Repo publish — DONE (private, 59 commits matched at publish time).
@@ -136,6 +140,9 @@ re-proven on a phone after `4e73786`.
   Jeremy's own contact and mailbox via the simulated inbound route; edits only
   docs/REHEARSAL.md, docs/STATE.md and `.env.local` (allowlist line).
 - `sess_d233dc3a` rdv-up-app-serve-ui-path, GLM: worktree `wt/app-serve-ui-path` (upstream PR).
+- `sess_b3541f0a` rdv-multimodal-ingress, GLM: `src/channels/media-ingress.ts`, channel
+  inbound parsers, the two webhook handlers and media route in `http.ts`, `media-store.ts`,
+  additive `src/env.ts`, their tests, the status section of `docs/MULTIMODAL.md`.
 - `sess_9726365f` rdv-box-liveness, sonnet: `src/service/box-liveness.ts`,
   `room-service.ts`, `booter.ts`, `src/sandbox/boot.ts`, their tests, one
   RUNBOOK section. Fenced from fanout, web, http.ts, artifact-proxy, deliverable.
