@@ -15,42 +15,15 @@ Rendez-vous
 ## Project Description
 
 ```
-We work together. Our AIs work in silos.
+We work together, but our AIs work alone. Yours is in your pocket, your colleague's is in theirs, and the two never meet, so you end up as the relay, screenshotting one chat to paste into the other. Rendez-vous removes the relay. It is one shared room where several people and several AI agents talk to a single agent in a single conversation, each from the messaging app already open on their phone.
 
-Your AI is in your pocket. Your colleague's is in theirs. They never talk, so
-you end up being the relay: screenshot one chat, paste it into the other.
+Joining takes one message. Text "new" to create a room, or "join" with its code to enter one. Nothing to install, and it works over Telegram, WhatsApp, SMS or email. Agents join exactly the way people do, through the same two endpoints, and the room cannot tell them apart.
 
-Rendez-vous is one shared room that several people and several agents work in
-at once, from the messaging app they already have open.
+Because everyone speaks to the same agent, it is the only party that sees every thread at once. That is what a chatbot in one person's pocket cannot do. In our demo, Julie sets a 12k budget for the company offsite from her phone. Tom, from his, sends a photo of a venue that costs 16k. They never message each other. The agent spots the conflict, names it, and arbitrates in front of both until they converge.
 
-Joining takes one message. You text "new" to a bot and the room exists. Send
-someone the code and their phone is in it. Nothing to install, nothing to sign
-up for, no login to share.
+Once they agree, the work still has to get done. Every room runs in its own cloud sandbox with a real terminal, real files and a public URL, so the agent writes the PDF, puts the site online, and everyone opens the same link.
 
-The agent sees every thread at once. That is the thing a chatbot cannot do.
-Julie sets a 12k budget from her phone, Tom sends a 16k venue from his, and the
-agent catches the conflict and arbitrates it in front of both of them.
-
-It can also talk to one person at a time. It asks Tom directly when only he has
-the photo. It can answer Julie privately, and the others see that a private
-answer happened without seeing what it said.
-
-Agents join the same way people do. A desktop agent uses the same two endpoints
-as a human member, and the room cannot tell the difference.
-
-Every room gets a real machine. Its own sandbox, a real terminal, real files,
-and a public URL. The agent writes a PDF or puts a website online, and everyone
-opens the same link.
-
-Nothing leaves the room until someone says yes. The room shows the recipient
-and the document first, then waits. Every send is logged with who asked and who
-confirmed.
-
-Built on our two open-source runtimes. agentpush unifies the messaging, so
-Telegram, WhatsApp and email sit behind one API. agentproto runs the agents and
-the sandboxes, consumed unmodified from npm. Plus OpenAI for voice and vision,
-OpenRouter for the coding agents, e2b for the machine. 500 tests green, and
-seven pull requests contributed upstream to agentproto during the hackathon.
+Underneath sit our two open-source runtimes. agentpush unifies the messaging so Telegram, WhatsApp and email sit behind one API, and agentproto, used unmodified from npm, orchestrates the agents and their sandboxes. OpenAI handles voice and vision, OpenRouter the coding models, e2b the machines. It runs 500 green tests, and building it sent seven pull requests upstream to agentproto during the hackathon.
 ```
 
 ---
@@ -143,19 +116,19 @@ AI is in your pocket, but only ever one pocket at a time. Two colleagues on the
 same task have two assistants that never talk, so you become the relay:
 screenshot, paste, repeat.
 
-For Agents, Everywhere we built Rendez-vous. Text "new" to a bot and a shared
-room exists. Send the code and someone's phone is in it too. Nothing to
-install, no login to share. Several people and several agents drive one session
-and one live document together.
+For Agents, Everywhere we built Rendez-vous. Text "new" to create a room, or
+"join" with its code to enter one. Nothing to install, and it works over
+Telegram, WhatsApp, SMS or email. Several people and several agents end up in
+one conversation, working on one live document.
 
 The part we did not expect: the orchestrator is the only one that sees every
 thread, so it catches what no single-thread chatbot can. Julie sets a 12k
 budget from her phone. Tom sends a 16k venue from his. The agent spots the
 conflict and arbitrates.
 
-Each room runs in its own sandbox with a real terminal and a public URL. Build
-a PDF or a site, everyone opens the same link. Nothing leaves until someone
-confirms.
+Once they agree, the work still has to get done. Every room runs in its own
+cloud sandbox with a real terminal, real files and a public URL, so the agent
+writes the PDF, puts the site online, and everyone opens the same link.
 
 Built on our two open-source runtimes: agentpush for messaging unification,
 agentproto for orchestration. Plus OpenAI, OpenRouter and e2b. Seven pull
