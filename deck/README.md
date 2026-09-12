@@ -20,6 +20,15 @@ directory because `kit:` refs resolve relative to the CWD.
 
 ## Render command
 
+Pages render as 16:9 landscape slides (1920×1080 px = 1440×810 pt), set by
+the template frontmatter:
+
+```yaml
+page:
+  size: "1920px 1080px"
+  margin: "0"
+```
+
 From this directory:
 
 ```sh
