@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 01:44 UTC (03:44 local). Repo: this directory,
+Last updated: 2026-09-12 01:52 UTC (03:52 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -123,7 +123,7 @@ re-proven on a phone after `4e73786`.
 
 ## Executors running (session id, model, owns / fenced to)
 
-- rdv-up-sandbox-liveness (id via `sv.sh status`), GLM: worktree `wt/sandbox-liveness` (upstream PR).
+- `sess_1114ae10` rdv-up-sandbox-liveness, GLM: worktree `wt/sandbox-liveness` (upstream PR).
 - `sess_5d7b39d2` rdv-deliverable-flow, sonnet: `src/service/deliverable.ts`,
   `pdf-render.ts`, `media-store.ts`, their tests, `docs/DELIVERABLE.md`,
   minimal hooks in `room-service.ts`/`http.ts`, additive `src/env.ts`.
