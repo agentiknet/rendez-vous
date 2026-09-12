@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 01:27 UTC (03:27 local). Repo: this directory,
+Last updated: 2026-09-12 01:31 UTC (03:31 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -62,13 +62,14 @@ Last updated: 2026-09-12 01:27 UTC (03:27 local). Repo: this directory,
 
 ## e2b boot budget and boxes (these bill)
 
-- Overnight budget: 10 fresh boots. Spent: 0 attributed. One UNATTRIBUTED
-  box appeared at 01:07 UTC (`i5fln5g688isw18enzov9`); if no executor claims
-  it, count it as spent and pause it.
+- Overnight budget: 10 fresh boots. Spent: 1 (an unattributed box
+  `i5fln5g688isw18enzov9` appeared at 01:07 UTC with no owning session; no
+  executor transcript claims it; PAUSED by the supervisor at 01:30 UTC and
+  counted as spent). Remaining: 9.
 - Boxes e2b currently lists (state filter is unreliable; treat all as
   billable): `i7jos61ixgkcfrekmi1vl` (the live room; keep),
   `i70vb4teaxca9r1id1c4p` (from the boot-fix work, 00:34; PAUSED by the supervisor at 01:17 UTC, will expire on its own),
-  `i5fln5g688isw18enzov9` (unattributed, 01:07; find the owner, else pause).
+  `i5fln5g688isw18enzov9` (unattributed, 01:07; PAUSED 01:30 UTC).
 - Pause: `POST https://api.e2b.dev/sandboxes/<id>/pause` with header
   `X-API-Key: $E2B_API_KEY`. Paused boxes expire on e2b's side within about an
   hour; the local ledger (`agentproto sandbox list`) is NOT trustworthy.
