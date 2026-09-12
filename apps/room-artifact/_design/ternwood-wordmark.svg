@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 48" role="img" aria-label="Ternwood">
+  <rect x="4" y="8" width="32" height="32" rx="8" fill="#C25E3A"/>
+  <path d="M20 32c-6-3-8-9-6-16 7 0 12 4 12 11 0 2-.4 3.8-1 5z" fill="#FCFBF7"/>
+  <path d="M14.5 26.5C17 23 20 20 24 17.5" stroke="#FCFBF7" stroke-width="1.6" fill="none" stroke-linecap="round"/>
+  <text x="46" y="33" font-family="Fraunces, Georgia, serif" font-size="26" font-weight="600" fill="#2E2A24">Ternwood</text>
+</svg>

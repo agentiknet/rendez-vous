@@ -1,0 +1,42 @@
+[
+  {
+    "isTitle": true,
+    "title": "Rendez-vous room deliverable",
+    "subtitle": "The room's shared document — the live site and the PDF are both rendered from this data.",
+    "date": "12 September 2026"
+  },
+  {
+    "isProse": true,
+    "heading": "What this document is",
+    "paragraphs": [
+      "This is the room's live artifact. The agent edits this data, not markup: the template above it and the agentik design kit enforce the branding, so everything written here comes out on brand.",
+      "Replace this placeholder text with the room's real content as the work lands."
+    ]
+  },
+  {
+    "isBullets": true,
+    "heading": "Key points",
+    "items": [
+      "First key point — replace me.",
+      "Second key point — replace me.",
+      "Third key point — replace me."
+    ]
+  },
+  {
+    "isTable": true,
+    "heading": "Summary",
+    "head": ["Item", "Status", "Owner"],
+    "rows": [
+      { "col1": "First row — replace me", "col2": "In progress", "col3": "The room" },
+      { "col1": "Second row — replace me", "col2": "Todo", "col3": "The room" }
+    ]
+  },
+  {
+    "isFigures": true,
+    "items": [
+      { "value": "0", "label": "Key figure one — replace me" },
+      { "value": "0", "label": "Key figure two — replace me" },
+      { "value": "0", "label": "Key figure three — replace me" }
+    ]
+  }
+]

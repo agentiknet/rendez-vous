@@ -1,0 +1,224 @@
+---
+template: true
+name: rdv-room-artifact
+version: 1.0.0
+description: Rendez-vous room artifact — one document that renders both the live site and the deliverable PDF through the agentik design kit.
+sources:
+  doc:
+    kind: file
+    path: "data.json"
+---
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>{{doc.title}}</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      body {
+        font-family: var(--font-body-family, 'Inter', system-ui, sans-serif);
+        background: var(--color-background, #FFFFFF);
+        color: var(--color-ink, #2E2A24);
+        line-height: 1.6;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+
+      .title-block {
+        border-bottom: 2px solid var(--color-accent, #C25E3A);
+        padding-bottom: 1.5rem;
+        margin-bottom: 2rem;
+      }
+
+      .eyebrow {
+        font-family: var(--font-label-family, 'Inter', system-ui, sans-serif);
+        font-size: var(--font-label-size, 0.75rem);
+        font-weight: var(--font-label-weight, 600);
+        letter-spacing: var(--font-label-letter-spacing, 0.06em);
+        text-transform: uppercase;
+        color: var(--color-accent, #C25E3A);
+        margin-bottom: 0.75rem;
+      }
+
+      h1 {
+        font-family: var(--font-display-family, 'Fraunces', Georgia, serif);
+        font-size: var(--font-display-size, 2.25rem);
+        font-weight: var(--font-display-weight, 700);
+        line-height: var(--font-display-line-height, 1.12);
+        letter-spacing: var(--font-display-letter-spacing, -0.02em);
+        color: var(--color-ink, #2E2A24);
+        margin-bottom: 0.75rem;
+      }
+
+      h2 {
+        font-family: var(--font-h2-family, 'Fraunces', Georgia, serif);
+        font-size: var(--font-h2-size, 1.35rem);
+        font-weight: var(--font-h2-weight, 600);
+        line-height: var(--font-h2-line-height, 1.25);
+        color: var(--color-ink, #2E2A24);
+        margin: 0 0 0.75rem;
+      }
+
+      .subtitle {
+        font-size: 1.1rem;
+        color: var(--color-ink-muted, #6B6455);
+        margin-bottom: 0.25rem;
+      }
+
+      .date {
+        font-size: 0.85rem;
+        color: var(--color-ink-faint, #9A9284);
+      }
+
+      section { margin-bottom: 1.75rem; }
+
+      p { margin-bottom: 0.9rem; }
+
+      ul.bullets {
+        list-style: none;
+        padding-left: 0;
+      }
+
+      ul.bullets li {
+        position: relative;
+        padding-left: 1.4rem;
+        margin-bottom: 0.65rem;
+      }
+
+      ul.bullets li::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0.55em;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--color-accent, #C25E3A);
+      }
+
+      table {
+        border-collapse: collapse;
+        width: 100%;
+      }
+
+      th {
+        font-family: var(--font-label-family, 'Inter', system-ui, sans-serif);
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--color-ink-muted, #6B6455);
+        text-align: left;
+        padding: 0.5rem 1rem 0.5rem 0;
+        border-bottom: 2px solid var(--color-border-strong, rgba(46, 42, 36, 0.24));
+      }
+
+      td {
+        font-size: 0.95rem;
+        padding: 0.65rem 1rem 0.65rem 0;
+        border-bottom: 1px solid var(--color-border, rgba(46, 42, 36, 0.12));
+        vertical-align: top;
+      }
+
+      .figures {
+        display: flex;
+        gap: 1.5rem;
+        margin-top: 0.5rem;
+      }
+
+      .figure {
+        flex: 1 1 0;
+        background: var(--color-surface, #F4F1E8);
+        border: 1px solid var(--color-border, rgba(46, 42, 36, 0.12));
+        border-radius: 8px;
+        padding: 1rem 1.25rem;
+      }
+
+      .figure-value {
+        font-family: var(--font-h1-family, 'Fraunces', Georgia, serif);
+        font-size: 1.75rem;
+        font-weight: 700;
+        color: var(--color-accent, #C25E3A);
+      }
+
+      .figure-label {
+        font-size: 0.8rem;
+        color: var(--color-ink-muted, #6B6455);
+        margin-top: 0.25rem;
+      }
+
+      .footer {
+        margin-top: 2.5rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--color-border, rgba(46, 42, 36, 0.12));
+        font-size: 0.75rem;
+        color: var(--color-ink-faint, #9A9284);
+      }
+    </style>
+  </head>
+  <body>
+    {{#doc}}
+
+    {{#isTitle}}
+    <header class="title-block">
+      <p class="eyebrow">Rendez-vous</p>
+      <h1>{{title}}</h1>
+      {{#subtitle}}<p class="subtitle">{{subtitle}}</p>{{/subtitle}}
+      {{#date}}<p class="date">{{date}}</p>{{/date}}
+    </header>
+    {{/isTitle}}
+
+    {{#isProse}}
+    <section>
+      <h2>{{heading}}</h2>
+      {{#paragraphs}}<p>{{.}}</p>{{/paragraphs}}
+    </section>
+    {{/isProse}}
+
+    {{#isBullets}}
+    <section>
+      <h2>{{heading}}</h2>
+      <ul class="bullets">
+        {{#items}}<li>{{.}}</li>{{/items}}
+      </ul>
+    </section>
+    {{/isBullets}}
+
+    {{#isTable}}
+    <section>
+      <h2>{{heading}}</h2>
+      <table>
+        <thead>
+          <tr>{{#head}}<th>{{.}}</th>{{/head}}</tr>
+        </thead>
+        <tbody>
+          {{#rows}}
+          <tr>
+            <td>{{col1}}</td>
+            <td>{{col2}}</td>
+            <td>{{col3}}</td>
+          </tr>
+          {{/rows}}
+        </tbody>
+      </table>
+    </section>
+    {{/isTable}}
+
+    {{#isFigures}}
+    <section>
+      <div class="figures">
+        {{#items}}
+        <div class="figure">
+          <div class="figure-value">{{value}}</div>
+          <div class="figure-label">{{label}}</div>
+        </div>
+        {{/items}}
+      </div>
+    </section>
+    {{/isFigures}}
+
+    {{/doc}}
+    <div class="footer">Rendez-vous · rendered from data.json through the Ternwood design kit</div>
+  </body>
+</html>
