@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 01:50 UTC (03:50 local). Repo: this directory,
+Last updated: 2026-09-12 01:56 UTC (03:56 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -49,6 +49,10 @@ Last updated: 2026-09-12 01:50 UTC (03:50 local). Repo: this directory,
   synthetic contact. Use the real contactRef only when delivery to the phone
   is the point.
 - Verify every executor's work yourself: `bash scripts/sv.sh verify`.
+- PUSH after every landed executor: `git push origin main`, then confirm with
+  `git fetch origin && git rev-list --count origin/main..HEAD` printing 0. The
+  push command exiting 0 is not confirmation. Origin was 19 commits behind at
+  01:55 UTC before this rule; a dead laptop would have lost the night.
 
 ## Live infrastructure right now
 
