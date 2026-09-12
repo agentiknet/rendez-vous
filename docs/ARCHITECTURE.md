@@ -190,6 +190,26 @@ room's box back to a member's own daemon so a tool call resolves under that
 member's credentials, not the room's. See §9.3, "Tool grants without a
 shared credential." One primitive, two independent jobs.
 
+### 2.4 Multimodal is the ladder, extended
+
+Multimodal is not a new axis. It is the fidelity ladder (§2.1) extended to a
+second dimension: not just how much of the transcript a tier sees, but which
+encoding. A voice note or photo is normalized to text plus a durable media
+reference **at the room service, before anything is enqueued** — the
+session's prompt queue stays text-only, so a second binary ingestion path
+never becomes a second chance to drop a message silently (the class of bug
+`docs/UPSTREAM.md`'s "The pattern" names). STT/vision credentials stay at
+the service, never enter the box, consistent with §9.3's "Tool grants
+belong to the room." Attribution stays uniform —
+`[Alice · whatsapp · voice] "..."` — and the SSE transcript still replays
+for late joiners, because text replays and audio does not.
+
+Outbound is symmetric: the transcript record stays canonical text, and each
+tier renders it at its own fidelity — a voice reply is a TTS rendering of
+that record, not a separate message. Full ingress/egress design, the stored
+media record shape, and the implementation plan are in
+`docs/MULTIMODAL.md`.
+
 ---
 
 ## 3. The decisive finding: no fork required
