@@ -5,8 +5,10 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 03:16 UTC (05:16 local). Repo: this directory,
-`main`, published private at https://github.com/agentiknet/rendez-vous.
+Last updated: 2026-09-12 03:22 UTC (05:22 local; earlier "UTC" stamps in this
+file's history ran about an hour ahead of real UTC — trust git commit times).
+Repo: this directory, `main`, published private at
+https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
 
@@ -57,10 +59,24 @@ Last updated: 2026-09-12 03:16 UTC (05:16 local). Repo: this directory,
 ## Live infrastructure right now
 
 - agentproto daemon: http://127.0.0.1:18790 (0.20.0). Rendez-vous service:
-  `node src/cli.ts serve` on :8790 with `.env.local` sourced, log at
+  `node src/cli.ts serve` on :8790, log at
   `/private/tmp/rdv-rehearsal/run3/service.log`. Named cloudflared tunnel
   `rendez-vous` → https://rdv.clipgen.co (config `~/.cloudflared/rendez-vous.yml`).
   Both are deliberately left RUNNING.
+- SINCE 03:19 UTC the service runs from a PINNED DETACHED WORKTREE, not this
+  working tree: `/private/tmp/rdv-serve/0af9580` (commit `0af9580`,
+  `node_modules` symlinked to this repo's), with `RDV_DATA_DIR` and
+  `RDV_MEDIA_DIR` pointed at THIS repo's `.rdv` and `.rdv/media`. Reason:
+  `node src/cli.ts serve` loads source at start, and executors edit this tree
+  concurrently, so a restart from here could load a half-edited file. Restart
+  procedure (supervisor only): `git worktree add --detach /private/tmp/rdv-serve/<sha> <sha>`,
+  symlink `node_modules`, then from that dir
+  `set -a; source <repo>/.env.local; set +a; export RDV_DATA_DIR=<repo>/.rdv RDV_MEDIA_DIR=<repo>/.rdv/media`,
+  kill the old pid (`pgrep -f "src/cli.ts serve"`), wait for :8790 to free,
+  `nohup node src/cli.ts serve >> /private/tmp/rdv-rehearsal/run3/service.log 2>&1 &`,
+  then check `/health` locally and at https://rdv.clipgen.co/health and that
+  `/r/RDV-NG7F/state` still lists the members. Old worktrees:
+  `git worktree remove /private/tmp/rdv-serve/<sha>` once nothing runs there.
 - Live room `RDV-NG7F`, session `sess_059b885d`, box `i7jos61ixgkcfrekmi1vl`,
   members: Jeremy (telegram 6371794295) and Bob (web). Jeremy may use it.
 - `.env.local` (gitignored, mode 600) holds the agentpush key, webhook secrets,
@@ -80,8 +96,12 @@ Last updated: 2026-09-12 03:16 UTC (05:16 local). Repo: this directory,
   (`i6s6gs…`, deleted by the proof) plus 1 for its restore box
   (`i3htjrl6af3yzfo95c93b`, paused 01:54 UTC); plus `iw1ylk7jshrtfj9bvsqw2`
   (01:48, unclaimed by any executor, an upstream test-gate box; KILLED 03:00 UTC).
-  Count: 6 of 10. Remaining: 4. The raced double revive and the probe race are
-  being fixed by rdv-box-liveness (per-room revive lock).
+  Plus `ieqlkzycc8b8qclxbl6kz` (template agentproto-workstation, started
+  02:42 UTC, no daemon session and no room references it, no executor was
+  active then; PAUSED by the supervisor 03:14 UTC, expires on its own).
+  Count: 7 of 10. Remaining: 3. The raced double revive is fixed by the
+  per-room revive lock (`8a69856`) and the probe-then-reconnect race by
+  `0af9580` (a not-found reconnect boots fresh inside the same locked call).
 - Boxes e2b currently lists (state filter is unreliable; treat all as
   billable): `i7jos61ixgkcfrekmi1vl` (the live room; keep),
   `i70vb4teaxca9r1id1c4p` (from the boot-fix work, 00:34; PAUSED by the supervisor at 01:17 UTC, will expire on its own),
@@ -106,16 +126,17 @@ Last updated: 2026-09-12 03:16 UTC (05:16 local). Repo: this directory,
 2. Room-scoped proxied artifact URL `GET /r/:code/artifact/*` — DONE (`5daab38`;
    members only ever see https://rdv.clipgen.co/r/<code>/artifact/, the raw
    box URL stays inside the service, 503 self-heal page when the box is down).
-   NOTE: the running service on :8790 predates this commit; restart it
-   (`set -a; source .env.local; set +a; nohup node src/cli.ts serve >> /private/tmp/rdv-rehearsal/run3/service.log 2>&1 &`)
-   once the deliverable-flow and box-liveness commits land, so all three go live together.
+   The running service (restarted 03:19 UTC from `0af9580`) includes this,
+   the deliverable flow, the polish fixes and both box-liveness fixes.
    2b. Box liveness as a second fact — DONE (`17e9061`): `isSandboxAlive` probes
    e2b (alive | paused | gone | unknown, unknown never treated as gone), used in
    `E2bBooter.resume` (boot fresh when gone) and the idle sweep (marks
    artifactReady false and pauses the room). Verified live: room created, box
    deleted via the e2b API, sweep marked it gone, next message revived on a
-   fresh box with the artifact serving. FOLLOW-UP in progress on the same
-   executor: a per-room revive lock for the raced double revive.
+   fresh box with the artifact serving. FOLLOW-UPS DONE: per-room revive
+   lock (`8a69856`, two concurrent triggers → one boot, proven by reverting
+   the fix); reconnect-reports-not-found boots fresh in the same call
+   (`0af9580`, regression test proven load-bearing the same way).
 3. Deliverable flow: preview → member confirm → PDF via canvakit → send to
    Jeremy's messenger AND the connected mailbox, every send in the transcript,
    recipient allowlist enforced — CODE DONE (`46912d3`, `docs/DELIVERABLE.md`,
@@ -126,7 +147,11 @@ Last updated: 2026-09-12 03:16 UTC (05:16 local). Repo: this directory,
    GAPS found: no address form to deliver to another member's messenger
    contact by ref (only self or an email), pending deliveries are in-memory
    and die on a service restart, and the resume probe raced the reconnect
-   (double boot). Fixes: staged for the next executors.
+   (double boot). Fixes LANDED: `9d70c1a` (pending deliveries persisted on
+   the room record and swept on startup; `send pdf to <member name>` delivers
+   to that member's own messenger contact; artifactReady gates in the fan-out
+   reader and the http sanitize helper; `docs/DELIVERABLE.md` updated) and
+   `0af9580` (probe race). Not yet re-exercised live after the restart.
    First real exercise: DONE 2026-09-12T01:53Z (docs/REHEARSAL.md, "Deliverable
    flow, first real exercise (through the flow)"), email verified yes
    (jeremy@agentik.net, message 1a0935074773122c, attachment byte-matched via
@@ -138,7 +163,12 @@ Last updated: 2026-09-12 03:16 UTC (05:16 local). Repo: this directory,
 5. Whisper, N addressed messages per turn — DONE (`741fe35`, `dc1b178`).
 6. Middleman (agent solicits from each member, asks recorded in the room,
    never stalls) — SPEC DONE (`25f453b`, `docs/MIDDLEMAN.md`, architecture
-   §2.5); build after item 3.
+   §2.5). BUILD IN PROGRESS: executor rdv-middleman (`sess_8389db7e`, GLM)
+   builds §7 steps i (Ask record on Room), ii (`[[ask <name>]]` parser and
+   marker in fan-out), iii (answer tagging on fan-in, `skip`) and vi (opening
+   prompt), one commit per step. NEXT executor after it lands: steps iv (web
+   "Outstanding" panel, `src/web/**` + `/r/:code/state`) and v (nudge and
+   proceed timers with the never-answered test).
 7. Multimodal — SPEC DONE (`docs/MULTIMODAL.md`); INGRESS DONE (`b769180`):
    inbound voice and images become text plus a stored media ref before enqueue,
    attribution `[Name · channel · voice|image]`, served by `GET /r/:code/media/:id`;
@@ -150,12 +180,11 @@ Last updated: 2026-09-12 03:16 UTC (05:16 local). Repo: this directory,
    leaves the room / close, plus a 4-slide appendix). Both kits in `deck/out/`.
    FORMAT: re-rendered as 16:9 landscape slides at `87f4623` (both kits in
    `deck/out/`, `deck/rendez-vous.pdf` is the light kit).
-   FOLLOW-UP once the deliverable-flow exercise lands: slide 8's caption in
-   `deck/data.json` and the matching README note say the first live send
-   bypassed the room's own commands; update them if the flow gets exercised.
-8b. Room page shows the room — IN PROGRESS (executor rdv-room-page,
-   `sess_0f657dd5`, GLM): `GET /r/:code/state` polled every 3 s, DOM patched,
-   members with tier badges, agent busy/idle, proxied artifact link never dead.
+   Slide 8's caption now says the flow ran end-to-end through the room's own
+   commands (`2022217`, re-rendered, still 13 pages).
+8b. Room page shows the room — DONE (`26714b3`): `GET /r/:code/state` polled
+   every 3 s, DOM patched, members with tier badges, agent busy/idle, proxied
+   artifact link never dead.
 9. Repo publish — DONE (private); README rewritten for the morning (`e7a2af8`).
    Push after every landing and verify zero ahead.
 10. Codex flip — DONE: the one-parameter claim does NOT hold; the boot failed
@@ -166,11 +195,16 @@ Last updated: 2026-09-12 03:16 UTC (05:16 local). Repo: this directory,
     session liveness signal — PR OPEN https://github.com/agentproto/ts/pull/1273
     (note: agentproto/ts is its own nested git repo; worktrees live under
     `/Volumes/SSDExternalMacStudio/Code/_agentproto-worktrees/agentproto-ts/`);
-    app serve ui.path fix (rdv-up-app-serve-ui-path);
+    app serve ui.path fix — PR OPEN https://github.com/agentproto/ts/pull/1281;
     `/mcps/proxy/call` auth gate — PR OPEN https://github.com/agentproto/ts/pull/1277
     (also gated POST /mcps/imports and DELETE /mcps/imports/:id); reap orphaned boxes + `sandbox gc` — PR OPEN https://github.com/agentproto/ts/pull/1278
-    (phase A found 52 dead sandboxed sessions; 6 boxes still live on e2b from them), sandbox liveness signal (rdv-up-sandbox-liveness). NOT STARTED: the remaining docs/UPSTREAM.md items
-    (app-serve ui.path, reconnect not pausing, spawn surviving disconnect).
+    (phase A found 52 dead sandboxed sessions; 6 boxes still live on e2b from them);
+    sandbox liveness signal — PR OPEN https://github.com/agentproto/ts/pull/1279.
+    IN PROGRESS: reconnect failure leaving the box running (finding #3,
+    executor rdv-up-reconnect-pause, `sess_636d22ec`, worktree
+    `_agentproto-worktrees/agentproto-ts/reconnect-pause`). Finding #5 (spawn
+    survives a client disconnect) is a caller-side design note; no PR planned.
+    All upstream PR bodies state the e2b live e2e tests were skipped (key unset).
 
 12. Morning email to Jeremy (deck PDF, script, status body) to jeremy@agentik.net ONLY,
     by 02:20 UTC — DONE (executor rdv-morning-email, `sess_8cfaa0a7`, Sonnet).
@@ -183,16 +217,17 @@ re-proven on a phone after `4e73786`.
 
 ## Executors running (session id, model, owns / fenced to)
 
-- `sess_1114ae10` rdv-up-sandbox-liveness, GLM: worktree `wt/sandbox-liveness` (upstream PR).
-- `sess_d233dc3a` rdv-up-app-serve-ui-path, GLM: worktree `wt/app-serve-ui-path` (upstream PR).
-- `sess_3051301c` rdv-polish-gaps, GLM: persist pending deliveries on the room, `send pdf to <member name>`,
-  artifactReady gates in `src/fanout/reader.ts` and the http.ts sanitize helper; owns deliverable.ts, rooms types/store, fanout/reader.ts.
-- `sess_0f657dd5` rdv-room-page, GLM: `src/web/**`, the `GET /r/:code/state` route only in
-  `src/service/http.ts`, one helper in `daemon-extra.ts` if needed, `test/web/**`, `test/service/http.test.ts`.
-- `sess_9726365f` rdv-box-liveness, sonnet: `src/service/box-liveness.ts`,
-  `room-service.ts`, `booter.ts`, `src/sandbox/boot.ts`, their tests, one
-  RUNBOOK section. Fenced from fanout, web, http.ts, artifact-proxy, deliverable.
-- `sess_059b885d` is the live room's agent, not an executor. Do not kill it.
+- `sess_8389db7e` rdv-middleman, GLM: owns `src/rooms/types.ts`, `src/rooms/store.ts`,
+  `src/fanout/**`, `src/service/room-service.ts`, prompt text in `booter.ts`
+  (step vi, last), their tests. Fenced from web, http.ts, deliverable, sandbox.
+- `sess_636d22ec` rdv-up-reconnect-pause, GLM: agentproto worktree
+  `reconnect-pause` only (upstream PR for finding #3).
+- Retired 03:13–03:20 UTC after verification: rdv-polish-gaps, rdv-room-page,
+  rdv-up-app-serve-ui-path, rdv-up-sandbox-liveness, rdv-box-liveness (hit
+  its Claude session limit mid-edit; the supervisor finished and committed
+  its probe-race fix as `0af9580`), rdv-deck-caption.
+- `sess_059b885d` was the live room's agent (now killed by the daemon; the
+  room is paused and revives on the next message). Do not kill room agents.
 
 ## The silent-failure class (the deck's argument; do not lose these)
 
@@ -208,7 +243,8 @@ re-proven on a phone after `4e73786`.
    `res.ok` reported alive for a corpse and `resume` reported success while
    doing nothing. Fixed `4e73786`.
 6. Dead artifact URL: the e2b box expired, the room still advertised its URL,
-   the member's thread carried a dead link. Fix in progress (item 2, 2b).
+   the member's thread carried a dead link. Fixed: proxied URL (`5daab38`),
+   box liveness as its own fact (`17e9061`), artifactReady gates (`9d70c1a`).
    Plus the meta-class: agents escalate when a fact contradicts their model
    instead of re-reading the request (finding 8 addendum in `docs/UPSTREAM.md`).
 
