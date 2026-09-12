@@ -12,11 +12,11 @@
     "eyebrow": "Today",
     "title": "Your AI and your colleague's have never met.",
     "bullets": [
-      "Two people, two phones, two separate assistants.",
+      "Two people, two phones, two assistants that never talk.",
       "You screenshot one and paste it into the other.",
-      "Whatever you agreed never reaches either of them."
+      "You are the middleman. Nothing you agreed reaches either of them."
     ],
-    "illustration": "Two phones side by side, each with its own AI chat, and a screenshot being forwarded from one to the other. Buildable without a shoot.",
+    "illustration": "Two phones side by side, each with its own AI chat, a screenshot travelling from one to the other. Buildable without a shoot.",
     "page": "2 / 7"
   },
   {
@@ -29,7 +29,7 @@
       "In the messaging app they already have open.",
       "An agent in the middle, sorting out who wants what."
     ],
-    "illustration": "THE money shot. The 4-up frame mid-conflict: Julie's phone, Tom's phone, the room view showing the agent's “Tom's villa is 16k, Julie's cap is 12k”, and the artifact.",
+    "illustration": "The money shot. The 4-up frame mid-conflict: Julie's phone, Tom's phone, the room view carrying the agent's \"Tom's villa is 16k, Julie's cap is 12k\", and the document.",
     "page": "3 / 7"
   },
   {
@@ -40,9 +40,9 @@
     "bullets": [
       "No app to download. No account to create. No login to share.",
       "Send someone the code and their phone is in the room too.",
-      "An agent joins exactly the same way a person does."
+      "An agent joins exactly the way a person does."
     ],
-    "illustration": "One phone: “new” → the room code and QR come straight back. A second phone joins. Two real screens.",
+    "illustration": "One phone texting \"new\", the room code and QR coming straight back. A second phone joins. Two real screens.",
     "page": "4 / 7"
   },
   {
@@ -84,7 +84,7 @@
         "label": "…whatever you plug in"
       }
     ],
-    "highlight": "Only the orchestrator sees every thread — which is how it can tell you that what you just asked for contradicts what someone else asked for.",
+    "highlight": "Only the orchestrator sees every thread. That is how it can tell you your budget does not fit what someone else just asked for.",
     "page": "5 / 7"
   },
   {
@@ -143,7 +143,7 @@
         "ty": 498,
         "sy": 526,
         "label": "agentproto daemon",
-        "note": "our open-source runtime — unmodified, from npm",
+        "note": "our open-source runtime, unmodified, straight from npm",
         "fill": "var(--color-surface, #F5F8FC)",
         "stroke": "var(--color-border-strong, rgba(10,36,71,0.24))",
         "ink": "var(--color-ink, #0A2447)",
@@ -164,27 +164,27 @@
         "sub": "var(--color-ink-muted, #3E5B80)"
       }
     ],
-    "caption": "The sandbox is the isolation boundary: nobody's laptop, and no member's credentials inside it. The room reaches the agent through the daemon; the agent reaches back out through one MCP tool, and only that one.",
+    "caption": "The sandbox is the boundary. It is nobody's laptop, and no member's credentials ever go inside it. The room reaches the agent through the daemon. The agent reaches back out through one tool, and only that one.",
     "page": "6 / 7"
   },
   {
     "type": "closing",
     "isClosing": true,
-    "title": "One room, in everyone's pocket.",
-    "subtitle": "You are not the middleman anymore.",
+    "title": "A shared sandbox your whole team can text into.",
+    "subtitle": "Safe, multiplayer, and open from the messenger you already use.",
     "page": "7 / 7"
   },
   {
     "type": "list",
     "isList": true,
-    "eyebrow": "Appendix — what we proved, live",
+    "eyebrow": "Appendix: what we proved, live",
     "title": "On a real phone, not a mock.",
     "bullets": [
-      "Texted “new” from a phone — a working room, with a shared document, in 86 seconds.",
-      "Two people on two surfaces: every message attributed, one answer reaching both.",
-      "Voice notes and photos in; a voice note, a PDF and a live website back out.",
-      "A private answer to one member — the others see that it happened, not what it said.",
-      "We deleted the machine out from under the room; the next message brought it back."
+      "Texted \"new\" from a phone. A working room with a shared document, 86 seconds later.",
+      "Two people, two surfaces. Every message attributed. One answer reaching both.",
+      "Voice notes and photos in. A voice note, a PDF and a live website back out.",
+      "A private answer to one member. The others see that it happened, not what it said.",
+      "We deleted the machine out from under the room. The next message brought it back."
     ],
     "page": "Appendix"
   }
