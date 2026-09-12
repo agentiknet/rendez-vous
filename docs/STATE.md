@@ -135,7 +135,7 @@ re-proven on a phone after `4e73786`.
 - `sess_8d869128` rdv-flow-exercise, sonnet: drives the first real deliverable send to
   Jeremy's own contact and mailbox via the simulated inbound route; edits only
   docs/REHEARSAL.md, docs/STATE.md and `.env.local` (allowlist line).
-- rdv-up-app-serve-ui-path (id via `sv.sh status`), GLM: worktree `wt/app-serve-ui-path` (upstream PR).
+- `sess_d233dc3a` rdv-up-app-serve-ui-path, GLM: worktree `wt/app-serve-ui-path` (upstream PR).
 - `sess_9726365f` rdv-box-liveness, sonnet: `src/service/box-liveness.ts`,
   `room-service.ts`, `booter.ts`, `src/sandbox/boot.ts`, their tests, one
   RUNBOOK section. Fenced from fanout, web, http.ts, artifact-proxy, deliverable.
