@@ -11,18 +11,109 @@ sur-promettre.
 
 ---
 
-## Le cadre
+## Le cadre — géométrie exacte
 
-| | |
+**Pas un 2×2.** Un quadrant carré de 960×540 pour un écran de téléphone en
+portrait, ça donne un timbre-poste illisible ou un crop qui coupe les bulles.
+Trois colonnes, les téléphones debout dans leur format natif :
+
+```
+ 1920 × 1080
+┌──────────┬───────────────────────────────────┬──────────┐
+│          │  ROOM WEB  (navigateur, 1040×640) │          │
+│  JULIE   │  ┌───────────────┬──────────────┐ │   TOM    │
+│  phone   │  │  transcript   │   artifact   │ │  phone   │
+│ portrait │  │  (attribué)   │  PDF ▸ site  │ │ portrait │
+│ 400×1000 │  └───────────────┴──────────────┘ │ 400×1000 │
+│          ├───────────────────────────────────┤          │
+│          │  ATLAS — terminal, 1040×400       │          │
+│  x:20    │  fond sombre, monospace           │  x:1500  │
+└──────────┴───────────────────────────────────┴──────────┘
+   440 px              1040 px                    440 px
+```
+
+Trois raisons pour ce découpage :
+
+- Les deux téléphones gardent leur ratio natif : on lit les bulles, on voit les
+  **badges d'attribution**, on voit le vocal avec sa transcription.
+- Le centre est **la page room-web telle qu'elle existe déjà** — elle rend
+  nativement transcript à gauche, artifact à droite ([page.ts](src/web/page.ts)).
+  Rien à fabriquer pour la vidéo, on filme le produit.
+- Atlas en bandeau **terminal sombre, en monospace**, sous le reste. Le
+  contraste visuel fait le travail que le texte ne peut pas faire : le jury voit
+  au premier coup d'œil que ce membre-là est une machine.
+
+Bandeau permanent dans la bande Atlas, coin haut-gauche, toujours présent :
+> *Atlas — un agent sur le Mac de la boîte. Même room, mêmes endpoints que Julie
+> et Tom.*
+
+Sans ce bandeau, le jury voit un troisième prénom. Les deux reviews l'ont dit
+séparément.
+
+## Habillage
+
+| Élément | Spec |
 | --- | --- |
-| ↖ **Julie** — téléphone, Telegram | ↗ **Tom** — téléphone, Telegram |
-| ↙ **Atlas** — agent local sur le Mac de la boîte | ↘ **L'artifact** — le PDF puis le site |
+| **Horloge** | Une seule, en haut au centre, `00:00` monospace. Jamais une par panneau — l'horloge unique est ce qui prouve la simultanéité |
+| **Surbrillance** | Quand un message arrive, un liseré de 3 px sur le panneau concerné pendant 600 ms. C'est ce qui fait suivre l'œil sans voix off |
+| **Cartons** | Bas de cadre, pleine largeur, fond sombre 80 %, 2 s max. Un seul par acte |
+| **Badge attribution** | Quand `[Tom · messenger]` apparaît chez Julie, zoom doux ×1.15 sur ce fragment, 1 s. C'est la preuve que les deux fils sont vraiment joints |
+| **Son** | Voix off uniquement sur les 3 moments notés. Pas de musique sous les beats de contenu — le silence fait durer le money shot |
+| **Sortie** | 1920×1080, 30 fps, H.264. Sous-titres brûlés pour les vocaux |
 
-Bandeau permanent sous le quadrant Atlas :
-> *Atlas — un agent qui tourne sur le Mac de la boîte. Il a rejoint la room par
-> les mêmes endpoints que Julie et Tom.*
+## Type de plan, beat par beat
 
-Sans ce bandeau, le jury voit un troisième prénom. Les deux reviews l'ont dit.
+« Plan » = ce qu'on met en avant, pas un mouvement de caméra : tout est capture
+d'écran, le montage se fait au zoom et au liseré.
+
+| t | Plan | Mise en avant |
+| --- | --- | --- |
+| 0:00 | **Plan large**, les 4 panneaux, tout calme | Poser la géométrie. 2 s, pas plus |
+| 0:03 | **Push sur la bande Atlas** ×1.3 | Une machine parle en premier. Tenir jusqu'à la fin de sa phrase |
+| 0:07 | **Retour large, split attention** — liseré simultané sur les DEUX téléphones | Deux questions *différentes* au même instant. C'est le plan le plus important de l'ouverture : il ne marche qu'en large |
+| 0:12 | **Serré sur Julie** | Sa contrainte budget, en texte |
+| 0:18 | **Serré sur Tom**, la bulle vocale + sa transcription qui s'écrit | Le multimodal arrive parce qu'un mec répond en marchant, pas comme une démo de feature |
+| 0:22 | **Coupe sur Julie** | Le badge `[Tom · messenger]` chez elle → zoom sur le fragment |
+| 0:28 | **Plan large**, puis **push lent sur le centre** ×1.4 sur 5 s | ⚡ Le conflit. Le message doit remplir le centre et **rester 5 s**. Ne rien couper pendant ce plan |
+| 0:48 | **Alternance serrée** Julie ▸ Tom ▸ Julie, ~3 s chacun | L'arbitrage. Le rythme accélère, les plans raccourcissent |
+| 1:05 | **Centre plein cadre**, l'artifact | Le PDF se reconstruit en direct |
+| 1:12 | **Split** centre + Julie | Elle corrige une ligne, ça change à l'écran |
+| 1:20 | **Centre**, l'aperçu d'envoi | Destinataire, canal, objet, document. Tenir 3 s |
+| 1:25 | **Serré sur Tom** puis **centre** | Il confirme ▸ la transcription enregistre qui a demandé, qui a confirmé |
+| 1:30 | **Centre plein cadre**, navigateur | Le site, **URL affichée en clair**, on y navigue |
+| 1:40 | **Serré sur Tom** (vocal) puis centre | La photo en hero, mise à jour en direct |
+| 1:45 | **Plan large final**, les 4 panneaux, PDF et site visibles | La chute |
+
+## Captation — qui est sur quoi
+
+C'est le point qui peut coincer le jour J, autant le trancher maintenant.
+
+| Panneau | Comment on capture | Identité |
+| --- | --- | --- |
+| Tom | Téléphone de Jérémy, enregistrement d'écran iOS, ou QuickTime en filaire (plus propre, pas de barre d'enregistrement rouge) | Le contact Telegram réel `6371794295` |
+| Julie | **Telegram Web dans une fenêtre de navigateur**, cadrée au ratio d'un téléphone | Un deuxième compte Telegram |
+| Centre | Chrome sur `rdv.clipgen.co/r/<code>`, fenêtre à 1040×640 | — |
+| Atlas | iTerm plein écran, thème sombre, police 16 pt, le pont qui tourne | `scripts/room-agent.ts` |
+
+**Julie a besoin d'un second compte Telegram.** Si tu n'en as pas sous la main,
+ordre de repli, décidé : (1) Telegram Web avec un second numéro — c'est la
+meilleure option, ça reste une vraie surface de chat et ça capture proprement ;
+(2) Julie passe sur la vue room-web dans un second profil de navigateur — on
+perd « deux téléphones » mais on garde deux surfaces distinctes, et c'est la
+vraie revendication du produit de toute façon ; (3) on ne fait pas la démo à
+deux humains, ce qui n'est pas une option.
+
+**Contrainte dure, rappel :** rien ne sort vers un tiers réel. Le « boss » est
+`jeremy@agentik.net`, en répétition comme au tournage.
+
+## Assets à préparer avant
+
+- La photo de villa surf (Pays Basque, terrasse) — celle que Tom envoie.
+- Les deux vocaux de Tom, enregistrés à l'avance dans Telegram, prêts à envoyer.
+- Le contenu du séminaire pour le site : programme, infos pratiques, FAQ.
+- Avatars Julie / Tom distincts dans Telegram, pour qu'on les suive d'un coup
+  d'œil.
+- Le carton d'ouverture et les deux autres, rendus d'avance.
 
 ---
 

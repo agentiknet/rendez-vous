@@ -21,18 +21,18 @@
     "ladderHead": ["Member", "Surface", "Sends", "Receives", "Joined by"],
     "ladderRows": [
       {
-        "tier": "Alice",
+        "tier": "Julie",
         "surface": "phone — Telegram",
-        "sends": "text, voice notes, photos",
+        "sends": "the budget, the hard constraints",
         "receives": "terse replies, voice, files",
-        "latency": "texting “new”"
+        "latency": "answering a message"
       },
       {
-        "tier": "Bob",
-        "surface": "laptop — room web view",
-        "sends": "text",
-        "receives": "full transcript + the live artifact",
-        "latency": "scanning a QR"
+        "tier": "Tom",
+        "surface": "phone — Telegram",
+        "sends": "voice notes, the venue photo",
+        "receives": "terse replies, voice, files",
+        "latency": "answering a message"
       },
       {
         "tier": "Atlas",
@@ -42,14 +42,14 @@
         "latency": "running one script"
       },
       {
-        "tier": "the inbox",
+        "tier": "the boss",
         "surface": "email",
         "sends": "reply-to-thread",
-        "receives": "a per-turn digest, deliverables",
+        "receives": "the PDF, once a member confirms",
         "latency": "replying once"
       }
     ],
-    "caption": "No install. No shared login. No new app. The room models members, not humans — which is why a machine joins the same way a person does.",
+    "caption": "Julie and Tom are organising the company offsite. Neither installed anything, neither shares a login, and Atlas — an agent on the company Mac — opens the room because it noticed the deadline. The room models members, not humans, which is why a machine joins the way a person does.",
     "page": "2 / 6"
   },
   {
