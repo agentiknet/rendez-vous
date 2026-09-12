@@ -3,7 +3,7 @@ import type { DaemonClient } from "../daemon/client.ts"
 import { env } from "../env.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import type { Room } from "../rooms/types.ts"
-import { bootRoomSession, resumeRoomSession } from "../sandbox/boot.ts"
+import { bootRoomSession, isSandboxNotFoundError, resumeRoomSession, type OrphanSandboxKiller } from "../sandbox/boot.ts"
 import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
 
@@ -129,11 +129,22 @@ export class E2bBooter implements SessionBooter {
   private readonly client: DaemonClient
   private readonly store: RoomStore
   private readonly checkBoxLiveness: BoxLivenessCheck
+  /** Forwarded to `bootRoomSession`/`resumeRoomSession` (src/sandbox/boot.ts),
+   *  which default to the real e2b DELETE call; injected by tests so a
+   *  simulated failed reconnect never reaches e2b. */
+  private readonly killOrphanSandbox: OrphanSandboxKiller | undefined
 
-  constructor(client: DaemonClient, _daemon: DaemonExtraOptions, store: RoomStore, checkBoxLiveness?: BoxLivenessCheck) {
+  constructor(
+    client: DaemonClient,
+    _daemon: DaemonExtraOptions,
+    store: RoomStore,
+    checkBoxLiveness?: BoxLivenessCheck,
+    killOrphanSandbox?: OrphanSandboxKiller,
+  ) {
     this.client = client
     this.store = store
     this.checkBoxLiveness = checkBoxLiveness ?? ((sandboxId) => isSandboxAlive(sandboxId))
+    this.killOrphanSandbox = killOrphanSandbox
   }
 
   /** `RDV_PREWARM_SANDBOX_ID`, consumed at most once: available only while no
@@ -158,6 +169,7 @@ export class E2bBooter implements SessionBooter {
       port: env.artifactPort,
       seedFromDir: ARTIFACT_SEED_DIR,
       ...(reuseSandboxId !== undefined ? { reuseSandboxId } : {}),
+      ...(this.killOrphanSandbox !== undefined ? { killOrphanSandbox: this.killOrphanSandbox } : {}),
     })
     return {
       sessionId: result.sessionId,
@@ -194,18 +206,35 @@ export class E2bBooter implements SessionBooter {
       return { ...booted, boxWasGone: true }
     }
 
-    const result = await resumeRoomSession(this.client, {
-      cwd: BOX_CWD,
-      label: `rdv-${room.code}`,
-      adapter: env.agentAdapter,
-      model: env.agentModel,
-      prompt: resumePrompt(room),
-      appDir: env.artifactAppDir,
-      port: env.artifactPort,
-      sandboxId: room.sandboxId,
-      artifactUrl: room.artifactUrl,
-      seedFromDir: ARTIFACT_SEED_DIR,
-    })
+    let result
+    try {
+      result = await resumeRoomSession(this.client, {
+        cwd: BOX_CWD,
+        label: `rdv-${room.code}`,
+        adapter: env.agentAdapter,
+        model: env.agentModel,
+        prompt: resumePrompt(room),
+        appDir: env.artifactAppDir,
+        port: env.artifactPort,
+        sandboxId: room.sandboxId,
+        artifactUrl: room.artifactUrl,
+        seedFromDir: ARTIFACT_SEED_DIR,
+        ...(this.killOrphanSandbox !== undefined ? { killOrphanSandbox: this.killOrphanSandbox } : {}),
+      })
+    } catch (err) {
+      // The probe above is a snapshot, not a lock (docs/UPSTREAM.md #10
+      // addendum, seen live): a box that probed "paused" can be genuinely
+      // gone by the time the reconnect lands seconds later, and the daemon
+      // reports that with the SAME `sandbox_reconnect_failed` code as the
+      // transient race — only the text differs (`isSandboxNotFoundError`).
+      // Treat it exactly like a probe that said gone, and boot fresh HERE,
+      // inside the caller's per-room revive lock, instead of surfacing a
+      // generic failure that the caller's own retry would answer with a
+      // second, unserialized boot (the live double boot).
+      if (!isSandboxNotFoundError(err)) throw err
+      const booted = await this.bootWithReuse(room, `rdv-${room.code}`, undefined)
+      return { ...booted, boxWasGone: true }
+    }
     return {
       sessionId: result.sessionId,
       sandboxId: result.sandboxId,

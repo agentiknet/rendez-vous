@@ -68,8 +68,8 @@ async function freshDir(): Promise<string> {
   return dir
 }
 
-async function freshDaemon(): Promise<ExtendedFakeDaemon> {
-  const daemon = await startExtendedFakeDaemon()
+async function freshDaemon(opts?: Parameters<typeof startExtendedFakeDaemon>[0]): Promise<ExtendedFakeDaemon> {
+  const daemon = await startExtendedFakeDaemon(opts)
   daemons.push(daemon)
   return daemon
 }
@@ -242,6 +242,51 @@ test("E2bBooter.resume reconnects normally when the box probes paused, not gone"
     assert.ok(isRecord(body) && isRecord(body.sandbox))
     if (!isRecord(body) || !isRecord(body.sandbox)) return
     assert.equal(body.sandbox.reuse, "paused-box")
+  } finally {
+    await artifact.close()
+  }
+})
+
+test("E2bBooter.resume boots fresh in the same call when the box probed paused but the reconnect itself reports it gone", async () => {
+  const dir = await freshDir()
+  // The probe-then-act race seen live (docs/UPSTREAM.md #10 addendum): the
+  // probe says paused, the reconnect seconds later gets the provider's own
+  // not-found wrapped in the SAME `sandbox_reconnect_failed` code as the
+  // transient race. The fake fails every bare reconnect for this box and
+  // accepts a fresh spawn.
+  const daemon = await freshDaemon({ notFoundOnReconnectForSandbox: { sandboxId: "vanished-box" } })
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const killed: string[] = []
+  const booter = new E2bBooter(
+    client,
+    { baseUrl: daemon.url, token: undefined },
+    store,
+    async () => "paused",
+    async (sandboxId) => {
+      killed.push(sandboxId)
+    },
+  )
+  const artifact = await startArtifactServer()
+
+  try {
+    const room = await roomWithBox(store, "vanished-box", artifact.url)
+    const started = Date.now()
+    const result = await booter.resume(room)
+
+    assert.equal(result.boxWasGone, true, "a not-found reconnect is the same fact as a probe that said gone")
+    assert.equal(result.sandboxId, "sandbox_fake")
+    assert.ok(Date.now() - started < 5_000, "not-found must not burn the transient-race retry budget")
+
+    const spawnBodies = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent").map((r) => r.body)
+    assert.equal(spawnBodies.length, 2, "exactly one reconnect attempt, then exactly one fresh boot — never a third")
+    const [reconnect, fresh] = spawnBodies
+    assert.ok(isRecord(reconnect) && isRecord(reconnect.sandbox) && isRecord(fresh) && isRecord(fresh.sandbox))
+    if (!isRecord(reconnect) || !isRecord(reconnect.sandbox) || !isRecord(fresh) || !isRecord(fresh.sandbox)) return
+    assert.equal(reconnect.sandbox.reuse, "vanished-box")
+    assert.equal("reuse" in fresh.sandbox, false, "the fresh boot must not hand the gone sandboxId to sandbox.reuse")
+    assert.ok(isRecord(fresh.appServe), "the fresh boot must re-serve the artifact")
+    assert.deepEqual(killed, ["vanished-box"], "the best-effort cleanup for the known reuse target still runs, through the injected killer only")
   } finally {
     await artifact.close()
   }

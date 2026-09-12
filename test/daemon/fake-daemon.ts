@@ -28,6 +28,16 @@ export interface FakeDaemonOptions {
    *  instead of `"completed"`; the next one reports a normal completed
    *  turn. */
   readonly failFirstTurnForSandbox?: { readonly sandboxId: string; readonly failCount: number }
+  /** Simulate the probe-then-act race a live box-liveness proof surfaced
+   *  (docs/UPSTREAM.md #10 addendum, ground-truthed 2026-09-12): the box was
+   *  still "paused" when probed, then genuinely gone by the time the actual
+   *  reconnect landed a few seconds later. Every bare-reconnect spawn
+   *  (`sandbox.reuse === sandboxId`, no `appServe`) for this sandboxId fails
+   *  with the provider's own not-found shape — unconditionally, never
+   *  resolving on retry like `failReconnectsForSandbox` does, because a
+   *  genuinely gone box stays gone. A later FRESH spawn (no `reuse` at all)
+   *  succeeds normally. */
+  readonly notFoundOnReconnectForSandbox?: { readonly sandboxId: string }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -96,6 +106,27 @@ export async function startFakeDaemon(opts: FakeDaemonOptions = {}): Promise<Fak
           message:
             `agent_start: sandbox reconnect failed (provider "e2b", sandbox "${reuseId}") — ` +
             "worktree-agent: could not reach the agentproto daemon's MCP endpoint (simulated)",
+        })
+        return
+      }
+
+      if (
+        opts.notFoundOnReconnectForSandbox !== undefined &&
+        reuseId === opts.notFoundOnReconnectForSandbox.sandboxId &&
+        appServeRequested === undefined
+      ) {
+        // Ground-truthed shape (agentproto/ts, session-spawn.ts's catch around
+        // `createSandboxAgentSessionHost`): a genuine e2b `SandboxNotFoundError`
+        // ("Paused sandbox <id> not found") is wrapped into the SAME
+        // `sandbox_reconnect_failed` code as the transient MCP-connect race
+        // above — the two are distinguishable only by this message text, not
+        // by the code, which is exactly why a naive code-only retry check
+        // would burn its whole retry budget on a box that will never come back.
+        sendJson(res, 500, {
+          error: "sandbox_reconnect_failed",
+          message:
+            `agent_start: sandbox reconnect failed (provider "e2b", sandbox "${reuseId}") — ` +
+            `Paused sandbox ${reuseId} not found`,
         })
         return
       }

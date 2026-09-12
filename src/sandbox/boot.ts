@@ -117,6 +117,27 @@ function isRetryableReconnectError(err: unknown): boolean {
 }
 
 /**
+ * The daemon wraps a GENUINE e2b `SandboxNotFoundError` ("Paused sandbox
+ * <id> not found", thrown by the e2b SDK's own `Sandbox.connect()` on a 404)
+ * into the exact SAME `sandbox_reconnect_failed` code as the transient
+ * MCP-connect race `isRetryableReconnectError` exists for — ground-truthed
+ * against agentproto/ts's `session-spawn.ts` catch around
+ * `createSandboxAgentSessionHost`, which stringifies whatever `connect()`
+ * threw into its own message without re-classifying it. The two are
+ * distinguishable ONLY by this text, never by the code. Docs/UPSTREAM.md #10
+ * addendum, ground-truthed live 2026-09-12: a box confirmed "paused" by
+ * `isSandboxAlive`'s own probe can still be genuinely gone by the time the
+ * reconnect itself lands a few seconds later (TOCTOU) — retrying THAT with
+ * `isRetryableReconnectError`'s budget (up to 6 attempts × 15s) wastes
+ * minutes on a box that will never come back, and is what let a caller's own
+ * separate retry double-boot live. Exported so `E2bBooter.resume`
+ * (`src/service/booter.ts`) can catch this specific case and boot fresh
+ * within the SAME call instead of surfacing a generic failure. */
+export function isSandboxNotFoundError(err: unknown): boolean {
+  return err instanceof Error && err.message.toLowerCase().includes("not found")
+}
+
+/**
  * A DIFFERENT shape of the same underlying race (docs/UPSTREAM.md #7),
  * ground-truthed live: the reconnect spawn itself can succeed (a real `201`,
  * the box's own `agent_start` returns a session) while the very first turn
@@ -165,6 +186,11 @@ async function spawnWithReconnectRetry(
     try {
       spawned = await client.spawnAgent(input)
     } catch (err) {
+      // A genuinely gone box (see `isSandboxNotFoundError`'s doc) is not
+      // retryable no matter how `attempts`/`attempt` look — surface it
+      // immediately so the caller (`E2bBooter.resume`) can boot fresh right
+      // away instead of burning the whole retry budget first.
+      if (isSandboxNotFoundError(err)) throw err
       if (attempt === attempts || !isRetryableReconnectError(err)) throw err
       await sleep(retryDelayMs)
       continue
