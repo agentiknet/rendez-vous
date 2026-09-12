@@ -10,7 +10,12 @@ import type { Transport } from "../../src/fanout/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import { MAX_DELIVERY_ATTEMPTS, type Delivery, type Member } from "../../src/rooms/types.ts"
 import { LocalBooter } from "../../src/service/booter.ts"
-import { DeliveryEngine } from "../../src/service/delivery.ts"
+import {
+  DELIVERED_RETENTION_MS,
+  DeliveryEngine,
+  MAX_RETAINED_DELIVERED,
+  pruneDeliveries,
+} from "../../src/service/delivery.ts"
 import { createHttpServer } from "../../src/service/http.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
@@ -255,6 +260,140 @@ test("a member who left between acceptance and drain is an ordinary failure — 
   assert.match(record?.lastError ?? "", /no longer in the room/)
 })
 
+// Retention (the unbounded-growth finding): `deliveries` is a work queue, not
+// a log. `pending` and `failed` are load-bearing — `drainAll` retries the
+// former on boot and the latter is the evidence behind a correction already
+// sent — so the prune may only ever touch `delivered` records.
+
+function deliveredAt(id: string, memberId: string, text: string, stamp: string): Delivery {
+  return { ...pendingDelivery(id, memberId, text), status: "delivered", createdAt: stamp, deliveredAt: stamp }
+}
+
+function failedDelivery(id: string, memberId: string, text: string): Delivery {
+  return { ...pendingDelivery(id, memberId, text, MAX_DELIVERY_ATTEMPTS), status: "failed", lastError: "provider rejected" }
+}
+
+test("pruning keeps every pending and failed record, however old and however many", () => {
+  const ancient = new Date(Date.now() - 10 * DELIVERED_RETENTION_MS).toISOString()
+  const records: Delivery[] = []
+  for (let i = 0; i < 40; i += 1) records.push(deliveredAt(`d${i + 1}`, "m1", `done ${i}`, ancient))
+  for (let i = 0; i < 6; i += 1) records.push({ ...pendingDelivery(`p${i + 1}`, "m1", `waiting ${i}`), createdAt: ancient })
+  for (let i = 0; i < 4; i += 1) records.push({ ...failedDelivery(`f${i + 1}`, "m1", `gave up ${i}`), createdAt: ancient })
+
+  const pruned = pruneDeliveries(records, Date.now())
+
+  assert.deepEqual(
+    pruned.map((record) => record.id),
+    ["p1", "p2", "p3", "p4", "p5", "p6", "f1", "f2", "f3", "f4"],
+    "every pending and failed record survives, in its original order; every delivered one is gone",
+  )
+})
+
+test("pruning keeps only the newest MAX_RETAINED_DELIVERED delivered records", () => {
+  const now = Date.now()
+  const records: Delivery[] = []
+  const total = MAX_RETAINED_DELIVERED + 7
+  for (let i = 0; i < total; i += 1) {
+    records.push(deliveredAt(`d${i + 1}`, "m1", `done ${i}`, new Date(now - (total - i) * 1000).toISOString()))
+  }
+
+  const pruned = pruneDeliveries(records, now)
+
+  assert.equal(pruned.length, MAX_RETAINED_DELIVERED)
+  assert.equal(pruned[0]?.id, `d${total - MAX_RETAINED_DELIVERED + 1}`)
+  assert.equal(pruned[pruned.length - 1]?.id, `d${total}`)
+})
+
+test("a delivered record past the retention window is dropped even in a room too quiet to hit the count cap", () => {
+  const now = Date.now()
+  const stale = new Date(now - DELIVERED_RETENTION_MS - 60_000).toISOString()
+  const fresh = new Date(now - 1000).toISOString()
+  const records: Delivery[] = [
+    { ...deliveredAt("d1", "m1", "the vault code is 44-21", stale), kind: "whisper" },
+    deliveredAt("d2", "m1", "still recent", fresh),
+  ]
+
+  const pruned = pruneDeliveries(records, now)
+
+  assert.deepEqual(pruned.map((record) => record.id), ["d2"])
+  assert.ok(!JSON.stringify(pruned).includes("44-21"), "the stale whisper text is gone from the record at rest")
+})
+
+test("a delivered record whose timestamps cannot be dated is dropped, not kept forever", () => {
+  const records: Delivery[] = [{ ...deliveredAt("d1", "m1", "undateable", "not-a-date"), deliveredAt: undefined }]
+  assert.deepEqual(pruneDeliveries(records, Date.now()), [])
+})
+
+test("an id minted after a prune cannot collide with a record the prune kept", async () => {
+  const { store, code, alice } = await roomWith()
+  const stale = new Date(Date.now() - DELIVERED_RETENTION_MS - 60_000).toISOString()
+  // Under the old `d${deliveries.length + index + 1}` scheme, dropping d1
+  // shortens the array to 2 and the next id is `d3` — the id the FAILED
+  // record still holds. `mark` patches by id, so the next successful send
+  // would flip that dead record to `delivered` and leave the real one behind.
+  await store.update(code, {
+    deliveries: [
+      deliveredAt("d1", alice.id, "long since delivered", stale),
+      pendingDelivery("d2", alice.id, "still waiting"),
+      failedDelivery("d3", alice.id, "gave up"),
+    ],
+    deliverySeq: 3,
+  })
+
+  const eng = engine(store, new FakeTransport())
+  await eng.accept(code, "say", "the next one", [alice.id])
+
+  const records = deliveriesOf(store.get(code))
+  assert.deepEqual(records.map((record) => record.id), ["d2", "d3", "d4"])
+  assert.equal(new Set(records.map((record) => record.id)).size, records.length, "ids stay unique across a prune")
+  assert.equal(records.find((record) => record.id === "d2")?.status, "pending")
+  assert.equal(records.find((record) => record.id === "d3")?.status, "failed")
+  assert.equal(store.get(code)?.deliverySeq, 4, "the counter only ever moves forward")
+})
+
+test("a room predating deliverySeq falls back to its array length, so its first minted id still does not collide", async () => {
+  const { store, code, alice } = await roomWith()
+  // No `deliverySeq`: a room written before the counter existed, whose ids are
+  // exactly d1..dN.
+  await store.update(code, {
+    deliveries: [pendingDelivery("d1", alice.id, "one"), pendingDelivery("d2", alice.id, "two")],
+  })
+  assert.equal(store.get(code)?.deliverySeq, undefined)
+
+  const eng = engine(store, new FakeTransport())
+  await eng.accept(code, "say", "three", [alice.id])
+
+  const records = deliveriesOf(store.get(code))
+  assert.deepEqual(records.map((record) => record.id), ["d1", "d2", "d3"])
+  assert.equal(store.get(code)?.deliverySeq, 3, "the counter is adopted on the first write")
+})
+
+test("a busy room stops growing: the array is bounded and every id it ever minted is distinct", async () => {
+  const { store, code, alice } = await roomWith()
+  const eng = engine(store, new FakeTransport())
+  const rounds = MAX_RETAINED_DELIVERED + 5
+
+  const seen: string[] = []
+  for (let i = 0; i < rounds; i += 1) {
+    await eng.accept(code, "say", `turn ${i}`, [alice.id])
+    for (const record of deliveriesOf(store.get(code))) {
+      if (!seen.includes(record.id)) seen.push(record.id)
+    }
+    await eng.drain(code)
+  }
+
+  const records = deliveriesOf(store.get(code))
+  assert.equal(records.length, MAX_RETAINED_DELIVERED, "the array is capped, not growing with the room's age")
+  assert.equal(seen.length, rounds, "one id per accepted delivery, none reused")
+  assert.equal(new Set(seen).size, rounds)
+  assert.equal(store.get(code)?.deliverySeq, rounds)
+  assert.deepEqual(
+    records.map((record) => record.text),
+    Array.from({ length: MAX_RETAINED_DELIVERED }, (_, i) => `turn ${rounds - MAX_RETAINED_DELIVERED + i}`),
+    "the retained tail is the newest one",
+  )
+})
+
 test("a Room round-trips through the store with deliveries", async () => {
   const dir = await freshDir()
   const store = await RoomStore.open(dir)
@@ -280,6 +419,52 @@ test("a Room round-trips through the store with deliveries", async () => {
   const { lastError: _dropped, ...persisted } = delivery
   void _dropped
   assert.deepEqual(loaded.deliveries, [persisted])
+})
+
+test("a pruned Room round-trips through the store, deliverySeq and all", async () => {
+  const dir = await freshDir()
+  const store = await RoomStore.open(dir)
+  const created = await store.create()
+  const alice = await store.addMember(created.code, {
+    displayName: "Alice",
+    tier: "messenger",
+    address: { provider: "telegram", source: "test", contactRef: "ref-Alice" },
+  })
+  const eng = engine(store, new FakeTransport())
+
+  // Enough traffic to push the array through at least one prune, so what is
+  // persisted is a room whose ids no longer start at d1.
+  for (let i = 0; i < MAX_RETAINED_DELIVERED + 3; i += 1) {
+    await eng.accept(created.code, "say", `turn ${i}`, [alice.id])
+    await eng.drain(created.code)
+  }
+  const before = store.get(created.code)
+  assert.ok(before !== undefined)
+
+  const reopened = await RoomStore.open(dir)
+  const loaded = reopened.get(created.code)
+  assert.ok(loaded !== undefined)
+  // `JSON.stringify` drops `lastError: undefined`, so compare the fields the
+  // prune is about rather than the whole record — the full-shape round trip is
+  // the test above.
+  const shapeOf = (records: readonly Delivery[] | undefined): unknown[] =>
+    (records ?? []).map((record) => ({
+      id: record.id,
+      status: record.status,
+      text: record.text,
+      deliveredAt: record.deliveredAt,
+    }))
+  assert.deepEqual(shapeOf(loaded.deliveries), shapeOf(before.deliveries))
+  assert.equal(loaded.deliverySeq, MAX_RETAINED_DELIVERED + 3)
+  assert.equal(loaded.deliveries?.[0]?.id, "d4", "the pruned prefix does not come back")
+
+  // And the counter survives the reload: the next id is still ahead of every
+  // id in the file, not a replay of one the prune dropped.
+  const resumed = engine(reopened, new FakeTransport())
+  await resumed.accept(created.code, "say", "after the restart", [alice.id])
+  const ids = (reopened.get(created.code)?.deliveries ?? []).map((record) => record.id)
+  assert.equal(ids[ids.length - 1], `d${MAX_RETAINED_DELIVERED + 4}`)
+  assert.equal(new Set(ids).size, ids.length)
 })
 
 test("a room persisted WITHOUT the deliveries key still loads (the pre-existing-rooms guard)", async () => {

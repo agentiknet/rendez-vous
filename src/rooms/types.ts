@@ -137,8 +137,28 @@ export interface Room {
    *  rooms that predate the field — same JSON round-trip rule as
    *  `pendingDeliveries` and `asks`. Carries message text, so it is
    *  deliberately stripped from every public projection (`toPublicRoom`,
-   *  src/service/http.ts). */
+   *  src/service/http.ts) — and pruned once `delivered`
+   *  (`pruneDeliveries`, src/service/delivery.ts), so the text does not sit
+   *  at rest forever.
+   *
+   *  This array is NOT a log: it is a work queue that happens to keep a short
+   *  tail of completed work. Anything that needs a durable history of what was
+   *  said needs its own store. */
   deliveries?: Delivery[]
+  /** Monotonic counter behind `Delivery.id` — the LAST id handed out, so the
+   *  next is `deliverySeq + 1`.
+   *
+   *  Ids used to be derived from `deliveries.length`, which was only
+   *  collision-free while the array never shrank. It shrinks now (delivered
+   *  records are pruned), and a reused id would make `DeliveryEngine.mark`
+   *  patch the wrong record — marking someone else's pending whisper
+   *  `delivered` without ever sending it. The counter never goes backwards,
+   *  so a pruned id is never minted twice.
+   *
+   *  Optional key, absent on rooms that predate the field; those rooms have
+   *  `d1..dN` ids matching their array length, which is what
+   *  `DeliveryEngine.accept` falls back to. */
+  deliverySeq?: number
   /** Which addressing protocol this room's agent was booted with. Absent on
    *  rooms that predate the field — same JSON round-trip rule as
    *  `pendingDeliveries` and `asks`. Never changed in place. */

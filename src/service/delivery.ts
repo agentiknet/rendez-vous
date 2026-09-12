@@ -28,6 +28,58 @@ import { MAX_DELIVERY_ATTEMPTS, type Delivery, type Member } from "../rooms/type
  *  cannot stall the other members' deliveries behind it. */
 export const SEND_TIMEOUT_MS = 10_000
 
+/** How many `delivered` records one room keeps, newest first.
+ *
+ *  `deliveries` is a work queue, not a log — but a completed record is worth
+ *  keeping for a moment: it is the only way to answer "did that whisper
+ *  actually land, and when?" while the conversation it belongs to is still
+ *  happening. Past that, it is dead weight with three costs, and the count cap
+ *  and the age window below each close one the other cannot:
+ *
+ *  - `RoomStore.persist` serializes the WHOLE store on every write
+ *    (store.ts:277-283), so an unbounded array in one busy room taxes every
+ *    unrelated room's update. Only a COUNT cap bounds that: a room can take
+ *    thousands of deliveries inside any time window.
+ *  - a `whisper` record holds private text at rest, in a room whose whole
+ *    point is that the content was private. Only an AGE window retires that:
+ *    a quiet room that took five whispers and stopped never reaches a count
+ *    cap, and would keep them forever.
+ *  - the file is re-read and re-validated on boot (`RoomStore.open`).
+ *
+ *  20 records is roughly a couple of turns' worth of fan-out in a full room
+ *  (one per member per `say`), so the answer to "did it land" survives the
+ *  turn that asked. One hour outlives any single conversation without
+ *  outliving the day.
+ *
+ *  `pending` and `failed` are NEVER pruned, whatever their age: `drainAll`
+ *  retries `pending` on boot — that is the at-least-once guarantee — and a
+ *  `failed` record is the evidence behind the correction the agent was sent. */
+export const MAX_RETAINED_DELIVERED = 20
+
+/** How long a `delivered` record is kept. See `MAX_RETAINED_DELIVERED`. */
+export const DELIVERED_RETENTION_MS = 60 * 60 * 1000
+
+/** Drop `delivered` records that are past the retention window or beyond the
+ *  newest `MAX_RETAINED_DELIVERED`; keep every `pending` and `failed` one, and
+ *  keep the surviving records in their original order.
+ *
+ *  A `delivered` record whose timestamps cannot be parsed is dropped rather
+ *  than kept: an undateable record can never age out, which is exactly the
+ *  unbounded retention this prune exists to prevent. Survivors are selected by
+ *  ARRAY INDEX, not by id, so the prune is correct even on a legacy room whose
+ *  length-derived ids collide (`Room.deliverySeq`). */
+export function pruneDeliveries(deliveries: readonly Delivery[], nowMs: number): Delivery[] {
+  const keep = new Set<number>()
+  for (let index = deliveries.length - 1; index >= 0 && keep.size < MAX_RETAINED_DELIVERED; index -= 1) {
+    const delivery = deliveries[index]
+    if (delivery === undefined || delivery.status !== "delivered") continue
+    const stamp = Date.parse(delivery.deliveredAt ?? delivery.createdAt)
+    if (Number.isNaN(stamp) || nowMs - stamp > DELIVERED_RETENTION_MS) continue
+    keep.add(index)
+  }
+  return deliveries.filter((delivery, index) => delivery.status !== "delivered" || keep.has(index))
+}
+
 export interface DeliveryEngineOpts {
   readonly store: RoomStore
   readonly transport: Transport
@@ -119,8 +171,13 @@ export class DeliveryEngine {
 
     if (accepted.length > 0) {
       const now = this.now()
+      // The counter, never the array length: the array is pruned, so a
+      // length-derived id would be handed out twice and `mark` would patch
+      // the wrong record. `deliveries.length` is only the fallback for a room
+      // written before the counter existed, whose ids are exactly `d1..dN`.
+      const lastSeq = room.deliverySeq ?? room.deliveries?.length ?? 0
       const created: Delivery[] = accepted.map((memberId, index) => ({
-        id: `d${(room.deliveries?.length ?? 0) + index + 1}`,
+        id: `d${lastSeq + index + 1}`,
         memberId,
         kind,
         text,
@@ -130,7 +187,10 @@ export class DeliveryEngine {
         createdAt: now,
         deliveredAt: undefined,
       }))
-      await this.store.update(code, { deliveries: [...(room.deliveries ?? []), ...created] })
+      await this.store.update(code, {
+        deliveries: pruneDeliveries([...(room.deliveries ?? []), ...created], this.nowMs()),
+        deliverySeq: lastSeq + created.length,
+      })
       if (this.autoDrain) {
         // Off the handler's critical path: the tool has already returned
         // "accepted"; provider latency must not stall the agent's turn.
@@ -276,7 +336,22 @@ export class DeliveryEngine {
     const deliveries = (room.deliveries ?? []).map((delivery) =>
       delivery.id === deliveryId ? { ...delivery, ...patch } : delivery,
     )
-    await this.store.update(code, { deliveries })
+    // Prune on the same write that completes a record, so a long-lived room
+    // never carries more than the retained tail between two drains. A record
+    // just marked `delivered` always survives its own prune — it is dated
+    // `now`, and `drainRoom` walks pending records in array order, so it is
+    // also the highest-indexed delivered one. A caller can still read back the
+    // status it just caused.
+    await this.store.update(code, { deliveries: pruneDeliveries(deliveries, this.nowMs()) })
+  }
+
+  /** `now()` as epoch millis, for the retention window. Falls back to the real
+   *  clock if an injected clock returns something `Date.parse` cannot read —
+   *  an unparseable "now" would make every record look infinitely old and
+   *  prune the whole tail. */
+  private nowMs(): number {
+    const parsed = Date.parse(this.now())
+    return Number.isNaN(parsed) ? Date.now() : parsed
   }
 
   /** The reactive correction on final failure — same `queue: true` fan-in

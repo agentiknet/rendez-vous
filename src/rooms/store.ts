@@ -22,6 +22,10 @@ function isBooleanOrUndefined(value: unknown): value is boolean | undefined {
   return value === undefined || typeof value === "boolean"
 }
 
+function isNumberOrUndefined(value: unknown): value is number | undefined {
+  return value === undefined || typeof value === "number"
+}
+
 function isRoomState(value: unknown): value is RoomState {
   return value === "active" || value === "paused"
 }
@@ -192,6 +196,7 @@ function isRoom(value: unknown): value is Room {
   const pendingDeliveries = "pendingDeliveries" in value ? value.pendingDeliveries : undefined
   const asks = "asks" in value ? value.asks : undefined
   const deliveries = "deliveries" in value ? value.deliveries : undefined
+  const deliverySeq = "deliverySeq" in value ? value.deliverySeq : undefined
   const protocol = "protocol" in value ? value.protocol : undefined
   return (
     isString(value.code) &&
@@ -203,6 +208,7 @@ function isRoom(value: unknown): value is Room {
     (pendingDeliveries === undefined || (Array.isArray(pendingDeliveries) && pendingDeliveries.every(isPendingDelivery))) &&
     (asks === undefined || (Array.isArray(asks) && asks.every(isAsk))) &&
     (deliveries === undefined || (Array.isArray(deliveries) && deliveries.every(isDelivery))) &&
+    isNumberOrUndefined(deliverySeq) &&
     isProtocol(protocol) &&
     Array.isArray(value.members) &&
     value.members.every(isMember) &&
@@ -394,6 +400,7 @@ export class RoomStore {
         | "pendingDeliveries"
         | "asks"
         | "deliveries"
+        | "deliverySeq"
         | "protocol"
       >
     >,
