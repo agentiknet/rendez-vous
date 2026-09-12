@@ -22,28 +22,35 @@ self-contained without them.
 | 6 | Rendez-vous's own `E2bBooter` sent the HOST's `cwd` into the box's `agent_start`, not a path valid inside it | High — every e2b room boot 500'd | Fixed in this repo |
 | 7 | A just-unpaused box's first turn can error near-instantly with no detail, invisible to the reconnect-retry contract | Medium — silent stall on resume | Documented |
 | 8 | `mcp_import` is blind to brokers the agent already holds | Medium — confidently wrong plan, not a crash | Documented |
+| 9 | A liveness check that tests existence reports success against a corpse | High — a dead session reads as alive, no self-healing, misleading replies on both surfaces | Fix in progress |
+| 10 | An expired sandbox's raw artifact URL outlives the box in a member's thread | High — live demo consequence of architecture.md §9.3b | Fix in progress |
 
 ---
 
 ## The pattern: plausible config, silent drop, no error anywhere
 
-Four of the cases below read like four unrelated bugs — a missing flag, a
-stale cursor, a filtered account id, a capability the agent already had.
-They are the same class: a config or piece of state that is completely
-reasonable in isolation, checked by nothing, and the system routes around it
-without a stack trace, a non-2xx, or a log line. The only symptom is a human
-noticing a reply never came back, or a plan that quietly rebuilds something
-already sitting there.
+Five of the cases below read like five unrelated bugs — a liveness check
+that only reads an HTTP status, a missing flag, a stale cursor, a filtered
+account id, a capability the agent already had. They are the same class: a
+config or piece of state that is completely reasonable in isolation,
+checked by nothing, and the system routes around it without a stack trace,
+a non-2xx, or a log line. The only symptom is a human noticing a reply
+never came back, or a plan that quietly rebuilds something already sitting
+there.
 
 | Case | Plausible config | Silent drop |
 | --- | --- | --- |
+| Liveness check (finding 9) | `GET /sessions/:id` answers `200` for a killed/exited/errored session — the daemon keeps the bookkeeping row until `DELETE` | A bare `res.ok` reads a corpse as alive; the room never flips to `paused`, so a resume reuses the dead session id and finishes having resumed nothing |
 | Daemon prompt path (finding 1) | Caller omits `queue: true` on a mid-turn prompt | Both the built-in inbound router and the MCP `agent_prompt` tool never pass it either, so a mid-turn message is rejected with no error delivered to any sender |
 | Resume cursor (`docs/REHEARSAL.md` finding 3, fixed in `b58de3d`) | Our fan-out reader keeps its cursor across a resume | A new session's stream renumbers from near 1; the reader waits at the old session's stale seq, so every reply after a resume vanishes |
 | agentpush account-pinned inbound route | Route created with `provider_account_id` set, matching the per-account setup the provider UI encourages | `listEnabledMessagingRoutes` filters `provider_account_id IS NULL` (`packages/core/src/domain/inbound-route/repository.ts:335`, in the read-only agentpush checkout) — the route never fires; the comment above it says so: "account-pinned routes can't be honoured yet (Phase 3)" |
 | `mcp_import` discovery (finding 8) | Workspace already brokers Gmail via agentpush; user asks the room agent to add Gmail access | `mcp_import` only ever matches against locally discovered MCP servers (`session-tools.ts:1400-1403`), with no notion of a broker the agent already has — it confidently proposes registering a fresh OAuth client instead of reporting the access it already has |
 
 The hard part of multiplayer agents is not the model. It is that every one
-of these fails quietly.
+of these fails quietly. The liveness check is the sharper case: the others
+dropped data quietly; this one reports success while doing nothing, reads
+as correct in review, passes tests, and only fails when something dies out
+of band — which never happens in a test suite and always happens on stage.
 
 ---
 
@@ -450,3 +457,55 @@ discover before planning — e.g. a surface alongside `mcp_discovered_list`
 that a host process can register non-MCP, already-granted capabilities
 into, so discovery isn't limited to "what a local client config already
 has."
+
+---
+
+## 9. A liveness check that tests existence reports success against a corpse
+
+**Summary.** `isSessionAlive` (`src/service/daemon-extra.ts:14`, this repo)
+returned bare `res.ok` from `GET /sessions/:id`. But a killed/exited/errored
+session still answers `200` — the daemon keeps the bookkeeping row until
+`DELETE` forgets it (`docs/DAEMON-NOTES.md` "Session teardown"), `sessions.ts`'s
+own `SessionStatus` union (`sessions.ts:588`) includes `"killed"` alongside
+`"running"`/`"starting"`, and `GET /sessions/:id`'s handler
+(`packages/runtime/src/http-server.ts` ~5435, `json(200, resolvedDesc)`) never
+filters on it — a killed descriptor can read `{"status":"killed","resumable":
+true}` and still be `200`. A liveness check that only reads the HTTP status
+reports success against a corpse.
+
+**Observed live, 2026-09-12.** A session died out of band. `reviveIfSessionDied`
+(`src/service/room-service.ts`) never flipped the room to `paused`, because
+`isSessionAlive` kept reporting the dead session alive. `resume RDV-NG7F`
+answered in 0.7s having resumed nothing — `LocalBooter.resume`
+(`src/service/booter.ts`) saw `alive: true` and returned the same dead
+`sessionId` without booting. The "already active" branch of `handleResume`
+then told the phone "Room RDV-NG7F is already active," while the API's own
+return value carried `kind: "resumed"` — an accurate-looking reply describing
+nothing that happened. A message fanned into the same dead session got the
+daemon's real `409 session_not_alive` (`src/daemon/client.ts:127`), correctly
+classified, and was reported back to the member as "Could not deliver your
+message: session_not_alive" — loud, told to the member, not swallowed. That
+visibility is the payoff of R3's queue/attribution work; recovery — flipping
+the room to `paused` so a resume actually re-boots — was the missing half.
+
+**Severity:** High. **Status:** Fix in progress — `isSessionAlive` now parses
+`body.status` against the daemon's own live-status set instead of trusting
+`res.ok`.
+
+**Suggested fix (upstream).** Expose `alive: boolean` directly on the
+descriptor `GET /sessions/:id` returns, or document plainly that `200` means
+"the record exists," not "the process is live." Our own rule going forward:
+assert on the new session id a resume actually returns, never on the outcome
+`kind` a response carries.
+
+---
+
+## 10. An expired sandbox's raw artifact URL outlives the box in a member's thread
+
+`docs/ARCHITECTURE.md` §9.3b's gap, demonstrated live rather than argued: box
+`i7jos61ixgkcfrekmi1vl` expired mid-demo on 2026-09-12. Its raw
+`https://<port>-<id>.e2b.app` artifact URL died with it, while the room still
+advertised that URL and a member's own messenger thread still carried it as
+the last link sent — scrolling up or re-tapping it now hits a dead page. This
+is exactly why the artifact proxy (`GET /r/:code/artifact/*`, keyed on the
+room code, not the box) is being built, not a hypothetical risk.
