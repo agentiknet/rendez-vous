@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 01:56 UTC (03:56 local). Repo: this directory,
+Last updated: 2026-09-12 02:00 UTC (04:00 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -123,8 +123,8 @@ Last updated: 2026-09-12 01:56 UTC (03:56 local). Repo: this directory,
     (note: agentproto/ts is its own nested git repo; worktrees live under
     `/Volumes/SSDExternalMacStudio/Code/_agentproto-worktrees/agentproto-ts/`);
     app serve ui.path fix (rdv-up-app-serve-ui-path);
-    `/mcps/proxy/call` auth gate
-    (rdv-up-mcp-proxy-auth), reap orphaned boxes + `sandbox gc`
+    `/mcps/proxy/call` auth gate — PR OPEN https://github.com/agentproto/ts/pull/1277
+    (also gated POST /mcps/imports and DELETE /mcps/imports/:id); reap orphaned boxes + `sandbox gc`
     (rdv-up-reap-orphans), sandbox liveness signal (rdv-up-sandbox-liveness). NOT STARTED: the remaining docs/UPSTREAM.md items
     (app-serve ui.path, reconnect not pausing, spawn surviving disconnect).
 
@@ -150,7 +150,6 @@ re-proven on a phone after `4e73786`.
 - `sess_9726365f` rdv-box-liveness, sonnet: `src/service/box-liveness.ts`,
   `room-service.ts`, `booter.ts`, `src/sandbox/boot.ts`, their tests, one
   RUNBOOK section. Fenced from fanout, web, http.ts, artifact-proxy, deliverable.
-- `sess_452f3bc7` rdv-up-mcp-proxy-auth, GLM: worktree `wt/mcp-proxy-auth`.
 - `sess_7bcde422` rdv-up-reap-orphans, GLM: phase A read-only audit of e2b
   boxes left by dead sessions (report only), then worktree `wt/reap-failed-boots`.
 - `sess_059b885d` is the live room's agent, not an executor. Do not kill it.
