@@ -4,7 +4,7 @@
     "isTitle": true,
     "title": "Rendez-vous",
     "subtitle": "One room, one agent, one artifact — many humans, on the surfaces they already use.",
-    "page": "1 / 11"
+    "page": "1 / 12"
   },
   {
     "type": "statement",
@@ -16,7 +16,7 @@
       "Every one of them is single-principal — one key, one developer, one session."
     ],
     "highlight": "The uncontested ground isn't the sandbox. It's the room around it.",
-    "page": "2 / 11"
+    "page": "2 / 12"
   },
   {
     "type": "list",
@@ -30,7 +30,7 @@
       "One session — the one agent turn-loop",
       "One artifact URL — stable, public, live"
     ],
-    "page": "3 / 11"
+    "page": "3 / 12"
   },
   {
     "type": "ladder",
@@ -43,7 +43,7 @@
       { "tier": "3", "surface": "Laptop web room", "sends": "turns, permission answers", "receives": "full transcript + live artifact iframe", "latency": "live" }
     ],
     "caption": "Telegram and laptop are already two real surfaces.",
-    "page": "4 / 11"
+    "page": "4 / 12"
   },
   {
     "type": "timeline",
@@ -58,7 +58,7 @@
       { "time": "~33s", "label": "Agent finds and edits the artifact, unaided" }
     ],
     "caption": "Curl-verified at every step. Delivery to the phone: operator-confirmed.",
-    "page": "5 / 11"
+    "page": "5 / 12"
   },
   {
     "type": "findings",
@@ -74,7 +74,7 @@
     ],
     "highlight": "The first four lost data quietly. The fifth reported success while doing nothing — the correct field was already parsed one function over.",
     "caption": "None crash. All look like working code or correct config. This is evidence you only get by running it.",
-    "page": "6 / 11"
+    "page": "6 / 12"
   },
   {
     "type": "statement",
@@ -86,7 +86,7 @@
       "Our position: each member attaches their own tools over rendezvous — nothing inherited.",
       "Revocation is an unpair, not a key rotation — there was never a shared secret to rotate."
     ],
-    "page": "7 / 11"
+    "page": "7 / 12"
   },
   {
     "type": "code",
@@ -99,7 +99,7 @@
     ],
     "code": "agent_start({\n  adapter: \"codex\",\n  model:   \"gpt-5.2-codex\",\n  sandbox: { provider: \"e2b\" },\n  appServe: { dir: \"...\", port: 3210 },\n})",
     "caption": "Pending the codex proof — not yet run live.",
-    "page": "8 / 11"
+    "page": "8 / 12"
   },
   {
     "type": "statement",
@@ -111,7 +111,7 @@
       "The room layer is every line that's new — the judged artifact.",
       "8 upstream findings, shipped as a maintainer write-up (docs/UPSTREAM.md)."
     ],
-    "page": "9 / 11"
+    "page": "9 / 12"
   },
   {
     "type": "list",
@@ -126,13 +126,29 @@
       "WhatsApp: not provisioned. No number, no key.",
       "Phase 2 pairing-back: untested — box-to-broker egress, which side mints the token, post-pairing scope."
     ],
-    "page": "10 / 11"
+    "page": "10 / 12"
+  },
+  {
+    "type": "findings",
+    "isFindings": true,
+    "eyebrow": "The deliverable flow",
+    "title": "Work leaves the room — on purpose",
+    "findingsItems": [
+      { "n": "1", "label": "Jeremy asks the room to build a presentation, then reviews it live at the artifact URL" },
+      { "n": "2", "label": "He asks for a PDF" },
+      { "n": "3", "tag": "the confirmation gate", "label": "the room previews it first — recipient, channel, subject, the rendered artifact — and sends only when a member explicitly confirms" },
+      { "n": "4", "label": "the PDF reaches Jeremy's own messenger, and by email, a client who is not a member of the room" },
+      { "n": "5", "label": "every send lands in the shared transcript: who asked, who confirmed, what was sent, to whom" }
+    ],
+    "highlight": "Every other capability keeps work inside the room. This one lets the room produce a work product that leaves it — the confirmation gate is a room with a notion of authority, not just relay.",
+    "caption": "Chains fan-in, the artifact, canvakit and agentpush end to end. Being built, not yet observed.",
+    "page": "11 / 12"
   },
   {
     "type": "closing",
     "isClosing": true,
     "title": "The room is the primitive.",
     "subtitle": "The runtime is a detail.",
-    "page": "11 / 11"
+    "page": "12 / 12"
   }
 ]

@@ -1,6 +1,6 @@
 # Rendez-vous pitch deck
 
-11 slides, dark kit, one idea per slide. Every number is sourced from
+12 slides, dark kit, one idea per slide. Every number is sourced from
 `docs/REHEARSAL.md` or `docs/ARCHITECTURE.md` (see `SCRIPT.md` for the
 speaker read and shot list).
 
@@ -11,8 +11,8 @@ directory because `kit:` refs resolve relative to the CWD.
 ## Files
 
 - `rendez-vous.canvakit.html` — the template
-- `data.json` — the 11 slides' content
-- `rendez-vous.pdf` — rendered output (11 pages)
+- `data.json` — the 12 slides' content
+- `rendez-vous.pdf` — rendered output (12 pages)
 - `SCRIPT.md` — ~4 minute speaker script + shot list for the recording
 
 ## Render command
@@ -38,9 +38,9 @@ node /Volumes/SSDExternalMacStudio/Code/products/agentik/agentik-studio/projects
 - No slide required an "ASK" placeholder — every number traced to
   `docs/REHEARSAL.md` or `docs/ARCHITECTURE.md`.
 - Slide 6's fifth finding (the liveness check reading `res.ok` instead of
-  `status`) is sourced from `src/service/daemon-extra.ts`'s own doc comment
-  on `isSessionAlive`, operator-reported as found live on a real phone
-  during the Run 3 continuation; not yet written up in `docs/UPSTREAM.md`.
+  `status`) is `docs/UPSTREAM.md` finding 9, "A liveness check that tests
+  existence reports success against a corpse" — found live on a real phone
+  during the Run 3 continuation.
 - Slide 10's dead-artifact-link line (box `i7jos61ixgkcfrekmi1vl` expiring
   mid-rehearsal) is operator-reported, confirming the risk
   `docs/ARCHITECTURE.md` §9.3b predicted. As of this render,
@@ -48,3 +48,7 @@ node /Volumes/SSDExternalMacStudio/Code/products/agentik/agentik-studio/projects
   resume-after-kill check, so the slide and script call the fix "fixed
   after rehearsal, re-proof pending" rather than claiming it's verified —
   update that framing once `docs/REHEARSAL.md` records a completed re-test.
+- Slide 11 ("The deliverable flow") describes a capability not yet in any
+  doc as of this render — operator-specified directly. Marked "being
+  built, not yet observed" on-slide per the same rule: update once
+  `docs/REHEARSAL.md` records it run live.
