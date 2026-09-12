@@ -42,9 +42,16 @@ export interface BootedSession {
   boxWasGone?: boolean
 }
 
+export interface ResumeOptions {
+  /** Replay of the prior session's transcript (src/service/recap.ts), when
+   *  one could be read. Absent means the history is genuinely unavailable
+   *  and the resumed agent must say so rather than guess. */
+  readonly recap?: string
+}
+
 export interface SessionBooter {
   boot(room: Room, opts: { label: string }): Promise<BootedSession>
-  resume(room: Room): Promise<BootedSession>
+  resume(room: Room, opts?: ResumeOptions): Promise<BootedSession>
 }
 
 /** The capability half of both prompts — how attribution arrives, how to
@@ -86,30 +93,64 @@ export function openingPrompt(room: Room, opts?: { appDir: string }): string {
   return lines.join(" ")
 }
 
-/** A resume boots a FRESH agent session — the prior session's transcript is
- *  not replayed, and `Room` does not even retain the old `sessionId` to
- *  fetch it with (`performResume` overwrites it). So this prompt must not
- *  imply continuity it does not have.
+/** A resume boots a FRESH agent session: the agent's own working context
+ *  never survives a pause. Two prompts, and the difference is whether the
+ *  room's transcript could be replayed (`src/service/recap.ts`).
  *
- *  It used to end with `"Room <code> resumed. Where were we?"`, which made
- *  a context-free agent perform remembering: members got a warm greeting,
- *  then watched it contradict itself two turns later when asked what had
- *  been said. Nothing errored — the room was `active`, replies flowed, the
- *  demo looked fine. Found live on a real phone, 2026-09-12.
+ *  - `recap` present → the transcript is quoted verbatim and the agent is
+ *    told to pick up from it. This is the path that makes a resume feel
+ *    continuous to the people in the room.
+ *  - `recap` absent → the history is genuinely unrecoverable, and the agent
+ *    is told to SAY SO. Never to improvise.
  *
- *  Until a real transcript replay lands, the honest move is to say the
- *  history is gone and ask for one line of re-grounding, which in a
- *  multiplayer room is a natural thing to ask anyway. */
-export function resumePrompt(room: Room, opts?: { appDir: string }): string {
-  const lines = [
-    `You are the shared agent for Rendez-vous room ${room.code}, restarting on a fresh session after a pause.`,
-    "You do NOT have the earlier conversation: the previous session's transcript is not available to you. Never pretend otherwise, never guess at what was already agreed, and if someone asks what was said before, say plainly that you no longer have it and ask them to re-state what matters.",
-    ...capabilityLines(opts),
-  ]
-  lines.push(
-    `Reply to this message with exactly one short line and nothing else: "Room ${room.code} is back, on a fresh session — I've lost the earlier thread. Catch me up in a line?"`,
-  )
-  return lines.join(" ")
+ *  That second branch exists because of what shipped before it: the prompt
+ *  ended with `"Room <code> resumed. Where were we?"`, which made a
+ *  context-free agent perform remembering. Members got a warm greeting, then
+ *  watched it contradict itself two turns later when asked what had been
+ *  said. Nothing errored — the room was `active`, replies flowed, the demo
+ *  looked fine. Found live on a real phone, 2026-09-12. A resume may lose
+ *  the history; it may never pretend it hasn't. */
+export function resumePrompt(room: Room, opts?: { appDir?: string; recap?: string }): string {
+  // `appDir` and `recap` are independent: LocalBooter has a recap but no
+  // artifact page, e2b has both. Passing an empty appDir must not emit an
+  // artifact line pointing at "/.agentproto/ui/index.html".
+  const appDir = opts?.appDir
+  const appDirOpts = appDir !== undefined && appDir !== "" ? { appDir } : undefined
+  const recap = opts?.recap
+  const lines = [`You are the shared agent for Rendez-vous room ${room.code}, restarting on a fresh session after a pause.`]
+
+  if (recap === undefined) {
+    lines.push(
+      "You do NOT have the earlier conversation: the previous session's transcript could not be recovered. Never pretend otherwise, never guess at what was already agreed, and if someone asks what was said before, say plainly that you no longer have it and ask them to re-state what matters.",
+    )
+  } else {
+    lines.push(
+      "Your own working context did not survive the pause, but the room's transcript did, and it is reproduced below. Treat it as what was actually said — it is a replay, not a summary you wrote. Member messages keep their original [Name · tier] prefix. Do not re-greet, do not re-introduce yourself, and do not ask people to repeat what is already in it.",
+    )
+  }
+
+  lines.push(...capabilityLines(appDirOpts))
+
+  if (recap === undefined) {
+    lines.push(
+      `Reply to this message with exactly one short line and nothing else: "Room ${room.code} is back, on a fresh session — I've lost the earlier thread. Catch me up in a line?"`,
+    )
+    return lines.join(" ")
+  }
+
+  // The recap goes LAST and on its own lines: it is quoted material, and
+  // folding multi-line transcript into the single space-joined instruction
+  // paragraph would blur the line between what the room said and what we
+  // are telling the agent to do.
+  return [
+    lines.join(" "),
+    "",
+    "--- room transcript so far ---",
+    recap,
+    "--- end of transcript ---",
+    "",
+    `Reply to this message with exactly one short line and nothing else, picking up where the transcript leaves off: "Room ${room.code} is back — I still have us at: <one clause naming the last thing in the transcript>."`,
+  ].join("\n")
 }
 
 /** No sandbox: the box-less fallback of R9. `sandboxId`/`artifactUrl` stay
@@ -134,7 +175,7 @@ export class LocalBooter implements SessionBooter {
     return { sessionId: spawned.id, sandboxId: undefined, artifactUrl: undefined, artifactReady: undefined }
   }
 
-  async resume(room: Room): Promise<BootedSession> {
+  async resume(room: Room, opts?: ResumeOptions): Promise<BootedSession> {
     if (room.sessionId !== undefined) {
       const alive = await isSessionAlive(this.daemon, room.sessionId)
       if (alive) {
@@ -146,7 +187,17 @@ export class LocalBooter implements SessionBooter {
         }
       }
     }
-    return this.boot(room, { label: `rdv-${room.code}` })
+    // The session is dead, so this spawn IS the resume — use the resume
+    // prompt (with the recap when we have one), not the blank-slate opening
+    // one, or the local booter silently loses the history the e2b path keeps.
+    const spawned = await this.client.spawnAgent({
+      adapter: env.agentAdapter,
+      model: env.agentModel,
+      cwd: process.cwd(),
+      label: `rdv-${room.code}`,
+      prompt: resumePrompt(room, opts?.recap !== undefined ? { recap: opts.recap } : undefined),
+    })
+    return { sessionId: spawned.id, sandboxId: undefined, artifactUrl: undefined, artifactReady: undefined }
   }
 }
 
@@ -188,13 +239,25 @@ export class E2bBooter implements SessionBooter {
     return alreadyTaken ? undefined : candidate
   }
 
-  private async bootWithReuse(room: Room, label: string, reuseSandboxId: string | undefined): Promise<BootedSession> {
+  /** `recap`, when present, means this boot is really a RESUME that had to
+   *  cold-start (box gone, or a reconnect that failed under us). Those are
+   *  exactly the cases where replaying the transcript matters most, so they
+   *  must not fall back to the blank-slate `openingPrompt`. */
+  private async bootWithReuse(
+    room: Room,
+    label: string,
+    reuseSandboxId: string | undefined,
+    recap?: string,
+  ): Promise<BootedSession> {
     const result = await bootRoomSession(this.client, {
       cwd: BOX_CWD,
       label,
       adapter: env.agentAdapter,
       model: env.agentModel,
-      prompt: openingPrompt(room, { appDir: env.artifactAppDir }),
+      prompt:
+        recap === undefined
+          ? openingPrompt(room, { appDir: env.artifactAppDir })
+          : resumePrompt(room, { appDir: env.artifactAppDir, recap }),
       appDir: env.artifactAppDir,
       port: env.artifactPort,
       seedFromDir: ARTIFACT_SEED_DIR,
@@ -213,12 +276,13 @@ export class E2bBooter implements SessionBooter {
     return this.bootWithReuse(room, opts.label, this.prewarmSandboxId())
   }
 
-  async resume(room: Room): Promise<BootedSession> {
+  async resume(room: Room, opts?: ResumeOptions): Promise<BootedSession> {
+    const recap = opts?.recap
     if (room.sandboxId === undefined || room.artifactUrl === undefined) {
       // No box on record, or one that never finished serving anything —
       // nothing for resumeRoomSession's probe to check, so boot fresh,
       // reusing the box if we at least have its id.
-      return this.bootWithReuse(room, `rdv-${room.code}`, room.sandboxId)
+      return this.bootWithReuse(room, `rdv-${room.code}`, room.sandboxId, recap)
     }
 
     // Session liveness and box liveness are independent facts
@@ -232,7 +296,7 @@ export class E2bBooter implements SessionBooter {
     // own retry budget for exactly that uncertainty.
     const liveness = await this.checkBoxLiveness(room.sandboxId)
     if (liveness === "gone") {
-      const booted = await this.bootWithReuse(room, `rdv-${room.code}`, undefined)
+      const booted = await this.bootWithReuse(room, `rdv-${room.code}`, undefined, recap)
       return { ...booted, boxWasGone: true }
     }
 
@@ -243,7 +307,7 @@ export class E2bBooter implements SessionBooter {
         label: `rdv-${room.code}`,
         adapter: env.agentAdapter,
         model: env.agentModel,
-        prompt: resumePrompt(room, { appDir: env.artifactAppDir }),
+        prompt: resumePrompt(room, { appDir: env.artifactAppDir, ...(recap !== undefined ? { recap } : {}) }),
         appDir: env.artifactAppDir,
         port: env.artifactPort,
         sandboxId: room.sandboxId,
@@ -262,7 +326,7 @@ export class E2bBooter implements SessionBooter {
       // generic failure that the caller's own retry would answer with a
       // second, unserialized boot (the live double boot).
       if (!isSandboxNotFoundError(err)) throw err
-      const booted = await this.bootWithReuse(room, `rdv-${room.code}`, undefined)
+      const booted = await this.bootWithReuse(room, `rdv-${room.code}`, undefined, recap)
       return { ...booted, boxWasGone: true }
     }
     return {

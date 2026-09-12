@@ -15,6 +15,7 @@ import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
 import { DeliverableAwareTransport, DeliverableService, parseDeliverableCommand } from "./deliverable.ts"
 import { MediaStore } from "./media-store.ts"
+import { buildSessionRecap } from "./recap.ts"
 import { hasSendMedia } from "./transports.ts"
 
 /** What every member-facing surface shows instead of `room.artifactUrl`
@@ -650,7 +651,14 @@ export class RoomService {
   }
 
   private async performResume(room: Room): Promise<Room> {
-    const booted = await this.booter.resume(room)
+    // Read the OUTGOING session's transcript before `booter.resume` mints a
+    // new one — `room.sessionId` is still the old id here, and this is the
+    // last moment it exists anywhere (the `store.update` below overwrites
+    // it). `buildSessionRecap` is bounded and never throws: a resume that
+    // loses the history is a working resume, a resume that hangs is not.
+    const recap =
+      room.sessionId === undefined ? undefined : await buildSessionRecap(this.client, room.sessionId)
+    const booted = await this.booter.resume(room, recap !== undefined ? { recap } : {})
     // A new sessionId restarts the daemon's own seq numbering near 1, while
     // `room.cursor` is still whatever seq the *previous* session last
     // flushed at — the fan-out reader would then open the new session's
