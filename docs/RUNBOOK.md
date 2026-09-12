@@ -271,3 +271,32 @@ Run this phase with a pre-warmed box so it costs no fresh boot:
 ```
 RDV_BOOTER=e2b RDV_PREWARM_SANDBOX_ID=<id from §3> node scripts/simulate-room.ts
 ```
+
+## 5. Supervisor ops
+
+`scripts/sv.sh` wraps the agentproto daemon's `/sessions` surface (see
+docs/DAEMON-NOTES.md) so routine chores are one-liners instead of hand-rolled
+`curl`. It reads the bearer itself (§1's `runtime.json` trick — override the
+path with `SV_RUNTIME_JSON` if it moves) and talks to `RDV_DAEMON_URL`
+(default `http://127.0.0.1:18790`). Any argument that names a session accepts
+either its `sess_...` id or its `label`; a label resolves to the newest
+**running** session with that exact label.
+
+```
+scripts/sv.sh status [label-or-id ...]   # one line/session; no args = running rdv-* sessions
+scripts/sv.sh queue <id-or-label>        # prompt FIFO: queueId  first 70 chars
+scripts/sv.sh send <id-or-label> [--front] [--file path | text...]
+scripts/sv.sh cancel <id-or-label> <queueId>
+scripts/sv.sh promote <id-or-label> <queueId>
+scripts/sv.sh out <id-or-label> [n]      # last n text-bearing transcript lines (default 20)
+scripts/sv.sh verify                     # git state, check-types, test, forbidden-cast grep
+scripts/sv.sh boxes                      # agentproto sandboxes + e2b's own running list
+```
+
+`send` always posts with `queue: true` (never the blocking default that 409s
+mid-turn); `--front` also sets `force: true` to jump the FIFO. `boxes` needs
+`E2B_API_KEY` in the environment (docs/UPSTREAM.md #3's credential, not one of
+the `RDV_*` vars) to reach e2b's own API; it fails fast with a clear message
+if unset. Every subcommand exits non-zero on a daemon error (HTTP ≥ 400) or an
+unresolved label/id, so it's safe to chain in a shell `&&`. The script never
+prints the bearer itself, only what the daemon returns for a session.
