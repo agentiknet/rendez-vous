@@ -9,6 +9,7 @@ import {
   type SttProvider,
   type VisionProvider,
 } from "../channels/media-ingress.ts"
+import { AgentpushMediaFetcher } from "../channels/agentpush/media-fetch.ts"
 import { TelegramMediaResolver } from "../channels/telegram-media.ts"
 import { OpenAiSttProvider, OpenAiVisionProvider } from "../media/openai.ts"
 import type { TranscriptRecord } from "../daemon/records.ts"
@@ -135,12 +136,36 @@ function resolveMediaIngress(hooks: HttpMediaHooks | undefined): MediaIngress {
     vision: hooks?.vision ?? (openaiKey !== undefined ? new OpenAiVisionProvider(openaiKey) : NullProviders.vision),
     fetch: hooks?.fetch,
     maxBytes: hooks?.maxBytes,
-    resolveReference:
-      hooks?.resolveReference ??
-      (telegramToken !== undefined
-        ? new TelegramMediaResolver({ token: telegramToken, maxBytes: env.mediaMaxBytes })
-        : undefined),
+    resolveReference: hooks?.resolveReference ?? defaultReferenceResolver(telegramToken),
   }
+}
+
+/**
+ * Who resolves a bare `providerMediaId` into bytes.
+ *
+ * Preferred: agentpush's own `messaging_attachment_fetch`, which works for
+ * EVERY messenger channel and keeps the provider credential inside agentpush.
+ *
+ * Fallback: the direct Telegram resolver, for when agentpush is not
+ * configured (the console/local transport). It is Telegram-only by
+ * construction — the previous wiring used it for every channel, so a WhatsApp
+ * voice note's Meta media id was sent to Telegram's `getFile` and rejected,
+ * landing a 0-byte record and telling the member the file "could not be
+ * fetched". Provider-blind resolution read as a platform limit and was our
+ * own bug.
+ */
+function defaultReferenceResolver(telegramToken: string | undefined): MediaReferenceResolver | undefined {
+  if (env.agentpushUrl !== undefined) {
+    return new AgentpushMediaFetcher({
+      baseUrl: env.agentpushUrl,
+      apiKey: env.agentpushKey,
+      maxBytes: env.mediaMaxBytes,
+    })
+  }
+  if (telegramToken !== undefined) {
+    return new TelegramMediaResolver({ token: telegramToken, maxBytes: env.mediaMaxBytes })
+  }
+  return undefined
 }
 
 /** docs/MULTIMODAL.md transcript convention: a media message fans in as
