@@ -34,6 +34,9 @@ export interface ExtendedFakeDaemon {
    *  through a real kill — for exercising the `exited`/`error` cases the fake
    *  daemon has no other route to produce. */
   setSessionStatus(sessionId: string, status: FakeSessionStatus): void
+  /** Force the session descriptor's `busy` flag (RoomStatePayload's
+   *  "working vs idle" fact) without going through a real prompt. */
+  setSessionBusy(sessionId: string, busy: boolean): void
   /** Make `GET /sessions/:id` answer `404`, as if the daemon had never heard
    *  of the session or had `DELETE`d its bookkeeping row (`forget`). */
   forgetSession(sessionId: string): void
@@ -57,6 +60,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 export async function startExtendedFakeDaemon(opts: FakeDaemonOptions = {}): Promise<ExtendedFakeDaemon> {
   const inner: FakeDaemon = await startFakeDaemon(opts)
   const sessionStatus = new Map<string, FakeSessionStatus>()
+  const sessionBusy = new Map<string, boolean>()
   const history = new Map<string, FanoutRecordLike[]>()
   const subscribers = new Map<string, Set<ServerResponse>>()
 
@@ -168,8 +172,9 @@ export async function startExtendedFakeDaemon(opts: FakeDaemonOptions = {}): Pro
     if (aliveMatch !== null && req.method === "GET") {
       const id = aliveMatch[1]
       const status = id !== undefined ? sessionStatus.get(id) : undefined
+      const busy = id !== undefined ? (sessionBusy.get(id) ?? false) : false
       if (status !== undefined) {
-        sendJson(res, 200, { id, status })
+        sendJson(res, 200, { id, status, busy })
       } else {
         sendJson(res, 404, { error: "not_found" })
       }
@@ -225,6 +230,7 @@ export async function startExtendedFakeDaemon(opts: FakeDaemonOptions = {}): Pro
     pushRecord,
     subscriberCount: (sessionId: string) => subscribersFor(sessionId).size,
     setSessionStatus: (sessionId: string, status: FakeSessionStatus) => sessionStatus.set(sessionId, status),
+    setSessionBusy: (sessionId: string, busy: boolean) => sessionBusy.set(sessionId, busy),
     forgetSession,
     close: async () => {
       for (const set of subscribers.values()) {

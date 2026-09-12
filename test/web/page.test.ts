@@ -117,7 +117,7 @@ test("renderRoomPage omits whatsapp/telegram/sms join buttons when they are not 
 
 test("renderRoomPage shows the room code in a large, prominent element", () => {
   const html = renderRoomPage(fakeRoom(), fakeLinks())
-  assert.match(html, /class="join-code"[^>]*>Room <span class="code">RDV-7F3K<\/span>/)
+  assert.match(html, /class="join-code"[^>]*>Room <span class="code" id="room-code">RDV-7F3K<\/span>/)
 })
 
 test("renderRoomPage's inline script parses whisper blocks and renders the honest-collapse toggle", () => {
@@ -135,4 +135,40 @@ test("renderRoomNotFoundPage mentions the code and a hint to create a room", () 
   const html = renderRoomNotFoundPage("RDV-ZZZZ")
   assert.ok(html.includes("RDV-ZZZZ"))
   assert.match(html, /new/i)
+})
+
+test("renderRoomPage server-renders the live state: pill, agent status, member badges with joined-at", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks(), true)
+  assert.match(html, /id="state-pill" class="pill live">live</)
+  assert.ok(html.includes(">working ·"), "agent busy renders as working before JS runs")
+  assert.ok(html.includes('class="tier-badge tier-messenger">messenger<'))
+  assert.ok(html.includes('class="tier-badge tier-room-web">room-web<'))
+  assert.ok(html.includes("member-joined"))
+})
+
+test("renderRoomPage embeds the polling state script that patches the DOM every 3s", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks())
+  assert.ok(html.includes('"/r/" + ROOM_CODE + "/state"'))
+  assert.ok(html.includes("pollState, 3000"))
+  assert.ok(html.includes("connection lost, retrying"))
+  assert.ok(html.includes("updated-ago"))
+  assert.ok(!html.includes("location.reload"), "no full-page reloads")
+})
+
+test("renderRoomPage for a paused room shows the paused pill and the paused artifact message with no dead link", () => {
+  const html = renderRoomPage(
+    fakeRoom({ state: "paused", artifactUrl: "https://3210-dead.e2b.app", artifactReady: false }),
+    fakeLinks(),
+  )
+  assert.match(html, /id="state-pill" class="pill paused">paused</)
+  assert.ok(html.includes("artifact paused, the link will come back when the room wakes"))
+  assert.ok(!html.includes("e2b.app"), "the raw e2b host never reaches the page")
+  assert.match(html, /id="artifact-frame"[^>]*style="display:none"/)
+})
+
+test("renderRoomPage keeps the join chooser and QR alongside the state row", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks())
+  assert.ok(html.includes('id="state-row"'))
+  assert.match(html, /class="join-qr"[^>]*>\s*<svg/)
+  assert.match(html, /id="stay-here-button"[^>]*>Stay here</)
 })

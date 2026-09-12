@@ -44,6 +44,23 @@ export async function isSessionAlive(opts: DaemonExtraOptions, sessionId: string
   }
 }
 
+/** The session descriptor's own `busy` field (whether the agent is
+ *  mid-turn), or undefined on a 404/network failure/malformed body — the
+ *  room page's state endpoint surfaces it as "working" vs "idle". */
+export async function getSessionBusy(opts: DaemonExtraOptions, sessionId: string): Promise<boolean | undefined> {
+  const base = opts.baseUrl.endsWith("/") ? opts.baseUrl.slice(0, -1) : opts.baseUrl
+  const headers: Record<string, string> = opts.token !== undefined ? { authorization: `Bearer ${opts.token}` } : {}
+  try {
+    const res = await fetch(`${base}/sessions/${sessionId}`, { headers })
+    if (!res.ok) return undefined
+    const body: unknown = await res.json()
+    if (!isRecord(body)) return undefined
+    return typeof body.busy === "boolean" ? body.busy : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** The session descriptor's own `status` field (e.g. `"running"`), or
  *  undefined on a 404/network failure/malformed body — used by the no-phone
  *  e2b proof to poll for a kill/pause to actually land. */

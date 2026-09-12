@@ -3,10 +3,16 @@
  * inline vanilla JS, no framework and no build step (build brief
  * constraint 3, architecture.md §2.1). The browser talks only to our
  * service — never the daemon directly (R6, architecture.md §4.2).
+ *
+ * The page server-renders the room's current state (code, state pill,
+ * members with tier badges, agent status, artifact) so it is never blank
+ * before JS, then a small polling loop patches the DOM from
+ * `GET /r/:code/state` every 3 s — never a full reload, which would wipe
+ * the live transcript mid-demo.
  */
 import type { JoinLinks } from "../links/index.ts"
 import { qrSvg } from "../links/index.ts"
-import type { Room } from "../rooms/types.ts"
+import type { Member, Room } from "../rooms/types.ts"
 
 function escapeHtml(value: string): string {
   return value
@@ -23,9 +29,27 @@ function embedJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, "\\u003c")
 }
 
-function rosterHtml(room: Room): string {
+const ARTIFACT_PAUSED_TEXT = "artifact paused, the link will come back when the room wakes"
+
+/** The member-facing artifact is live only when the room is active and the
+ *  last boot/liveness probe confirmed the box is actually serving it —
+ *  `artifactReady: false` or a paused room means NO iframe and NO clickable
+ *  link, ever (the dead-artifact-URL finding, architecture.md §9.3b). */
+function artifactLive(room: Room): boolean {
+  return room.state !== "paused" && room.artifactUrl !== undefined && room.artifactReady !== false
+}
+
+function memberHtml(member: Member): string {
+  return (
+    `<span class="member"><span class="member-name">${escapeHtml(member.displayName)}</span>` +
+    `<span class="tier-badge tier-${escapeHtml(member.tier)}">${escapeHtml(member.tier)}</span>` +
+    `<span class="member-joined">joined ${escapeHtml(member.joinedAt)}</span></span>`
+  )
+}
+
+function membersHtml(room: Room): string {
   if (room.members.length === 0) return "No one here yet."
-  return room.members.map((member) => `${escapeHtml(member.displayName)} (${escapeHtml(member.tier)})`).join(", ")
+  return room.members.map(memberHtml).join(", ")
 }
 
 const STYLE = `
@@ -44,12 +68,23 @@ const STYLE = `
   .join-btn { display: block; width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); background: #f3f5fb; color: #1a1c23; text-decoration: none; font-size: 14px; text-align: center; cursor: pointer; font-family: inherit; }
   .join-btn:hover { background: #eef1fb; }
   .join-btn-stay { background: var(--accent); color: #fff; border-color: var(--accent); }
-  #roster { font-size: 13px; color: var(--grey); }
+  .state-row { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--grey); flex-wrap: wrap; justify-content: center; }
+  .pill { padding: 2px 10px; border-radius: 999px; font-weight: 700; font-size: 12px; }
+  .pill.live { background: #e6f6ec; color: #1a7f37; }
+  .pill.paused { background: #fdeaea; color: #b42318; }
+  .agent-status { font-weight: 600; color: #1a1c23; }
+  #updated-ago { font-size: 11px; }
+  #connection-lost { color: #b42318; font-weight: 600; display: none; }
+  #members { font-size: 13px; color: var(--grey); max-width: 640px; }
+  .member { display: inline-flex; align-items: center; gap: 5px; }
+  .member-name { font-weight: 600; color: #1a1c23; }
+  .tier-badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); background: #fff; color: var(--grey); font-weight: 600; }
+  .member-joined { font-size: 11px; }
   main { display: flex; height: calc(100vh - 260px); }
   #transcript-pane { flex: 1 1 55%; overflow-y: auto; padding: 12px; border-right: 1px solid var(--border); }
   #artifact-pane { flex: 1 1 45%; display: flex; align-items: stretch; justify-content: center; }
   #artifact-frame { width: 100%; height: 100%; border: 0; }
-  #artifact-placeholder { margin: auto; color: var(--grey); font-size: 14px; }
+  #artifact-placeholder { margin: auto; color: var(--grey); font-size: 14px; text-align: center; padding: 0 12px; }
   .bubble { max-width: 90%; margin: 0 0 10px; padding: 8px 10px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; }
   .bubble.user { background: #eef2ff; margin-left: auto; }
   .bubble.assistant { background: #fff; border: 1px solid var(--border); }
@@ -77,13 +112,14 @@ const STYLE = `
   }
 `
 
-function script(code: string, room: Room): string {
+function script(code: string, room: Room, agentBusy: boolean): string {
   return `
     const ROOM_CODE = ${embedJson(code)};
     const INITIAL_ROOM = ${embedJson(room)};
+    const INITIAL_AGENT_BUSY = ${embedJson(agentBusy)};
+    const PAUSED_ARTIFACT_TEXT = ${embedJson(ARTIFACT_PAUSED_TEXT)};
 
     const transcriptEl = document.getElementById("transcript");
-    const rosterEl = document.getElementById("roster");
     const artifactFrame = document.getElementById("artifact-frame");
     const artifactPlaceholder = document.getElementById("artifact-placeholder");
     const nameInput = document.getElementById("name-input");
@@ -91,21 +127,94 @@ function script(code: string, room: Room): string {
 
     nameInput.value = localStorage.getItem("rdv-name") || "";
 
+    // The initial state, server-rendered into the HTML and re-derived here so
+    // the very first paint matches what the first poll will return.
+    const INITIAL_STATE = {
+      code: ROOM_CODE,
+      state: INITIAL_ROOM.state,
+      artifact: {
+        url: (INITIAL_ROOM.state !== "paused" && INITIAL_ROOM.artifactUrl !== undefined && INITIAL_ROOM.artifactReady !== false)
+          ? INITIAL_ROOM.artifactUrl
+          : null,
+        ready: INITIAL_ROOM.state !== "paused" && INITIAL_ROOM.artifactUrl !== undefined && INITIAL_ROOM.artifactReady !== false,
+      },
+      members: INITIAL_ROOM.members,
+      agent: { busy: INITIAL_AGENT_BUSY === true, lastActivityAt: INITIAL_ROOM.lastActivityAt },
+    };
+
+    let currentMembers = INITIAL_ROOM.members;
+
+    function relTime(iso) {
+      const ms = Date.now() - Date.parse(iso);
+      if (!isFinite(ms)) return "";
+      const s = Math.max(0, Math.round(ms / 1000));
+      if (s < 60) return s + "s";
+      const m = Math.round(s / 60);
+      if (m < 60) return m + "m";
+      return Math.round(m / 60) + "h";
+    }
+
     let currentArtifactUrl = null;
-    function updateArtifact(url) {
+    function showArtifact(url) {
       if (!url || url === currentArtifactUrl) return;
       currentArtifactUrl = url;
       artifactFrame.src = url;
       artifactFrame.style.display = "block";
       artifactPlaceholder.style.display = "none";
     }
+    function hideArtifact(message) {
+      currentArtifactUrl = null;
+      artifactFrame.removeAttribute("src");
+      artifactFrame.style.display = "none";
+      artifactPlaceholder.style.display = "";
+      artifactPlaceholder.textContent = message;
+    }
 
-    let currentMembers = INITIAL_ROOM.members;
-    function renderRoster(members) {
+    function renderState(state) {
+      document.getElementById("room-code").textContent = state.code;
+      const pill = document.getElementById("state-pill");
+      const paused = state.state === "paused";
+      pill.textContent = paused ? "paused" : "live";
+      pill.className = "pill " + (paused ? "paused" : "live");
+
+      const agentEl = document.getElementById("agent-status");
+      const activity = state.agent.lastActivityAt ? " · last activity " + relTime(state.agent.lastActivityAt) + " ago" : "";
+      agentEl.textContent = (state.agent.busy ? "working" : "idle") + activity;
+
+      renderMembers(state.members);
+      if (state.artifact.ready && typeof state.artifact.url === "string") {
+        showArtifact(state.artifact.url);
+      } else {
+        hideArtifact(paused ? PAUSED_ARTIFACT_TEXT : "No artifact yet");
+      }
+    }
+
+    function renderMembers(members) {
       currentMembers = members;
-      rosterEl.textContent = members.length === 0
-        ? "No one here yet."
-        : members.map((m) => m.displayName + " (" + m.tier + ")").join(", ");
+      const el = document.getElementById("members");
+      el.textContent = "";
+      if (members.length === 0) {
+        el.textContent = "No one here yet.";
+        return;
+      }
+      members.forEach(function (m, i) {
+        if (i > 0) el.appendChild(document.createTextNode(", "));
+        const span = document.createElement("span");
+        span.className = "member";
+        const name = document.createElement("span");
+        name.className = "member-name";
+        name.textContent = m.displayName;
+        const tier = document.createElement("span");
+        tier.className = "tier-badge tier-" + m.tier;
+        tier.textContent = m.tier;
+        const joined = document.createElement("span");
+        joined.className = "member-joined";
+        joined.textContent = "joined " + relTime(m.joinedAt) + " ago";
+        span.appendChild(name);
+        span.appendChild(tier);
+        span.appendChild(joined);
+        el.appendChild(span);
+      });
     }
 
     function findMemberByName(name) {
@@ -181,18 +290,6 @@ function script(code: string, room: Room): string {
       });
     }
 
-    async function refreshRoom() {
-      try {
-        const res = await fetch("/rooms/" + ROOM_CODE);
-        if (!res.ok) return;
-        const room = await res.json();
-        renderRoster(room.members);
-        updateArtifact(room.artifactUrl);
-      } catch (e) {
-        // transient — the next poll or send will retry
-      }
-    }
-
     function bubble(className) {
       const el = document.createElement("div");
       el.className = "bubble " + className;
@@ -201,6 +298,9 @@ function script(code: string, room: Room): string {
       return el;
     }
 
+    // Same [name · tier] attribution badge the messengers get: fan-in
+    // (src/fanin/index.ts) prefixes every prompt with it, so a user-prompt
+    // record parses it back out and shows it as a badge instead of raw text.
     function renderUserPrompt(text) {
       const match = /^\\[([^·\\]]+)\\s*·\\s*([^\\]]+)\\]\\s*([\\s\\S]*)$/.exec(text);
       const el = bubble("user");
@@ -302,7 +402,7 @@ function script(code: string, room: Room): string {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ displayName: displayName, text: text }),
       });
-      refreshRoom();
+      pollState();
     }
 
     document.getElementById("send-button").addEventListener("click", sendMessage);
@@ -314,10 +414,34 @@ function script(code: string, room: Room): string {
       textInput.focus();
     });
 
-    renderRoster(INITIAL_ROOM.members);
-    updateArtifact(INITIAL_ROOM.artifactUrl);
+    // --- live state polling: patch the DOM, never reload the page ---
+    let lastGoodPollAt = null;
+    const connectionEl = document.getElementById("connection-lost");
+    const updatedEl = document.getElementById("updated-ago");
+
+    async function pollState() {
+      try {
+        const res = await fetch("/r/" + ROOM_CODE + "/state");
+        if (!res.ok) throw new Error("state fetch failed: " + res.status);
+        const state = await res.json();
+        lastGoodPollAt = Date.now();
+        connectionEl.style.display = "none";
+        renderState(state);
+      } catch (e) {
+        connectionEl.style.display = "";
+      }
+    }
+
+    setInterval(pollState, 3000);
+    setInterval(function () {
+      updatedEl.textContent = lastGoodPollAt
+        ? "updated " + Math.max(0, Math.round((Date.now() - lastGoodPollAt) / 1000)) + "s ago"
+        : "";
+    }, 1000);
+
+    renderState(INITIAL_STATE);
     connectStream();
-    setInterval(refreshRoom, 10000);
+    pollState();
   `
 }
 
@@ -341,9 +465,17 @@ function joinButtonsHtml(links: JoinLinks): string {
   return buttons.join("")
 }
 
-export function renderRoomPage(room: Room, links: JoinLinks): string {
+export function renderRoomPage(room: Room, links: JoinLinks, agentBusy = false): string {
   const code = room.code
-  const artifactHidden = room.artifactUrl === undefined
+  const live = artifactLive(room)
+  const paused = room.state === "paused"
+  const artifactMessage = paused || room.artifactReady === false ? ARTIFACT_PAUSED_TEXT : "No artifact yet"
+  // The room the inline script sees must carry no dead artifact URL either:
+  // a paused/not-ready room's stored URL (the raw e2b host, or a stale one)
+  // is stripped before it is embedded in the page at all.
+  const scriptRoom: Room = live ? room : { ...room, artifactUrl: undefined }
+  const pillClass = paused ? "pill paused" : "pill live"
+  const agentStatus = `${agentBusy ? "working" : "idle"} · last activity ${escapeHtml(room.lastActivityAt)}`
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -354,22 +486,28 @@ export function renderRoomPage(room: Room, links: JoinLinks): string {
 </head>
 <body>
 <header>
-  <div class="join-code">Room <span class="code">${escapeHtml(code)}</span></div>
+  <div class="join-code">Room <span class="code" id="room-code">${escapeHtml(code)}</span></div>
   <div class="join-body">
     <div class="join-qr" title="Scan to join ${escapeHtml(code)}">${qrSvg(links.web)}</div>
     <a class="join-web-link" href="${escapeHtml(links.web)}">${escapeHtml(links.web)}</a>
     <div class="join-buttons">${joinButtonsHtml(links)}</div>
   </div>
-  <div id="roster">${rosterHtml(room)}</div>
+  <div class="state-row" id="state-row">
+    <span id="state-pill" class="${pillClass}">${paused ? "paused" : "live"}</span>
+    <span id="agent-status" class="agent-status">${agentStatus}</span>
+    <span id="updated-ago"></span>
+    <span id="connection-lost">connection lost, retrying</span>
+  </div>
+  <div id="members">${membersHtml(room)}</div>
 </header>
 <main>
   <section id="transcript-pane">
     <div id="transcript"></div>
   </section>
   <section id="artifact-pane">
-    <div id="artifact-placeholder" style="${artifactHidden ? "" : "display:none"}">No artifact yet</div>
-    <iframe id="artifact-frame" style="${artifactHidden ? "display:none" : ""}" title="room artifact" src="${
-      room.artifactUrl !== undefined ? escapeHtml(room.artifactUrl) : ""
+    <div id="artifact-placeholder" style="${live ? "display:none" : ""}">${escapeHtml(artifactMessage)}</div>
+    <iframe id="artifact-frame" style="${live ? "" : "display:none"}" title="room artifact" src="${
+      live && room.artifactUrl !== undefined ? escapeHtml(room.artifactUrl) : ""
     }"></iframe>
   </section>
 </main>
@@ -378,7 +516,7 @@ export function renderRoomPage(room: Room, links: JoinLinks): string {
   <input id="text-input" placeholder="Say something…" autocomplete="off" />
   <button id="send-button">Send</button>
 </footer>
-<script>${script(code, room)}</script>
+<script>${script(code, scriptRoom, agentBusy)}</script>
 </body>
 </html>
 `
