@@ -440,3 +440,232 @@ provider message id above, and both attachments match exactly what was
 sent — `rendez-vous-deck.pdf`, `application/pdf`, 111188 bytes (the light
 PDF's own byte count); `SCRIPT.md`, `text/markdown`, 7113 bytes (matches
 `deck/SCRIPT.md` on disk). One send; no second send needed.
+
+## Deliverable flow, first real exercise (through the flow)
+
+Unlike the section above (which went by hand because the live process
+predated the code), this run drove the actual wired-in flow —
+`send pdf to <address>` / `confirm <token>` — through the live room
+`RDV-NG7F`, via a synthetic messenger-tier member (`provider: "sim"`,
+`contactRef: "exercise-1"`) joined through `POST /inbound/simulated`, never
+by impersonating Jeremy's own Telegram identity.
+
+### Setup: allowlist, restart
+
+Appended `RDV_DELIVERY_ALLOWLIST=jeremy@agentik.net,6371794295` to
+`.env.local`, killed the running pid (85899), restarted with `set -a; source
+.env.local; set +a; nohup node src/cli.ts serve >> service.log 2>&1 &`.
+Confirmed via `curl /health` (`rooms:1`) and by grep'ing the log for the
+banner immediately after the restart: no `RDV_DELIVERY_ALLOWLIST is not set`
+warning followed it (the warning is only logged once, at
+`DeliverableService` construction) — allowlist active.
+
+### Waking the room: a box-liveness race, then a real fresh boot
+
+Joined at 01:39:30Z; sent the wake line
+("Are you there? Please make sure the page is ready.") at 01:39:36Z.
+
+The room's box (`i7jos61ixgkcfrekmi1vl`) was independently confirmed via
+`GET https://api.e2b.dev/sandboxes/<id>` at 01:39:0xZ — before the wake —
+to be `state: "paused"` (HTTP 200). The wake message nonetheless failed:
+
+```
+{"error":"internal_error","message":"spawnAgent failed: 500 {\"error\":\"sandbox_reconnect_failed\",\"message\":\"agent_start: sandbox reconnect failed (provider \"e2b\", sandbox \"i7jos61ixgkcfrekmi1vl\") — Paused sandbox i7jos61ixgkcfrekmi1vl not found\"}"}
+```
+
+A direct e2b probe run immediately after came back a genuine `404`
+(`{"code":404,"message":"Sandbox \"i7jos61ixgkcfrekmi1vl\" doesn't exist or
+you don't have access to it"}`). Reading `E2bBooter.resume`
+(`src/service/booter.ts`): it calls `checkBoxLiveness` (`isSandboxAlive`)
+*before* attempting `resumeRoomSession`'s reconnect, and only falls back to
+a reuse-nothing fresh boot when that check itself returns `"gone"`. The
+observed error is a raw reconnect failure, not the fresh-boot path's own
+error shape — meaning `checkBoxLiveness` did **not** return `"gone"` at the
+moment `doResume` ran, even though a probe moments earlier and moments
+later both did. **This is a real race, not a flake in this rehearsal's
+tooling**: the pre-check and the actual reconnect attempt are two separate
+round trips to e2b, seconds apart, and the box can (and here did) expire in
+that gap — `E2bBooter.resume`'s liveness gate narrows the window in which a
+dead box gets handed to `sandbox.reuse`, it does not close it. Worth a
+follow-up: either accept the reconnect's own `sandbox_reconnect_failed` /
+"not found" as a second, equally valid trigger for the fresh-boot fallback
+(right now only the pre-check does), or treat the reconnect attempt and the
+liveness check as one atomic decision.
+
+Retried the same wake message at 01:43:45Z. This attempt failed
+differently — `sandbox_boot_failed`, `"could not reach the agentproto
+daemon's MCP endpoint"` — coincident with an **unplanned service-process
+collision**: the log shows an `EADDRINUSE` crash on port 8790 between this
+attempt and the next, and the pid actually answering health checks changed
+twice more during this exercise (85899 → 65636 [mine] → 10100 → 80810)
+with no action taken by this executor beyond the one deliberate restart in
+"Setup" above. This matches the exact risk Run 3 already flagged ("two
+people running this service from the same checkout ... can silently swap
+which process is answering") — another executor (`rdv-box-liveness`,
+per `docs/STATE.md`, scoped to these same files) was very likely restarting
+the same `node src/cli.ts serve` on the same port concurrently. Room state
+and `.rdv/rooms.json` survived every swap untouched (disk-persisted, as Run
+3 found); only in-memory state (the pending-delivery map, below) did not.
+Re-verified the allowlist was still active on each new pid via `ps eww` +
+env grep before trusting it — it was, every time (the shared `.env.local`
+already had the line from Setup).
+
+Retried once more at 01:46:24Z, against the pid that turned out to be
+stable for the rest of the exercise (80810): **success**. The room came
+back `state: "active"`, a genuinely fresh box `icc84uy0qdas650d1sntl`
+(distinct from the confirmed-gone `i7jos61ixgkcfrekmi1vl`), new
+`sessionId sess_1696a06c`, `cursor` reset to `0`. Confirmed via the e2b API
+directly: `icc84uy0qdas650d1sntl` is `state: "running"`, `startedAt
+2026-09-12T01:46:28Z` — a real, billed boot, not a reuse. Artifact fetch
+immediately after: `HTTP 200`, `0.7s`, live HTML. The SSE stream
+(`since=0`) shows the agent's own turn completing at `seq 22`
+(`turn-end reason=completed`), replying "Yes, I'm here — the page exists
+and is serving a placeholder."
+
+### Email leg — `send pdf to jeremy@agentik.net`
+
+First attempt (01:48:00Z) appeared to time out client-side after 60s; it
+had **not** actually failed server-side — it produced its own pending
+delivery (token `PDF-848Q`) that only surfaced once the room's transcript
+was read back. A second, successful attempt then produced a *second*
+pending delivery (`PDF-9MUX`) for the identical target — two renders where
+one was intended, a direct consequence of retrying without first confirming
+the earlier request hadn't landed. Cancelled `PDF-848Q` explicitly
+(`cancel PDF-848Q`) to get back to exactly one live pending delivery before
+confirming anything — except the cancel itself hit *yet another* pid swap
+(10100 → 80810) in between, so it came back `"No pending delivery found for
+token PDF-848Q"` (the in-memory `pending` map, unlike the room store, is
+not disk-persisted and does not survive a process swap — `PDF-9MUX` was
+lost the same way, orphaned, its rendered PDF harmlessly left on disk).
+Re-requested cleanly against the now-stable pid instead of trying to
+resurrect either stale token.
+
+Verbatim preview (from the room's own transcript broadcast, `service.log`):
+
+```
+Delivery request from Exercise:
+To: jeremy@agentik.net (mail)
+Subject: Room RDV-NG7F deliverable
+Pages: 1
+PDF: https://rdv.clipgen.co/r/RDV-NG7F/media/5538a5a2-778c-460c-aa17-1cf46b5711f0
+Confirm with `confirm PDF-X7PQ` or cancel with `cancel PDF-X7PQ`. Expires in 30 minutes.
+```
+
+Fetched the media link before confirming: `HTTP 200`,
+`content-type: application/pdf`, 21913 bytes, `%PDF-1.4`, 1 page — a real
+PDF, not a placeholder.
+
+Sent `confirm PDF-X7PQ` at 01:51:57Z. Transcript record (`[system ·
+delivery]`, via `GET /rooms/RDV-NG7F/stream?since=0`):
+
+```
+[system · delivery] Exercise confirmed delivery PDF-X7PQ ("Room RDV-NG7F deliverable", 1 page(s)): Sent to jeremy@agentik.net via mail (message 1a0935074773122c). (no reply needed)
+```
+
+**Verified arrival** via the agentpush mailbox tools
+(`mailbox_search`, mailbox = the Gmail account's id, filtered by exact
+subject `"Room RDV-NG7F deliverable"`): one match, `id` =
+`1a0935074773122c` (matches the provider message id above exactly), one
+attachment — `RDV-NG7F-deliverable.pdf`, `application/pdf`, 21913 bytes
+(matches the fetched media link's byte count exactly). One real send for
+this leg; the earlier duplicate/orphaned tokens were never confirmed, so
+nothing extra went out.
+
+### Messenger leg — gap found, skipped rather than improvised
+
+Sent `send pdf to 6371794295` as the synthetic member. Result:
+
+```
+Could not start that delivery: not a valid delivery target: "6371794295"
+```
+
+Reading `resolveDeliveryTargets` (`src/service/deliverable.ts`) confirms
+why: the member-command path only recognises `me`/`self`/`myself`/
+`messenger self` (resolved against the *requester's own* address) or a
+bare email address (`EMAIL_PATTERN`) — there is no address form for an
+arbitrary messenger contact ref. `messenger self` would only reach Jeremy's
+real Telegram address if the requester itself were Jeremy (it resolves to
+the requester's own address when one is given), which the synthetic member
+is not and cannot impersonate. The only other path that resolves `messenger
+self` to *every* current messenger-tier member of a room (which would
+include Jeremy) is the agent's own `[[deliver]]` block — deliberately not
+invoked here, since driving the agent to emit one would be improvising a
+recipient path outside what a member command actually supports, not
+exercising the documented one. **Gap recorded, leg skipped**: as things
+stand, a member cannot request a PDF delivery to another member's messenger
+address (or to a raw contact ref) through `send pdf to <address>` — only to
+their own address or to an email.
+
+### Negative check — no send
+
+Sent `send pdf to nobody@example.com` as the synthetic member. Refused at
+request time, before any render:
+
+```
+(delivery refused: nobody@example.com (mail) is not on the allowlist — nothing rendered, nothing sent)
+```
+
+Transcript record: `[system · delivery] Exercise asked to deliver "Room
+RDV-NG7F deliverable" to nobody@example.com (mail), refused: not on
+RDV_DELIVERY_ALLOWLIST. (no reply needed)`. `.rdv/media/RDV-NG7F/` file
+count was unchanged before/after (3 files, all from the email leg above) —
+confirmed nothing was rendered or stored, matching the log's own claim.
+
+### Boot budget
+
+Two boots, per the supervisor's own ledger (`docs/STATE.md`, "e2b boot
+budget and boxes"): the 01:43:45Z attempt (`sandbox_boot_failed`) was not a
+no-op — it actually raced the 01:46:24Z retry into a **second real boot**,
+producing an orphan session `sess_13a08221` and box `i65mye…` alongside the
+one that actually ended up serving the room. The supervisor identified and
+killed the orphan at 02:30 UTC; the room runs on the survivor,
+`icc84uy0qdas650d1sntl` (session `sess_1696a06c`), started 01:46:28Z, still
+`running` at the end of this exercise and left running deliberately. Two
+boots spent by this exercise, not one — corrected here from an earlier
+"uncertain" guess once the ledger made it unambiguous. Two other running
+boxes observed during this window (`i3htjrl6af3yzfo95c93b`,
+`iw1ylk7jshrtfj9bvsqw2`, started 01:51:25Z/01:48:43Z) belong to the
+concurrent process-collision activity described above, not to this
+exercise, and were left untouched.
+
+### What broke, surprised, or needed a human
+
+1. **Box-liveness pre-check races the actual reconnect** (above) — a real,
+   reproducible gap in `E2bBooter.resume`'s "probe then act" shape, distinct
+   from anything upstream. Concretely costly here: the retried wake message
+   didn't just fail twice, it **won a race between two fresh-boot attempts**
+   — both the 01:43:45Z and 01:46:24Z tries ended up booting a real box
+   (confirmed by the supervisor's ledger, `docs/STATE.md`), leaving an
+   orphan session/box pair that had to be found and killed by hand. A
+   room with no in-flight-boot guard can double-boot on nothing more than
+   an impatient retry.
+2. **Unplanned concurrent restarts of the exact same `node src/cli.ts
+   serve` on the same port** happened at least twice during this exercise,
+   confirmed via changing pids and an `EADDRINUSE` crash in the shared log —
+   Run 3's flagged risk, now reproduced a second time, this time during a
+   deliverable-flow exercise rather than a room conversation. Room state
+   survived every swap (disk-persisted); in-flight deliverable state did
+   not (below).
+3. **A pending delivery is pure in-memory state and does not survive a
+   process swap** — confirmed directly (`PDF-9MUX`'s `cancel` and, had it
+   not been superseded, its `confirm` would have failed the same way,
+   `"No pending delivery found"`). Not a bug relative to what
+   `docs/DELIVERABLE.md` documents (nothing there claims durability across
+   a restart), but worth naming for anyone relying on a pending token
+   surviving more than a few seconds on this checkout while other work is
+   also restarting the process.
+4. **Retrying a timed-out request without checking whether it actually
+   landed produces a duplicate render** — self-inflicted in this run (the
+   first email-leg request had, in fact, succeeded server-side despite the
+   client giving up at 60s), not a service bug; recorded because the fix is
+   procedural (check the transcript/room state before retrying a
+   long-running request) rather than a code change.
+5. **The messenger leg has no supported address form for a raw contact
+   ref** (above) — a real product gap, not an infrastructure one: today
+   `send pdf to <address>` can only reach the requester's own messenger
+   address or an arbitrary email, never another member's messenger address
+   by contact ref.
+
+Everything else went as `docs/DELIVERABLE.md` describes: the confirm gate,
+the allowlist gate (both the positive and negative paths), the transcript
+record, and the rendered PDF's own byte-for-byte match all held.
