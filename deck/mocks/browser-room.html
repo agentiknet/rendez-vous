@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="shared.css" />
+<style>
+  body { margin: 0; }
+  :root { --accent: #3a6df0; --border: #e2e4ea; --bg: #fafafc; --grey: #6b7280; }
+  .room-header {
+    flex: 0 0 auto;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    background: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+  }
+  .room-header .left { display: flex; align-items: center; gap: 14px; }
+  .join-code { font-size: 19px; font-weight: 700; color: #1a1c23; }
+  .join-code .code { color: var(--accent); font-family: ui-monospace, monospace; }
+  .state-row { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--grey); }
+  .pill { padding: 2px 10px; border-radius: 999px; font-weight: 700; font-size: 12px; }
+  .pill.live { background: #e6f6ec; color: #1a7f37; }
+  .agent-status { font-weight: 600; color: #1a1c23; }
+  #members { font-size: 13px; color: var(--grey); }
+  .member { display: inline-flex; align-items: center; gap: 5px; margin-right: 4px; }
+  .member-name { font-weight: 600; color: #1a1c23; }
+  .tier-badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); background: #fff; color: var(--grey); font-weight: 600; }
+  .member-joined { font-size: 11px; color: #9aa0ab; }
+
+  .room-main { display: flex; flex: 1 1 auto; min-height: 0; }
+  #transcript-pane { flex: 1 1 55%; min-height: 0; overflow: hidden; padding: 14px 16px; border-right: 1px solid var(--border); background: var(--bg); }
+  #artifact-pane { flex: 1 1 45%; min-height: 0; display: flex; align-items: stretch; justify-content: center; background: #fff; }
+  #artifact-pane iframe { width: 100%; height: 100%; border: 0; }
+
+  .bubble { max-width: 92%; margin: 0 0 10px; padding: 9px 11px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; font-size: 13.5px; line-height: 1.45; }
+  .bubble.user { background: #eef2ff; margin-left: auto; }
+  .bubble.assistant { background: #fff; border: 1px solid var(--border); }
+  .badge { display: block; font-size: 11px; font-weight: 700; color: var(--accent); margin-bottom: 3px; }
+  .bubble.alert { border-left: 3px solid #C9962E; background: #FFF9EE; }
+  .bubble.alert .alert-title { font-weight: 700; display: block; margin-bottom: 3px; }
+  .whisper-marker { font-size: 11.5px; color: #9aa0ab; margin: 6px 0 2px; font-style: italic; }
+  details.whisper-toggle summary { cursor: pointer; font-size: 11.5px; color: #9aa0ab; }
+
+  .room-footer { flex: 0 0 auto; display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--border); background: #fff; }
+  .room-footer input { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; color: #9aa0ab; }
+  .room-footer .name-input { flex: 0 0 110px; }
+  .room-footer .text-input { flex: 1 1 auto; }
+  .room-footer button { padding: 8px 16px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="browser">
+  <div class="browser-toolbar">
+    <div class="browser-dots"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+    <div class="browser-addr-row">
+      <svg class="browser-nav-icon" viewBox="0 0 24 24" fill="none"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <svg class="browser-nav-icon" viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div class="browser-addr">
+        <svg class="lock" viewBox="0 0 24 24" fill="none"><rect x="5" y="10" width="14" height="10" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M8 10V7a4 4 0 018 0v3" stroke="currentColor" stroke-width="1.8"/></svg>
+        rdv.clipgen.co/r/RDV-7F3K
+      </div>
+    </div>
+  </div>
+
+  <div class="room-header">
+    <div class="left">
+      <div class="join-code">Room <span class="code">RDV-7F3K</span></div>
+      <div class="state-row">
+        <span class="pill live">live</span>
+        <span class="agent-status">idle · last activity 8s ago</span>
+      </div>
+    </div>
+    <div id="members">
+      <span class="member"><span class="member-name">Julie</span><span class="tier-badge">messenger</span><span class="member-joined">joined 2h ago</span></span>
+      <span class="member"><span class="member-name">Tom</span><span class="tier-badge">messenger</span><span class="member-joined">joined 2h ago</span></span>
+      <span class="member"><span class="member-name">Atlas</span><span class="tier-badge">room-web</span><span class="member-joined">joined 12m ago</span></span>
+    </div>
+  </div>
+
+  <div class="room-main">
+    <div id="transcript-pane">
+      <div class="bubble user"><span class="badge">Atlas · room-web</span><div>Le séminaire annuel est dans 4 mois et rien n'est réservé. J'ouvre une room avec Julie et Tom.</div></div>
+
+      <div class="bubble assistant">
+        Je préviens Julie et Tom chacun de leur côté pour lancer le sujet.
+        <div class="whisper-marker">whispered to Julie</div>
+        <details class="whisper-toggle"><summary>private, visible here because the web room has no member auth yet</summary></details>
+        <div class="whisper-marker">whispered to Tom</div>
+        <details class="whisper-toggle"><summary>private, visible here because the web room has no member auth yet</summary></details>
+      </div>
+
+      <div class="bubble user"><span class="badge">Julie · messenger</span><div>Budget 12k max, tout le monde vient, train uniquement, pas pendant les vacances scolaires.</div></div>
+
+      <div class="bubble user"><span class="badge">Tom · messenger</span><div>🎤 "Et si on faisait du surf ?! L'équipe gardera un souvenir de malade 🏄"</div></div>
+
+      <div class="bubble user"><span class="badge">Tom · messenger</span><div>📷 Villa surf, 40 pers, juin !</div></div>
+
+      <div class="bubble assistant alert">
+        <span class="alert-title">Conflit détecté ⚠️</span>
+        La villa de Tom : 16 000 €. Le plafond de Julie : 12 000 €. Et juin tombe en période scolaire, sa contrainte.<br/><br/>
+        Tom, la villa est non négociable ? Julie, flexible sur les dates ?
+      </div>
+    </div>
+
+    <div id="artifact-pane">
+      <iframe src="artifact-content.html"></iframe>
+    </div>
+  </div>
+
+  <div class="room-footer">
+    <input class="name-input" placeholder="Your name" disabled />
+    <input class="text-input" placeholder="Say something…" disabled />
+    <button>Send</button>
+  </div>
+</div>
+</body>
+</html>

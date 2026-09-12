@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="shared.css" />
+<style>
+  body { margin: 0; background: #000; }
+  .terminal.band { width: 1040px; height: 400px; }
+  .band .terminal-body { font-size: 14px; padding: 16px 20px; }
+  .atlas-banner {
+    position: absolute;
+    top: 40px; left: 16px;
+    max-width: 560px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 7px;
+    padding: 6px 10px;
+    font-family: -apple-system, sans-serif;
+    font-size: 11px;
+    color: #B9B9BE;
+    line-height: 1.35;
+  }
+  .atlas-banner b { color: #F2F2F4; }
+  .cursor { display: inline-block; width: 8px; height: 15px; background: #D6D6D8; vertical-align: -3px; }
+</style>
+</head>
+<body>
+<div class="terminal band" style="position:relative;">
+  <div class="terminal-titlebar">
+    <div class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+    <div class="title">atlas — node — 100×32</div>
+  </div>
+  <div class="terminal-body">
+<span class="dim">agentik@atlas-mbp</span> <span class="path">~/rendez-vous</span> % <span class="white">node scripts/room-agent.ts \</span>
+  <span class="white">--room RDV-7F3K --name Atlas --session sess_9f2c1a8b4e</span>
+<span class="accent">room-agent</span><span class="dim">:</span> joining <span class="white">RDV-7F3K</span> as <span class="white">Atlas</span> (session <span class="dim">sess_9f2c1a8b4e</span>)
+<span class="dim">agentik@atlas-mbp</span> <span class="path">~/rendez-vous</span> % <span class="cursor"></span>
+  </div>
+  <div class="atlas-banner">
+    <b>Atlas</b> — un agent sur le Mac de la boîte. Même room, mêmes endpoints que Julie et Tom.
+  </div>
+</div>
+</body>
+</html>

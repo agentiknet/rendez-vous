@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<style>
+  :root {
+    --terracotta: #C25E3A;
+    --bark: #2E2A24;
+    --cream: #FCFBF7;
+    --surface: #F4F1E8;
+    --surface-raised: #EAE5D8;
+    --ink: #2E2A24;
+    --ink-muted: #6B6455;
+    --ink-faint: #9A9284;
+    --border: rgba(46,42,36,0.12);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--surface-raised); }
+  body {
+    font-family: -apple-system, "Inter", system-ui, sans-serif;
+    color: var(--ink);
+    display: flex;
+    justify-content: center;
+  }
+  .doc {
+    width: 900px;
+    max-width: 900px;
+    background: var(--cream);
+    padding: 26px 56px 64px;
+    margin: 10px 0 40px;
+    box-shadow: 0 2px 24px rgba(46,42,36,0.12);
+  }
+  .brandbar { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+  .brandmark {
+    width: 26px; height: 26px; border-radius: 7px;
+    background: var(--terracotta);
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-weight: 700; font-size: 14px; font-family: Georgia, serif;
+  }
+  .brandname { font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; font-size: 12.5px; color: var(--ink-muted); }
+  h1.title {
+    font-family: Georgia, serif;
+    font-weight: 700;
+    font-size: 34px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    margin: 0 0 8px;
+    color: var(--bark);
+  }
+  .subtitle { font-size: 15px; color: var(--ink-muted); margin: 0 0 18px; }
+  .hero { width: 100%; height: 200px; border-radius: 14px; overflow: hidden; margin-bottom: 16px; box-shadow: 0 1px 0 var(--border); }
+  .hero img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  h2.section {
+    font-family: Georgia, serif;
+    font-weight: 600;
+    font-size: 19px;
+    color: var(--bark);
+    margin: 0 0 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  .programme { list-style: none; margin: 0 0 22px; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+  .programme li { display: flex; gap: 14px; align-items: baseline; font-size: 15px; }
+  .programme .day { flex: 0 0 96px; font-weight: 700; color: var(--terracotta); }
+  .programme .desc { color: var(--ink); }
+  table.budget { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+  table.budget th {
+    text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--ink-muted); font-weight: 600; padding: 0 0 8px; border-bottom: 1px solid var(--border);
+  }
+  table.budget td { padding: 8px 0; font-size: 15px; border-bottom: 1px solid var(--border); }
+  table.budget td.amount { text-align: right; font-variant-numeric: tabular-nums; }
+  table.budget tr.total td { font-weight: 700; border-bottom: none; padding-top: 10px; }
+  .cost-chip {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--surface-raised); border-radius: 10px; padding: 14px 18px; margin: 14px 0 20px;
+  }
+  .cost-chip .label { font-size: 14px; color: var(--ink-muted); font-weight: 600; }
+  .cost-chip .value { font-family: Georgia, serif; font-size: 24px; font-weight: 700; color: var(--terracotta); }
+  .faq { font-size: 14px; color: var(--ink-muted); line-height: 1.6; }
+  .faq b { color: var(--ink); }
+  .footer-note { margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 12.5px; color: var(--ink-faint); }
+</style>
+</head>
+<body>
+<div class="doc">
+  <div class="brandbar">
+    <div class="brandmark">T</div>
+    <div class="brandname">Ternwood</div>
+  </div>
+
+  <h1 class="title">Séminaire annuel 2026 — Biarritz</h1>
+  <p class="subtitle">2ᵉ semaine de septembre · Villa avec terrasse, en bord de mer</p>
+
+  <div class="hero"><img src="../img/mock/villa-photo.png" /></div>
+
+  <h2 class="section">Programme</h2>
+  <ul class="programme">
+    <li><span class="day">Jour 1</span><span class="desc">Arrivée en train, installation, initiation surf en fin d'après-midi</span></li>
+    <li><span class="day">Jour 2</span><span class="desc">Ateliers d'équipe le matin, surf libre l'après-midi, dîner de groupe</span></li>
+    <li><span class="day">Jour 3</span><span class="desc">Brunch, debrief séminaire, départ en train en fin de journée</span></li>
+  </ul>
+
+  <h2 class="section">Budget</h2>
+  <table class="budget">
+    <tr><th>Poste</th><th style="text-align:right;">Montant</th></tr>
+    <tr><td>Villa (hébergement, 40 pers.)</td><td class="amount">13 800 €</td></tr>
+    <tr><td>Transport train (forfait groupe)</td><td class="amount">inclus</td></tr>
+    <tr><td>Activités surf & matériel</td><td class="amount">inclus</td></tr>
+    <tr class="total"><td>Total</td><td class="amount">13 800 €</td></tr>
+  </table>
+  <div class="cost-chip">
+    <span class="label">Coût / personne (30 pers.)</span>
+    <span class="value">460 €</span>
+  </div>
+
+  <h2 class="section">Infos pratiques & FAQ</h2>
+  <p class="faq">
+    <b>Transport</b> — billets SNCF pris en charge, code promo groupe envoyé par email.<br/>
+    <b>Hébergement</b> — chambres partagées à deux, literie et linge fournis.<br/>
+    <b>Question fréquente</b> — "Et s'il ne fait pas de vagues ?" La villa a une piscine et un terrain de pétanque, personne ne reste sur le carreau.
+  </p>
+
+  <div class="footer-note">Document généré par la room RDV-7F3K · rdv.clipgen.co</div>
+</div>
+</body>
+</html>
