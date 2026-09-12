@@ -122,7 +122,7 @@ not the raw provider payload, is what lands on our webhook.
 POST /tools/inbound_route_create
 {
   "name": "rendez-vous",
-  "channel": null,                 // or "whatsapp"/"telegram" to scope it
+  "channel": "telegram",
   "match_type": "catch_all",
   "dispatch_tag": "rendez-vous",
   "dispatch_mode": "notify",
@@ -135,6 +135,15 @@ POST /tools/inbound_route_create
 `packages/core/src/domain/inbound-route/schema.ts:36-72` for the stored
 shape.) `notify_url` must be public https — loopback/private/link-local
 targets are refused (SSRF guard, same page, "notify_url" row).
+`channel: null` (catch-all across every channel) must not be used here:
+`matchesInboundRoute` (agentpush's `inbound-route/evaluate.ts:56`) treats a
+`null` channel as matching everything, including the Gmail poll path's
+`"mail"` channel (§8.2) — a `channel: null` messaging route and the §8.3
+`channel: "mail"` route would both match the same inbound email, each firing
+its own notify to a webhook that rejects the other's envelope shape with a
+400 (see `test/service/route-overlap.test.ts`). Scope this route to one real
+messenger channel instead — `"telegram"` here, matching this deployment's
+live surface — so the two routes stay disjoint.
 
 ### The envelope (`MessagingInboundEnvelope` v1)
 
