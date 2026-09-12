@@ -756,3 +756,87 @@ test("a box confirmed gone during resume gets the precise 'previous box expired'
   const generic = transport.sends.slice(sendsBefore).find((send) => send.message.text === "Artifact restored on a new box, same link.")
   assert.equal(generic, undefined, "must not ALSO send the generic notice")
 })
+
+// ---------------------------------------------------------------------------
+// Concurrent revive/resume (ground-truthed live, 2026-09-12): two fan-ins
+// arriving for the same paused room can both independently decide "this
+// needs resuming" and both call the booter, each booting a REAL session/box
+// — the store keeps only the last write, orphaning the other's session and
+// billed box. `doResume` must serialize per room code and re-check the store
+// after acquiring that lock, so a second concurrent caller sees the first's
+// already-completed resume instead of booting again.
+// ---------------------------------------------------------------------------
+
+test("two concurrent fan-ins to a room with a dead session trigger exactly one resume, one spawn, and one sandboxId in the store", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const store = await RoomStore.open(dir)
+  const transport = new MemoryTransport()
+
+  let resumeCalls = 0
+  const booter: SessionBooter = {
+    async boot() {
+      const spawned = await client.spawnAgent({
+        adapter: "claude-code",
+        model: "claude-sonnet-5",
+        cwd: process.cwd(),
+        label: "rdv-test",
+        prompt: "hi",
+      })
+      return { sessionId: spawned.id, sandboxId: "box-0", artifactUrl: undefined, artifactReady: undefined }
+    },
+    async resume(room) {
+      resumeCalls++
+      // A real resume boots a real, billed session/box — modeled here as its
+      // own spawn call on the fake daemon, so a regression (the lock not
+      // actually preventing a second resume) shows up as a second spawn
+      // request, not just a second in-process counter increment.
+      const spawned = await client.spawnAgent({
+        adapter: "claude-code",
+        model: "claude-sonnet-5",
+        cwd: process.cwd(),
+        label: `rdv-${room.code}`,
+        prompt: "resumed",
+      })
+      return { sessionId: spawned.id, sandboxId: `box-resumed-${resumeCalls}`, artifactUrl: undefined, artifactReady: undefined }
+    },
+  }
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  services.push(service)
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+  const code = created.room.code
+  const sessionId = created.room.sessionId
+  assert.ok(sessionId !== undefined)
+  if (sessionId === undefined) return
+
+  const spawnCallsBeforeKill = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent").length
+
+  // Out-of-band, exactly like Finding 2a: the store still says "active"
+  // pointing at a session the daemon no longer runs.
+  const outOfBandClient = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  await outOfBandClient.kill(sessionId)
+  assert.equal(store.get(code)?.state, "active")
+
+  // Two fan-ins for the SAME room, fired without awaiting either first —
+  // both independently run `reviveIfSessionDied` (both see the session dead,
+  // both mark the room paused) and both then call `doResume`.
+  const [outcomeA, outcomeB] = await Promise.all([
+    service.handleInbound(alice("ping one")),
+    service.handleInbound(alice("ping two")),
+  ])
+  assert.equal(outcomeA.kind, "message")
+  assert.equal(outcomeB.kind, "message")
+
+  assert.equal(resumeCalls, 1, "only one of the two concurrent callers should actually reach the booter's resume")
+
+  const spawnCallsAfter = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent").length
+  assert.equal(spawnCallsAfter - spawnCallsBeforeKill, 1, "exactly one spawn on the fake daemon for the resume, not two")
+
+  const finalRoom = store.get(code)
+  assert.equal(finalRoom?.state, "active")
+  assert.equal(finalRoom?.sandboxId, "box-resumed-1", "the store must hold the one resume's sandboxId, not a clobbered second one")
+})

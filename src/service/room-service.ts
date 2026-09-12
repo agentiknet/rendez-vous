@@ -146,6 +146,11 @@ export class RoomService {
    *  rather than waiting out the interval a second time. */
   private readonly lastBoxProbeAt = new Map<string, number>()
   private readonly checkBoxLiveness: BoxLivenessCheck
+  /** Per-room-code serialization for `doResume` (see `withRoomLock`'s doc) —
+   *  in-process only, and empty entries are never cleaned up eagerly; each
+   *  slot holds only the tail of that room's own chain, so this stays one
+   *  entry per room ever resumed, not per call. */
+  private readonly roomLocks = new Map<string, Promise<unknown>>()
   private idleSweepTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(opts: {
@@ -601,7 +606,47 @@ export class RoomService {
     await this.store.update(room.code, { sessionId: undefined, state: "paused", ...extra })
   }
 
+  /** Serializes `performResume` per room code (docs/UPSTREAM.md #10 territory
+   *  — a second, independent race). Every caller of `doResume` gets here
+   *  after independently deciding "this room needs resuming" from its OWN
+   *  copy of the room — two concurrent triggers (two messages, or a message
+   *  racing `resume <code>`) can both decide that at once, and each one
+   *  reaching `booter.resume` boots a REAL e2b session/box. Ground-truthed
+   *  live, 2026-09-12: room RDV-NG7F got `sess_13a08221` on box `i65mye...`,
+   *  then 80s later `sess_1696a06c` on box `icc84u...` — the store kept only
+   *  the second, orphaning the first's session AND its billed box. Chaining
+   *  every call for the same code onto one promise means a second caller's
+   *  body only starts once the first's entire resume (boot included) has
+   *  already been written to the store — and that body re-reads the store
+   *  itself rather than trusting the `room` it was handed before it queued,
+   *  so it can see that and skip booting a second time. */
+  private async withRoomLock<T>(code: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.roomLocks.get(code) ?? Promise.resolve()
+    const run = previous.then(fn, fn)
+    this.roomLocks.set(
+      code,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    )
+    return run
+  }
+
   private async doResume(room: Room): Promise<Room> {
+    return this.withRoomLock(room.code, async () => {
+      // Re-check the store, not the `room` this call was handed before it
+      // queued for the lock: a prior holder may have already resumed this
+      // exact room while this call waited its turn, in which case there is
+      // nothing left to do — booting again would be the exact race this
+      // lock exists to close.
+      const current = this.store.get(room.code) ?? room
+      if (current.state !== "paused") return current
+      return this.performResume(current)
+    })
+  }
+
+  private async performResume(room: Room): Promise<Room> {
     const booted = await this.booter.resume(room)
     // A new sessionId restarts the daemon's own seq numbering near 1, while
     // `room.cursor` is still whatever seq the *previous* session last
