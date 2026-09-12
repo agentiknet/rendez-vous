@@ -31,6 +31,7 @@ in the codebase reads `process.env` directly.
 | `RDV_PREWARM_SANDBOX_ID` | unset | An already-paused e2b sandbox id to reuse for the next `new`, instead of a fresh boot. Consumed at most once — see §4. |
 | `RDV_IDLE_SWEEP_SECONDS` | `60` | How often the idle-pause sweep runs. |
 | `RDV_IDLE_PAUSE_MINUTES` | `20` | How long a room may sit with no activity before the sweep pauses it (R10). |
+| `RDV_BOX_PROBE_MINUTES` | `5` | How often the idle sweep also probes each active room's own e2b box for liveness via the e2b API (docs/UPSTREAM.md #10) — independent of, and on its own cadence from, the idle-pause interval above. |
 
 Every var is optional; unset ones fall back to the defaults above.
 
@@ -196,6 +197,74 @@ now detected on the very next message to that room (a plain fan-in or an
 explicit `resume <code>` alike) and revived the same way as an idle pause:
 the sender sees "Resuming room, one moment…" and the room comes back active
 on a fresh session.
+
+**Box liveness is a second, independent fact from session liveness
+(docs/UPSTREAM.md #10):** the daemon can keep reporting a session `running`
+for a while after the e2b box underneath it has already vanished
+("Sandbox Not Found") — ground-truthed live, 2026-09-12, box
+`i7jos61ixgkcfrekmi1vl`. `isSandboxAlive` (`src/service/box-liveness.ts`)
+polls `GET https://api.e2b.dev/sandboxes/<id>` directly (header
+`X-API-Key: $E2B_API_KEY`, 5s timeout) and returns `"alive" | "paused" |
+"gone" | "unknown"` — a 404 or a body whose own `message` says "not found"
+means `"gone"`; a `state` field otherwise distinguishes `"running"` from
+`"paused"`; a network error or an unrecognized response is `"unknown"`,
+**never** treated as gone (a probe failure must not boot a fresh, billed box
+on top of one that's actually fine).
+
+Used in exactly two places:
+- **`E2bBooter.resume`** (`src/service/booter.ts`): before reconnecting to a
+  room's known `sandboxId`, it checks liveness. A confirmed-`"gone"` box skips
+  the reconnect attempt entirely and boots a fresh one with `reuse` dropped —
+  handing a dead sandboxId to `sandbox.reuse` isn't the transient
+  `sandbox_reconnect_failed` case `resumeRoomSession`'s own retry budget
+  exists for. The room gets a visible transcript notice, "The previous box
+  expired; artifact restored on a new box." — distinct from R8's generic
+  "Artifact restored on a new box, same link." (same box replaced for an
+  app-serve-dead reason, not a confirmed-gone one). The public link never
+  changes either way (`GET /r/:code/artifact/`, §9.3b) — a box swap heals in
+  place.
+- **The idle sweep** (`RoomService.sweepIdleRooms`): for each active room with
+  a `sandboxId`, probes at most once per `RDV_BOX_PROBE_MINUTES` (default 5).
+  A box found gone marks the room `artifactReady: false` and `state:
+  "paused"` — the web page and fan-out stop claiming the artifact is live
+  (both gate on `artifactReady !== false` wherever they render the artifact
+  line) — and the very next message drives the room through the ordinary
+  pause→resume path, which boots the fresh box above.
+
+**Webhook alternative — spec only, not implemented tonight.** e2b offers
+sandbox lifecycle webhooks that would make this push-based instead of polled.
+Registration is one call:
+
+```
+POST https://api.e2b.app/events/webhooks
+X-API-Key: $E2B_API_KEY
+Content-Type: application/json
+
+{
+  "name": "rendez-vous-box-liveness",
+  "url": "https://rdv.clipgen.co/inbound/e2b",
+  "enabled": true,
+  "events": ["sandbox.lifecycle.killed", "sandbox.lifecycle.paused", "sandbox.lifecycle.resumed"],
+  "signatureSecret": "<a secret this service also holds>"
+}
+```
+
+Note the domain is `api.e2b.app`, not `api.e2b.dev` (the sandbox-control API
+`isSandboxAlive`/`killE2bSandboxDirect` call elsewhere in this repo) — easy to
+typo. Each delivered event is signed in an `e2b-signature` header:
+`sha256().update(secret + rawBody).digest('base64')` with trailing `=`
+stripped — the same shape as agentpush's `x-agentpush-signature` HMAC scheme
+already verified in `src/channels/agentpush/inbound.ts`, so `POST
+/inbound/e2b` could reuse that verification pattern directly. A
+`sandbox.lifecycle.killed` payload carries `sandbox_id` and a `kill_reason`
+(`"request" | "timeout" | "admin"`), enough to look up the room by
+`sandboxId` and run the same gone-box path as the poll above, without waiting
+out `RDV_BOX_PROBE_MINUTES`. Not built tonight because it needs the public
+`RDV_PUBLIC_URL` already configured and reachable on e2b's side before
+registering — polling stays the implemented path; a future session can wire
+the route and flip the registration on without touching the liveness logic
+itself, since both would feed the same `artifactReady: false` +
+`state: "paused"` transition.
 
 **Pre-warming for a demo:** boot budget is the scarce resource (each fresh
 e2b boot costs real time and money; reconnecting to a paused box is free).

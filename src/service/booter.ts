@@ -4,6 +4,7 @@ import { env } from "../env.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import type { Room } from "../rooms/types.ts"
 import { bootRoomSession, resumeRoomSession } from "../sandbox/boot.ts"
+import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
 
 /** Local (this host's) path to the artifact app source the sandbox executor
@@ -32,6 +33,13 @@ export interface BootedSession {
   /** See `RoomSessionResult.artifactReady` (src/sandbox/boot.ts). Always
    *  `undefined` for a booter with no artifact concept (`LocalBooter`). */
   artifactReady: boolean | undefined
+  /** `true` only when this result came from `E2bBooter.resume` finding the
+   *  room's prior box confirmed GONE via `isSandboxAlive` (docs/UPSTREAM.md
+   *  #10) and booting a fresh one with no reuse — distinct from R8's
+   *  same-or-reused-box re-serve, so `RoomService` can send the more precise
+   *  "the previous box expired" notice instead of the generic one. Always
+   *  `undefined` otherwise. */
+  boxWasGone?: boolean
 }
 
 export interface SessionBooter {
@@ -120,10 +128,12 @@ export class LocalBooter implements SessionBooter {
 export class E2bBooter implements SessionBooter {
   private readonly client: DaemonClient
   private readonly store: RoomStore
+  private readonly checkBoxLiveness: BoxLivenessCheck
 
-  constructor(client: DaemonClient, _daemon: DaemonExtraOptions, store: RoomStore) {
+  constructor(client: DaemonClient, _daemon: DaemonExtraOptions, store: RoomStore, checkBoxLiveness?: BoxLivenessCheck) {
     this.client = client
     this.store = store
+    this.checkBoxLiveness = checkBoxLiveness ?? ((sandboxId) => isSandboxAlive(sandboxId))
   }
 
   /** `RDV_PREWARM_SANDBOX_ID`, consumed at most once: available only while no
@@ -168,6 +178,22 @@ export class E2bBooter implements SessionBooter {
       // reusing the box if we at least have its id.
       return this.bootWithReuse(room, `rdv-${room.code}`, room.sandboxId)
     }
+
+    // Session liveness and box liveness are independent facts
+    // (docs/UPSTREAM.md #10): a box confirmed GONE is not worth a reconnect
+    // attempt at all — `resumeRoomSession`'s reconnect only retries a
+    // TRANSIENT `sandbox_reconnect_failed`, not "the box no longer exists".
+    // Boot fresh with reuse dropped entirely ("reuse nothing", per the
+    // brief) rather than handing a known-dead sandboxId to `sandbox.reuse`.
+    // `"unknown"` (a network error probing e2b) is deliberately NOT treated
+    // as gone — fall through to the ordinary reconnect path, which has its
+    // own retry budget for exactly that uncertainty.
+    const liveness = await this.checkBoxLiveness(room.sandboxId)
+    if (liveness === "gone") {
+      const booted = await this.bootWithReuse(room, `rdv-${room.code}`, undefined)
+      return { ...booted, boxWasGone: true }
+    }
+
     const result = await resumeRoomSession(this.client, {
       cwd: BOX_CWD,
       label: `rdv-${room.code}`,

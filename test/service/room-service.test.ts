@@ -582,3 +582,177 @@ test("start() after reopening the store resumes fan-out from the persisted curso
 
   await service2.stop()
 })
+
+// ---------------------------------------------------------------------------
+// Box liveness (docs/UPSTREAM.md #10, architecture.md §9.3b): session
+// liveness and box liveness are independent facts. A session can read
+// "running" while its own e2b box has already vanished, so the idle sweep
+// probes each active room's box directly, and a box confirmed gone must
+// self-heal on the next message rather than silently keep advertising a dead
+// artifact. `checkBoxLiveness` is injected so these tests never reach the
+// real e2b API.
+// ---------------------------------------------------------------------------
+
+test("sweepIdleRooms marks a room whose box is confirmed gone as paused with artifactReady:false, hides the artifact link meanwhile, and the next message revives it on a fresh box", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const store = await RoomStore.open(dir)
+  const transport = new MemoryTransport()
+  const booter: SessionBooter = {
+    async boot() {
+      return { sessionId: "sess-old", sandboxId: "box-1", artifactUrl: "https://box-1.example", artifactReady: true }
+    },
+    async resume() {
+      return { sessionId: "sess-new", sandboxId: "box-2", artifactUrl: "https://box-2.example", artifactReady: true }
+    },
+  }
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    checkBoxLiveness: async (sandboxId) => (sandboxId === "box-1" ? "gone" : "alive"),
+  })
+  services.push(service)
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+  const code = created.room.code
+  assert.equal(store.get(code)?.sandboxId, "box-1")
+
+  await service.sweepIdleRooms()
+
+  const paused = store.get(code)
+  assert.equal(paused?.state, "paused", "a confirmed-gone box must pause the room")
+  assert.equal(paused?.artifactReady, false)
+  assert.equal(paused?.sessionId, undefined)
+
+  const sendsBefore = transport.sends.length
+  const outcome = await service.handleInbound(alice("are you still there?"))
+  assert.equal(outcome.kind, "message")
+
+  const resumingMessage = transport.sends[sendsBefore]
+  assert.ok(resumingMessage?.message.text.includes("Resuming"), "should self-heal on the very next message")
+  assert.equal(
+    resumingMessage?.message.artifactUrl,
+    undefined,
+    "must not claim the artifact is live while artifactReady is false",
+  )
+
+  const revived = store.get(code)
+  assert.equal(revived?.state, "active")
+  assert.equal(revived?.sandboxId, "box-2", "should have booted a fresh box, not the gone one")
+  assert.equal(revived?.artifactReady, true)
+})
+
+test("sweepIdleRooms does not treat an unknown box-liveness probe as gone", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const store = await RoomStore.open(dir)
+  const transport = new MemoryTransport()
+  const booter: SessionBooter = {
+    async boot() {
+      return { sessionId: "sess-1", sandboxId: "box-1", artifactUrl: "https://box-1.example", artifactReady: true }
+    },
+    async resume() {
+      throw new Error("not exercised")
+    },
+  }
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    checkBoxLiveness: async () => "unknown",
+  })
+  services.push(service)
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+
+  await service.sweepIdleRooms()
+
+  const room = store.get(created.room.code)
+  assert.equal(room?.state, "active", "an unknown probe result must never be treated as gone")
+  assert.equal(room?.artifactReady, true)
+  assert.equal(room?.sandboxId, "box-1")
+})
+
+test("sweepIdleRooms probes a room's box at most once per boxProbeMinutes, not on every sweep tick", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const store = await RoomStore.open(dir)
+  const transport = new MemoryTransport()
+  const booter: SessionBooter = {
+    async boot() {
+      return { sessionId: "sess-1", sandboxId: "box-1", artifactUrl: "https://box-1.example", artifactReady: true }
+    },
+    async resume() {
+      throw new Error("not exercised")
+    },
+  }
+  let probeCalls = 0
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    boxProbeMinutes: 10,
+    checkBoxLiveness: async () => {
+      probeCalls++
+      return "alive"
+    },
+  })
+  services.push(service)
+
+  await service.handleInbound(alice("new"))
+  await service.sweepIdleRooms()
+  await service.sweepIdleRooms()
+  await service.sweepIdleRooms()
+
+  assert.equal(probeCalls, 1, "a second and third sweep within the same interval must not re-probe the box")
+})
+
+test("a box confirmed gone during resume gets the precise 'previous box expired' notice, not the generic box-replaced one", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const store = await RoomStore.open(dir)
+  const transport = new MemoryTransport()
+  const booter: SessionBooter = {
+    async boot() {
+      return { sessionId: "sess-old", sandboxId: "box-1", artifactUrl: "https://box-1.example", artifactReady: true }
+    },
+    async resume() {
+      return { sessionId: "sess-new", sandboxId: "box-2", artifactUrl: "https://box-2.example", artifactReady: true, boxWasGone: true }
+    },
+  }
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  services.push(service)
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+  const code = created.room.code
+
+  await service.pauseRoom(code)
+  const sendsBefore = transport.sends.length
+
+  const resumed = await service.handleInbound(alice(`resume ${code}`))
+  assert.equal(resumed.kind, "resumed")
+
+  const notice = transport.sends.slice(sendsBefore).find((send) => send.message.text.includes("previous box expired"))
+  assert.ok(notice !== undefined, "should send the precise box-expired notice")
+  assert.equal(notice?.message.text, "The previous box expired; artifact restored on a new box.")
+
+  const generic = transport.sends.slice(sendsBefore).find((send) => send.message.text === "Artifact restored on a new box, same link.")
+  assert.equal(generic, undefined, "must not ALSO send the generic notice")
+})

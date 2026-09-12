@@ -9,10 +9,39 @@
  */
 import assert from "node:assert/strict"
 import { mkdtemp, rm } from "node:fs/promises"
+import { createServer, type Server } from "node:http"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, test } from "node:test"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
+
+function listeningPort(server: Server): number {
+  const address = server.address()
+  if (typeof address !== "object" || address === null) {
+    throw new Error("server is not listening on a TCP port")
+  }
+  return address.port
+}
+
+/** A live artifact server for the box-liveness resume tests below: they
+ *  exercise `E2bBooter.resume`'s real, non-gone fall-through into
+ *  `resumeRoomSession`, which probes the artifact URL over the network
+ *  (`src/sandbox/boot.ts`) — an `https://*.example` placeholder would hang on
+ *  real DNS resolution instead of failing fast. */
+async function startArtifactServer(): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = createServer((_req, res) => {
+    res.writeHead(200)
+    res.end("ok")
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject)
+    server.listen(0, "127.0.0.1", resolve)
+  })
+  return {
+    url: `http://127.0.0.1:${listeningPort(server)}`,
+    close: () => new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
+  }
+}
 
 const PREWARM_ID = "prewarm-abc123"
 process.env.RDV_PREWARM_SANDBOX_ID = PREWARM_ID
@@ -124,4 +153,121 @@ test("E2bBooter.boot omits reuse entirely once the pre-warm id is already record
   assert.ok(isRecord(body) && isRecord(body.sandbox))
   if (!isRecord(body) || !isRecord(body.sandbox)) return
   assert.equal("reuse" in body.sandbox, false)
+})
+
+// ---------------------------------------------------------------------------
+// Box liveness (docs/UPSTREAM.md #10): session liveness and box liveness are
+// independent facts — `E2bBooter.resume` must not hand a confirmed-GONE
+// sandboxId to `sandbox.reuse` at all, since a reconnect attempt against a
+// box that no longer exists is not the transient `sandbox_reconnect_failed`
+// case `resumeRoomSession`'s own retry budget is built for. `checkBoxLiveness`
+// is injected here instead of reaching the real e2b API.
+// ---------------------------------------------------------------------------
+
+async function roomWithBox(store: Awaited<ReturnType<typeof RoomStore.open>>, sandboxId: string, artifactUrl: string) {
+  const room = await store.create()
+  return store.update(room.code, { sandboxId, artifactUrl })
+}
+
+test("E2bBooter.resume boots a fresh box with no reuse when the prior box is confirmed gone, and flags boxWasGone", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new E2bBooter(client, { baseUrl: daemon.url, token: undefined }, store, async () => "gone")
+
+  // No live artifact server needed here: a confirmed-"gone" box short-circuits
+  // straight to a fresh boot and never calls `resumeRoomSession`'s probe.
+  const room = await roomWithBox(store, "old-box", "http://127.0.0.1:1")
+  const result = await booter.resume(room)
+
+  assert.equal(result.boxWasGone, true)
+  assert.equal(result.sandboxId, "sandbox_fake")
+  assert.notEqual(result.sandboxId, "old-box")
+
+  const spawnRequests = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent")
+  assert.equal(spawnRequests.length, 1)
+  const body = spawnRequests[0]?.body
+  assert.ok(isRecord(body) && isRecord(body.sandbox))
+  if (!isRecord(body) || !isRecord(body.sandbox)) return
+  assert.equal("reuse" in body.sandbox, false, "a confirmed-gone sandboxId must never be handed to sandbox.reuse")
+})
+
+test("E2bBooter.resume reconnects normally when the box probes alive", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new E2bBooter(client, { baseUrl: daemon.url, token: undefined }, store, async () => "alive")
+  const artifact = await startArtifactServer()
+
+  try {
+    const room = await roomWithBox(store, "live-box", artifact.url)
+    // The reconnect spawn's own first-turn-outcome check (`waitForFirstTurnOutcome`,
+    // src/sandbox/boot.ts) waits for a `turn-end` on the fixed fake-daemon
+    // session id — pre-seed it so this test resolves immediately instead of
+    // riding out the real 30s timeout.
+    daemon.pushRecord("sess_fake", { seq: 1, kind: "turn-end", reason: "completed" })
+    const result = await booter.resume(room)
+
+    assert.equal(result.boxWasGone, undefined)
+    const spawnRequests = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent")
+    assert.equal(spawnRequests.length, 1)
+    const body = spawnRequests[0]?.body
+    assert.ok(isRecord(body) && isRecord(body.sandbox))
+    if (!isRecord(body) || !isRecord(body.sandbox)) return
+    assert.equal(body.sandbox.reuse, "live-box", "a live box should be reconnected to, not replaced")
+  } finally {
+    await artifact.close()
+  }
+})
+
+test("E2bBooter.resume reconnects normally when the box probes paused, not gone", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new E2bBooter(client, { baseUrl: daemon.url, token: undefined }, store, async () => "paused")
+  const artifact = await startArtifactServer()
+
+  try {
+    const room = await roomWithBox(store, "paused-box", artifact.url)
+    daemon.pushRecord("sess_fake", { seq: 1, kind: "turn-end", reason: "completed" })
+    const result = await booter.resume(room)
+
+    assert.equal(result.boxWasGone, undefined)
+    const spawnRequests = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent")
+    assert.equal(spawnRequests.length, 1)
+    const body = spawnRequests[0]?.body
+    assert.ok(isRecord(body) && isRecord(body.sandbox))
+    if (!isRecord(body) || !isRecord(body.sandbox)) return
+    assert.equal(body.sandbox.reuse, "paused-box")
+  } finally {
+    await artifact.close()
+  }
+})
+
+test("E2bBooter.resume does NOT treat an unknown box-liveness result as gone — it reconnects normally instead of booting fresh", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new E2bBooter(client, { baseUrl: daemon.url, token: undefined }, store, async () => "unknown")
+  const artifact = await startArtifactServer()
+
+  try {
+    const room = await roomWithBox(store, "flaky-box", artifact.url)
+    daemon.pushRecord("sess_fake", { seq: 1, kind: "turn-end", reason: "completed" })
+    const result = await booter.resume(room)
+
+    assert.equal(result.boxWasGone, undefined)
+    const spawnRequests = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent")
+    assert.equal(spawnRequests.length, 1)
+    const body = spawnRequests[0]?.body
+    assert.ok(isRecord(body) && isRecord(body.sandbox))
+    if (!isRecord(body) || !isRecord(body.sandbox)) return
+    assert.equal(body.sandbox.reuse, "flaky-box", "unknown must fall through to the ordinary reconnect path, never be treated as gone")
+  } finally {
+    await artifact.close()
+  }
 })
