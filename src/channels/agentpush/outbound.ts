@@ -44,6 +44,7 @@
 
 import type { OutboundMessage, Transport } from "../../fanout/types.ts"
 import type { Member } from "../../rooms/types.ts"
+import { attachmentFallbackText, type OutboundAttachment } from "../../service/transports.ts"
 import { AgentpushToolClient, type AgentpushToolClientOptions, isUploadMediaResult } from "./tools-client.ts"
 
 type MessengerProvider = "whatsapp" | "telegram" | "sms"
@@ -106,6 +107,38 @@ export class AgentpushTransport implements Transport {
     await this.client.call(`member ${member.id}`, "send_message", {
       to: { channel: provider, address: member.address.contactRef },
       content: { text: caption, media: [{ type: "image", providerMediaId: mediaId, caption }] },
+    })
+  }
+
+  /** An agent-authored attachment (`[[attach …]]`). Unlike `sendMedia` there
+   *  are no local bytes: the file is already served at a public, room-keyed
+   *  URL, which is exactly the shape every messenger provider here accepts —
+   *  so this one path covers image, document, audio and video on WhatsApp and
+   *  Telegram alike, with no per-provider branch. SMS has no media at all and
+   *  degrades to the URL as text. */
+  async sendAttachment(member: Member, attachment: OutboundAttachment): Promise<void> {
+    const provider = messengerProvider(member.address.provider)
+    if (provider === undefined) return
+
+    if (provider === "sms") {
+      await this.sendText(member.id, provider, member.address.contactRef, attachmentFallbackText(attachment))
+      return
+    }
+
+    await this.client.call(`member ${member.id}`, "send_message", {
+      to: { channel: provider, address: member.address.contactRef },
+      content: {
+        ...(attachment.caption !== undefined ? { text: attachment.caption } : {}),
+        media: [
+          {
+            type: attachment.kind,
+            url: attachment.url,
+            filename: attachment.filename,
+            mimeType: attachment.mimeType,
+            ...(attachment.caption !== undefined ? { caption: attachment.caption } : {}),
+          },
+        ],
+      },
     })
   }
 

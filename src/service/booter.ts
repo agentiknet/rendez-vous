@@ -84,6 +84,9 @@ function capabilityLines(opts?: { appDir: string }): string[] {
     lines.push(
       `The page members see at the artifact URL is served from ${opts.appDir}/.agentproto/ui/index.html — edit that file to change what they see, and the change is live immediately.`,
     )
+    lines.push(
+      `To SEND someone a file — a PDF, an image, a chart, an audio clip — write it into ${opts.appDir}/.agentproto/ui/ and then put "[[attach <filename> <optional one-line caption>]]" on its own line in your reply. Everyone in the room receives it as a real attachment, not a link. The filename must have no spaces and no directory traversal. Use this whenever someone asks you for a document or a picture: do not paste a long URL and do not claim you cannot send files.`,
+    )
   }
   return lines
 }

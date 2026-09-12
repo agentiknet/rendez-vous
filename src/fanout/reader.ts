@@ -1,6 +1,12 @@
 import type { RoomStore } from "../rooms/store.ts"
 import type { Ask, Member, Room } from "../rooms/types.ts"
 import { publicArtifactUrl } from "../service/artifact-proxy.ts"
+import {
+  attachmentFallbackText,
+  hasSendAttachment,
+  type OutboundAttachment,
+} from "../service/transports.ts"
+import { attachmentUrl, parseAttachments, type ParsedAttachment } from "./attach.ts"
 import { renderForTier } from "./render.ts"
 import type { FanoutRecord, Transport } from "./types.ts"
 import { askMarkerForOthers, askTextForTarget, resolveAskSegments, type ResolvedTurnSegment } from "./ask.ts"
@@ -186,9 +192,41 @@ export class RoomFanout {
     await this.store.update(code, { asks: [...existing, ...created] })
   }
 
-  private async flush(code: string, text: string, seq: number): Promise<void> {
+  /** One attachment to one member. Never throws: a provider rejecting a file
+   *  must not take down the rest of the turn's delivery, and the failure is
+   *  logged rather than swallowed. */
+  private async sendAttachment(member: Member, code: string, parsed: ParsedAttachment): Promise<void> {
+    const attachment: OutboundAttachment = {
+      url: attachmentUrl(publicArtifactUrl(code), parsed.name),
+      filename: parsed.name,
+      mimeType: parsed.mimeType,
+      kind: parsed.kind,
+      caption: parsed.caption,
+    }
+    try {
+      if (hasSendAttachment(this.transport)) {
+        await this.transport.sendAttachment(member, attachment)
+        return
+      }
+      await this.transport.send(member, { text: attachmentFallbackText(attachment), artifactUrl: undefined })
+    } catch (error: unknown) {
+      console.error(
+        `failed to send attachment ${parsed.name} to ${member.displayName} in ${code}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
+  }
+
+  private async flush(code: string, rawText: string, seq: number): Promise<void> {
     const room = this.store.get(code)
     if (room === undefined) return
+
+    // `[[attach …]]` markers come out FIRST, before whisper/ask parsing, so an
+    // attachment inside a whisper block is not silently swallowed with it and
+    // the marker never reaches a member as literal text. The files themselves
+    // are already served by the artifact proxy — see src/fanout/attach.ts.
+    const { text, attachments } = parseAttachments(rawText)
 
     // The raw `room.artifactUrl` is the box's own ephemeral URL — never sent
     // to a member (architecture.md §9.3b). Everyone gets the room-code-keyed
@@ -220,8 +258,15 @@ export class RoomFanout {
       room.members.map(async (member) => {
         const memberText = renderTurnForMember(pieces, member)
         const message = renderForTier(member.tier, memberText, artifactUrl, artifactChanged)
-        if (message === undefined) return
-        await this.transport.send(member, message)
+        if (message !== undefined) {
+          await this.transport.send(member, message)
+        }
+        // Attachments go to everyone, after the text, and are independent of
+        // it: a turn that is nothing BUT an attachment still delivers the
+        // file, even though `renderForTier` had no text to render.
+        for (const attachment of attachments) {
+          await this.sendAttachment(member, code, attachment)
+        }
       }),
     )
 
