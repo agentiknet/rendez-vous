@@ -55,11 +55,18 @@ export type RoomWebSendOutcome =
 
 const RESUMING_TEXT = "Resuming room, one moment…"
 
-/** The one line of "how to use me" every member gets. It earns its place:
- *  `@me` is invisible otherwise, and a capability nobody knows about is not
- *  a capability. Kept to a single short line because most members read this
- *  on a phone. */
-const AUDIENCE_HINT = "Everything you send goes to the whole room. Start with `@me` to get an answer only you can see."
+/** The one line of "how to use me" every member gets: that the room is
+ *  shared, and that privacy is available by ASKING for it.
+ *
+ *  It used to read "Start with `@me` to get an answer only you can see",
+ *  which taught a command line to someone texting on a phone — and implied
+ *  that without the incantation the agent could not do it. The agent reads
+ *  the request in plain language (src/service/booter.ts); `@me` survives only
+ *  as a shortcut for whoever likes it, and is deliberately no longer
+ *  advertised. Kept to one short line because most members read this on a
+ *  phone. */
+const AUDIENCE_HINT =
+  "Everything you send goes to the whole room. Just ask if you want something kept between you and the agent — no commands, say it in your own words."
 
 function welcomeText(prefix: string, room: Room): string {
   const lines = [`${prefix}: ${room.code}`]
