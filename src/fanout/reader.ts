@@ -1,4 +1,5 @@
 import type { RoomStore } from "../rooms/store.ts"
+import { publicArtifactUrl } from "../service/artifact-proxy.ts"
 import { renderForTier } from "./render.ts"
 import type { FanoutRecord, Transport } from "./types.ts"
 import { renderWhisperForMember, resolveWhisperSegments } from "./whisper.ts"
@@ -40,7 +41,7 @@ export class RoomFanout {
   private readonly source: Source
   private readonly isAlive: IsAlive
   private readonly readers: Map<string, ActiveReader> = new Map()
-  /** Per-room, in-process only: reset on restart, so the first flush after boot is always treated as an artifact change (see start of `flush`). */
+  /** Per-room, in-process only: reset on restart, so the first flush after boot is always treated as an artifact change (see start of `flush`). Keyed on the PUBLIC artifact URL (`publicArtifactUrl`), not the raw box URL — the public one never changes for a room, so a box replacement (architecture.md §9.3b) no longer trips this and re-sends. */
   private readonly lastArtifactUrl: Map<string, string | undefined> = new Map()
 
   constructor(opts: { store: RoomStore; transport: Transport; source: Source; isAlive?: IsAlive }) {
@@ -126,10 +127,16 @@ export class RoomFanout {
     const room = this.store.get(code)
     if (room === undefined) return
 
+    // The raw `room.artifactUrl` is the box's own ephemeral URL — never sent
+    // to a member (architecture.md §9.3b). Everyone gets the room-code-keyed
+    // proxy URL instead, which is why box replacement (a new raw URL behind
+    // the same code) does not register as a change here: `RoomService`
+    // already sends its own one-time "restored on a new box" notice for that.
+    const artifactUrl = room.artifactUrl !== undefined ? publicArtifactUrl(code) : undefined
     const hasSeenArtifact = this.lastArtifactUrl.has(code)
     const previousArtifactUrl = this.lastArtifactUrl.get(code)
-    const artifactChanged = hasSeenArtifact ? previousArtifactUrl !== room.artifactUrl : room.artifactUrl !== undefined
-    this.lastArtifactUrl.set(code, room.artifactUrl)
+    const artifactChanged = hasSeenArtifact ? previousArtifactUrl !== artifactUrl : artifactUrl !== undefined
+    this.lastArtifactUrl.set(code, artifactUrl)
 
     // A whisper is a convention in the agent's own text, not a separate
     // record kind (the box has no tool access to target a member directly —
@@ -141,7 +148,7 @@ export class RoomFanout {
     await Promise.allSettled(
       room.members.map(async (member) => {
         const memberText = renderWhisperForMember(segments, member)
-        const message = renderForTier(member.tier, memberText, room.artifactUrl, artifactChanged)
+        const message = renderForTier(member.tier, memberText, artifactUrl, artifactChanged)
         if (message === undefined) return
         await this.transport.send(member, message)
       }),

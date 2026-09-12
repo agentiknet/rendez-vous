@@ -1,12 +1,13 @@
 import assert from "node:assert/strict"
 import { mkdtemp, rm } from "node:fs/promises"
+import { createServer as createHttpTestServer, type Server as HttpTestServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, test } from "node:test"
 import { DaemonClient } from "../../src/daemon/client.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
-import { LocalBooter } from "../../src/service/booter.ts"
+import { LocalBooter, type SessionBooter } from "../../src/service/booter.ts"
 import { createHttpServer } from "../../src/service/http.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
@@ -20,12 +21,14 @@ const dirs: string[] = []
 const daemons: ExtendedFakeDaemon[] = []
 const services: RoomService[] = []
 const servers: { close(): Promise<void> }[] = []
+const upstreams: HttpTestServer[] = []
 
 after(async () => {
   await Promise.all(servers.map((server) => server.close()))
   await Promise.all(services.map((service) => service.stop()))
   await Promise.all(daemons.map((daemon) => daemon.close()))
   await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
+  await Promise.all(upstreams.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))))
 })
 
 async function freshDir(): Promise<string> {
@@ -388,4 +391,83 @@ test("POST /rooms/:code/send returns 404 for an unknown room", async () => {
     body: JSON.stringify({ displayName: "X", text: "hi" }),
   })
   assert.equal(res.status, 404)
+})
+
+/** A fake e2b-shaped upstream, standing in for the box's own served app. */
+async function startFakeArtifactUpstream(): Promise<string> {
+  const server = createHttpTestServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" })
+    res.end(`artifact:${req.url}`)
+  })
+  upstreams.push(server)
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const address = server.address()
+  if (!isAddressInfo(address)) throw new Error("failed to bind fake artifact upstream")
+  return `http://127.0.0.1:${address.port}`
+}
+
+/** A room booted with a scripted `SessionBooter` that hands back a fixed
+ *  `artifactUrl` — `LocalBooter` never sets one, so the artifact-proxy route
+ *  needs its own harness (architecture.md §9.3b). */
+async function newRoomHarnessWithArtifact(artifactUrl: string): Promise<{ baseUrl: string; code: string }> {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booted = { sessionId: "sess-artifact", sandboxId: "box-1", artifactUrl, artifactReady: true }
+  const booter: SessionBooter = {
+    async boot() {
+      return booted
+    },
+    async resume() {
+      return booted
+    },
+  }
+  const transport = new MemoryTransport()
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  services.push(service)
+
+  const created = await service.handleInbound({
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+9" },
+    displayName: "Alice",
+    tier: "messenger",
+    text: "new",
+  })
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") throw new Error("unreachable")
+
+  const baseUrl = await listenOnRandomPort(service)
+  return { baseUrl, code: created.room.code }
+}
+
+test("GET /r/:code/artifact/ reverse-proxies to the room's current artifactUrl", async () => {
+  const upstreamUrl = await startFakeArtifactUpstream()
+  const { baseUrl, code } = await newRoomHarnessWithArtifact(upstreamUrl)
+
+  const res = await fetch(`${baseUrl}/r/${code}/artifact/`)
+  assert.equal(res.status, 200)
+  assert.equal(await res.text(), "artifact:/")
+})
+
+test("GET /r/:code/artifact/* appends the sub-path and preserves the query on the upstream request", async () => {
+  const upstreamUrl = await startFakeArtifactUpstream()
+  const { baseUrl, code } = await newRoomHarnessWithArtifact(upstreamUrl)
+
+  const res = await fetch(`${baseUrl}/r/${code}/artifact/deep/page?x=1`)
+  assert.equal(res.status, 200)
+  assert.equal(await res.text(), "artifact:/deep/page?x=1")
+})
+
+test("GET /r/:code/artifact/ returns 404 for an unknown room code — nothing to self-heal toward", async () => {
+  const res = await fetch(`${(await newRoomHarness()).baseUrl}/r/RDV-ZZZZ/artifact/`)
+  assert.equal(res.status, 404)
+})
+
+test("GET /r/:code/artifact/ self-heals with a refreshing 503 when the room has no artifactUrl yet", async () => {
+  // LocalBooter never sets an artifactUrl.
+  const { baseUrl, code } = await newRoomHarness()
+  const res = await fetch(`${baseUrl}/r/${code}/artifact/`)
+  assert.equal(res.status, 503)
+  assert.match(res.headers.get("content-type") ?? "", /text\/html/)
+  assert.match(await res.text(), /not available yet/i)
 })

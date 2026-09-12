@@ -7,6 +7,7 @@ import { DaemonClient } from "../../src/daemon/client.ts"
 import type { OutboundMessage, Transport } from "../../src/fanout/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import type { Address, Member, Tier } from "../../src/rooms/types.ts"
+import { publicArtifactUrl } from "../../src/service/artifact-proxy.ts"
 import { LocalBooter, type SessionBooter } from "../../src/service/booter.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport, type RecordedSend } from "../../src/service/transports.ts"
@@ -344,6 +345,108 @@ test("doResume resets the cursor when the session id changes, so a turn on the n
   daemon.pushRecord("sess-new", { seq: 2, kind: "turn-end", reason: "completed" })
   await waitFor(() => transport.sends.length > sendsBefore)
   assert.ok(transport.sends[sendsBefore]?.message.text.includes("after resume"))
+})
+
+test("the raw artifactUrl never reaches a member: replies carry the room-code-keyed public URL instead (architecture.md §9.3b)", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const store = await RoomStore.open(dir)
+  const transport = new MemoryTransport()
+  const rawArtifactUrl = "https://3210-someboxid.e2b.app"
+  const booter: SessionBooter = {
+    async boot() {
+      return { sessionId: "sess-1", sandboxId: "box-1", artifactUrl: rawArtifactUrl, artifactReady: true }
+    },
+    async resume() {
+      throw new Error("not exercised")
+    },
+  }
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  services.push(service)
+
+  const created = await service.handleInbound(alice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+  const expectedUrl = publicArtifactUrl(created.room.code)
+
+  const send = transport.sends[0]
+  assert.ok(send !== undefined)
+  assert.ok(!send?.message.text.includes(rawArtifactUrl), "the raw box URL must never appear in a member-facing reply")
+  assert.ok(send?.message.text.includes(expectedUrl), "the reply should carry the stable, room-code-keyed URL instead")
+  assert.equal(send?.message.artifactUrl, expectedUrl)
+
+  // The store itself is the one place the raw URL is allowed to live.
+  assert.equal(store.get(created.room.code)?.artifactUrl, rawArtifactUrl)
+})
+
+test("resuming onto a replaced box notifies every member once, in addition to the resumer's own reply — the link itself never changes", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const store = await RoomStore.open(dir)
+  const transport = new MemoryTransport()
+  const booter: SessionBooter = {
+    async boot() {
+      return { sessionId: "sess-old", sandboxId: "box-old", artifactUrl: "https://3210-boxold.e2b.app", artifactReady: true }
+    },
+    async resume() {
+      return { sessionId: "sess-new", sandboxId: "box-new", artifactUrl: "https://3210-boxnew.e2b.app", artifactReady: true }
+    },
+  }
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  services.push(service)
+
+  const created = await service.handleInbound(alice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+  const code = created.room.code
+
+  const joined = await service.handleInbound(bob(`join ${code}`))
+  assert.equal(joined.kind, "joined")
+
+  await service.pauseRoom(code)
+  const sendsBeforeResume = transport.sends.length
+
+  const resumed = await service.handleInbound(alice(`resume ${code}`))
+  assert.equal(resumed.kind, "resumed")
+
+  const notices = transport.sends.slice(sendsBeforeResume).filter((send) => send.message.text === "Artifact restored on a new box, same link.")
+  assert.equal(notices.length, 2, "both current members should get the notice, not just whoever typed resume")
+  assert.deepEqual(
+    notices.map((send) => send.member.displayName).sort(),
+    ["Alice", "Bob"],
+  )
+  const expectedUrl = publicArtifactUrl(code)
+  assert.ok(notices.every((send) => send.message.artifactUrl === expectedUrl))
+})
+
+test("resuming onto the SAME box sends no box-replaced notice", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const store = await RoomStore.open(dir)
+  const transport = new MemoryTransport()
+  const booter: SessionBooter = {
+    async boot() {
+      return { sessionId: "sess-old", sandboxId: "box-1", artifactUrl: "https://3210-box1.e2b.app", artifactReady: true }
+    },
+    async resume() {
+      return { sessionId: "sess-new", sandboxId: "box-1", artifactUrl: "https://3210-box1.e2b.app", artifactReady: true }
+    },
+  }
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  services.push(service)
+
+  const created = await service.handleInbound(alice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+  const code = created.room.code
+
+  await service.pauseRoom(code)
+  await service.handleInbound(alice(`resume ${code}`))
+
+  assert.equal(transport.sends.some((send) => send.message.text.includes("restored on a new box")), false)
 })
 
 test("a session killed out of band (bypassing doPause) is revived on the next fan-in instead of stranding the room (Finding 2a)", async () => {

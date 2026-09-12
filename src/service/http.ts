@@ -3,9 +3,20 @@ import { MessageDedup, parseAgentpushWebhook, parseEmailInbound } from "../chann
 import type { TranscriptRecord } from "../daemon/records.ts"
 import { env } from "../env.ts"
 import { joinLinks } from "../links/index.ts"
-import type { Tier } from "../rooms/types.ts"
+import type { Room, Tier } from "../rooms/types.ts"
 import { renderRoomNotFoundPage, renderRoomPage } from "../web/page.ts"
+import { proxyArtifact, publicArtifactUrl } from "./artifact-proxy.ts"
 import type { RoomService } from "./room-service.ts"
+
+/** The `Room` shape handed to any client-facing surface — the JSON API and
+ *  the page's server-side embed alike: the raw box `artifactUrl` swapped for
+ *  the stable, room-code-keyed proxy URL, so the raw e2b URL never reaches a
+ *  browser (architecture.md §9.3b; mirrors `RoomService`'s own
+ *  `memberFacingArtifactUrl` for messenger/email replies). */
+function toPublicRoom(room: Room): Room {
+  if (room.artifactUrl === undefined) return room
+  return { ...room, artifactUrl: publicArtifactUrl(room.code) }
+}
 
 /** The only record kinds the room web transcript renders (architecture.md
  *  §5.2's fan-out list, extended with the tier-3 richer view). */
@@ -97,7 +108,7 @@ function handleGetRoom(service: RoomService, res: ServerResponse, encodedCode: s
     sendJson(res, 404, { error: "not_found" })
     return
   }
-  sendJson(res, 200, room)
+  sendJson(res, 200, toPublicRoom(room))
 }
 
 async function handleHealth(service: RoomService, res: ServerResponse): Promise<void> {
@@ -121,7 +132,31 @@ function handleRoomPage(service: RoomService, res: ServerResponse, encodedCode: 
     smsNumber: env.smsNumber,
   })
   res.writeHead(200, { "content-type": "text/html; charset=utf-8" })
-  res.end(renderRoomPage(room, links))
+  res.end(renderRoomPage(toPublicRoom(room), links))
+}
+
+/** `GET /r/:code/artifact/` and `GET /r/:code/artifact/*` — the stable,
+ *  room-code-keyed URL members are actually given (architecture.md §9.3b,
+ *  `publicArtifactUrl`). A room with no `artifactUrl` yet is handed to
+ *  `proxyArtifact` the same as an unreachable upstream: both self-heal with
+ *  the same refreshing 503 page, so this route never needs its own 404 for
+ *  "no artifact". An unknown room code, though, is a 404 — there is nothing
+ *  to self-heal toward. */
+async function handleRoomArtifact(
+  service: RoomService,
+  req: IncomingMessage,
+  res: ServerResponse,
+  encodedCode: string,
+  subPath: string,
+  search: string,
+): Promise<void> {
+  const code = decodeURIComponent(encodedCode)
+  const room = service.getRoom(code)
+  if (room === undefined) {
+    sendJson(res, 404, { error: "not_found" })
+    return
+  }
+  await proxyArtifact({ artifactUrl: room.artifactUrl, method: req.method, subPath, search }, res)
 }
 
 function parseSince(raw: string | null): number {
@@ -334,6 +369,17 @@ async function handle(service: RoomService, dedup: MessageDedup, req: IncomingMe
 
   if (url.pathname === "/inbound/agentpush-mail" && req.method === "POST") {
     await handleAgentpushMailWebhook(service, dedup, req, res)
+    return
+  }
+
+  const artifactMatch = /^\/r\/([^/]+)\/artifact(\/.*)?$/.exec(url.pathname)
+  if (artifactMatch !== null && (req.method === "GET" || req.method === "HEAD")) {
+    const encodedCode = artifactMatch[1]
+    if (encodedCode === undefined) {
+      sendJson(res, 400, { error: "invalid_code" })
+      return
+    }
+    await handleRoomArtifact(service, req, res, encodedCode, artifactMatch[2] ?? "", url.search)
     return
   }
 

@@ -8,9 +8,19 @@ import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
 import { ensureMembership, handleCommand, parseCommand } from "../rooms/commands.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import type { Address, Member, Room, Tier } from "../rooms/types.ts"
+import { publicArtifactUrl } from "./artifact-proxy.ts"
 import type { SessionBooter } from "./booter.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
 import { hasSendMedia } from "./transports.ts"
+
+/** What every member-facing surface shows instead of `room.artifactUrl`
+ *  (architecture.md §9.3b): the raw e2b URL is a pure function of sandbox id
+ *  and port, so it dies the moment the box is replaced. This is the stable,
+ *  room-code-keyed URL that survives that — the raw URL never leaves the
+ *  store. */
+function memberFacingArtifactUrl(room: Room): string | undefined {
+  return room.artifactUrl !== undefined ? publicArtifactUrl(room.code) : undefined
+}
 
 export interface InboundInput {
   address: Address
@@ -39,16 +49,18 @@ const RESUMING_TEXT = "Resuming room, one moment…"
 
 function welcomeText(prefix: string, room: Room): string {
   const lines = [`${prefix}: ${room.code}`]
-  if (room.artifactUrl !== undefined) {
-    lines.push(room.artifactUrl)
+  const artifactUrl = memberFacingArtifactUrl(room)
+  if (artifactUrl !== undefined) {
+    lines.push(artifactUrl)
   }
   return lines.join("\n")
 }
 
 function activeRoomStatusText(room: Room): string {
   const lines = [`Room ${room.code} is already active.`]
-  if (room.artifactUrl !== undefined) {
-    lines.push(room.artifactUrl)
+  const artifactUrl = memberFacingArtifactUrl(room)
+  if (artifactUrl !== undefined) {
+    lines.push(artifactUrl)
   }
   return lines.join("\n")
 }
@@ -64,8 +76,9 @@ function currentJoinLinks(code: string): JoinLinks {
 
 function newRoomReplyText(room: Room, links: JoinLinks): string {
   const lines = [`Room created: ${room.code}`]
-  if (room.artifactUrl !== undefined) {
-    lines.push(room.artifactUrl)
+  const artifactUrl = memberFacingArtifactUrl(room)
+  if (artifactUrl !== undefined) {
+    lines.push(artifactUrl)
   }
   lines.push(links.web)
   if (links.whatsapp !== undefined) lines.push(links.whatsapp)
@@ -80,8 +93,9 @@ function joinRoomReplyText(room: Room): string {
   if (roster.length > 0) {
     lines.push(`With: ${roster}`)
   }
-  if (room.artifactUrl !== undefined) {
-    lines.push(room.artifactUrl)
+  const artifactUrl = memberFacingArtifactUrl(room)
+  if (artifactUrl !== undefined) {
+    lines.push(artifactUrl)
   }
   return lines.join("\n")
 }
@@ -263,7 +277,7 @@ export class RoomService {
     })
 
     if (room.state === "paused") {
-      await this.transport.send(member, { text: RESUMING_TEXT, artifactUrl: room.artifactUrl })
+      await this.transport.send(member, { text: RESUMING_TEXT, artifactUrl: memberFacingArtifactUrl(room) })
       room = await this.doResume(room)
     }
     if (room.sessionId === undefined) {
@@ -313,7 +327,7 @@ export class RoomService {
     this.fanout.start(room.code)
 
     const links = currentJoinLinks(room.code)
-    await this.transport.send(result.member, { text: newRoomReplyText(room, links), artifactUrl: room.artifactUrl })
+    await this.transport.send(result.member, { text: newRoomReplyText(room, links), artifactUrl: memberFacingArtifactUrl(room) })
     await this.sendJoinQr(result.member, room, links)
 
     return { kind: "created", room, member: result.member }
@@ -335,14 +349,14 @@ export class RoomService {
     if (result.movedFrom !== undefined) {
       await this.transport.send(result.member, {
         text: `Moved from ${result.movedFrom} to ${result.room.code}.`,
-        artifactUrl: result.room.artifactUrl,
+        artifactUrl: memberFacingArtifactUrl(result.room),
       })
       return { kind: "moved", room: result.room, member: result.member, from: result.movedFrom }
     }
 
     await this.transport.send(result.member, {
       text: joinRoomReplyText(result.room),
-      artifactUrl: result.room.artifactUrl,
+      artifactUrl: memberFacingArtifactUrl(result.room),
     })
     return { kind: "joined", room: result.room, member: result.member }
   }
@@ -384,7 +398,7 @@ export class RoomService {
     if (room.state === "active") {
       await this.transport.send(result.member, {
         text: activeRoomStatusText(room),
-        artifactUrl: room.artifactUrl,
+        artifactUrl: memberFacingArtifactUrl(room),
       })
       return { kind: "resumed", room, member: result.member }
     }
@@ -392,7 +406,7 @@ export class RoomService {
     const resumed = await this.doResume(room)
     await this.transport.send(result.member, {
       text: welcomeText("Resumed room", resumed),
-      artifactUrl: resumed.artifactUrl,
+      artifactUrl: memberFacingArtifactUrl(resumed),
     })
     return { kind: "resumed", room: resumed, member: result.member }
   }
@@ -409,14 +423,14 @@ export class RoomService {
 
     room = await this.reviveIfSessionDied(room)
     if (room.state === "paused") {
-      await this.transport.send(member, { text: RESUMING_TEXT, artifactUrl: room.artifactUrl })
+      await this.transport.send(member, { text: RESUMING_TEXT, artifactUrl: memberFacingArtifactUrl(room) })
       room = await this.doResume(room)
     }
 
     if (room.sessionId === undefined) {
       await this.transport.send(member, {
         text: `This room has no live session yet — try \`resume ${room.code}\`.`,
-        artifactUrl: room.artifactUrl,
+        artifactUrl: memberFacingArtifactUrl(room),
       })
       return { kind: "message", room, member }
     }
@@ -426,7 +440,7 @@ export class RoomService {
     if (!result.ok) {
       await this.transport.send(member, {
         text: `Could not deliver your message: ${result.message}`,
-        artifactUrl: room.artifactUrl,
+        artifactUrl: memberFacingArtifactUrl(room),
       })
     }
     return { kind: "message", room, member }
@@ -471,6 +485,13 @@ export class RoomService {
     // Finding 3). Reset only when the session actually changed: a resume
     // that reconnects the same still-alive session must keep its cursor.
     const sessionChanged = booted.sessionId !== room.sessionId
+    // A resume can cold-boot onto a fresh box when the old one's app-serve
+    // came back dead (R8, architecture.md §9.3b) — the member-facing URL
+    // (`memberFacingArtifactUrl`) never changes, so nobody needs a new link,
+    // but they do deserve to know the artifact just came back on a different
+    // box, in case they'd bookmarked or reasoned about the old one directly.
+    const boxReplaced =
+      room.sandboxId !== undefined && booted.sandboxId !== undefined && booted.sandboxId !== room.sandboxId
     const updated = await this.store.update(room.code, {
       sessionId: booted.sessionId,
       sandboxId: booted.sandboxId,
@@ -481,7 +502,22 @@ export class RoomService {
       ...(sessionChanged ? { cursor: 0 } : {}),
     })
     this.fanout.start(updated.code)
+    if (boxReplaced) {
+      await this.notifyBoxReplaced(updated)
+    }
     return updated
+  }
+
+  /** The single explicit notice architecture.md §9.3b asks for: broadcast to
+   *  every current member, not just whoever triggered the resume — anyone
+   *  already in the room may have the artifact open or bookmarked. */
+  private async notifyBoxReplaced(room: Room): Promise<void> {
+    const artifactUrl = memberFacingArtifactUrl(room)
+    await Promise.allSettled(
+      room.members.map((member) =>
+        this.transport.send(member, { text: "Artifact restored on a new box, same link.", artifactUrl }),
+      ),
+    )
   }
 
   private async replyGuidance(input: InboundInput, text: string): Promise<void> {

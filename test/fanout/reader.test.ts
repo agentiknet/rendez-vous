@@ -6,6 +6,7 @@ import { after, test } from "node:test"
 import { RoomFanout } from "../../src/fanout/reader.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import type { Member } from "../../src/rooms/types.ts"
+import { publicArtifactUrl } from "../../src/service/artifact-proxy.ts"
 import { FakeSource, FakeTransport, waitFor } from "./support.ts"
 
 async function freshDir(): Promise<string> {
@@ -224,7 +225,7 @@ test("source error then reconnect: delivery continues from the persisted cursor 
   await fanout.stopAll()
 })
 
-test("artifact url is announced on the first flush after boot when the room already has one", async () => {
+test("artifact url is announced on the first flush after boot when the room already has one — as the room-code-keyed public URL, never the raw box URL", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)
   const room = await store.create()
@@ -240,7 +241,7 @@ test("artifact url is announced on the first flush after boot when the room alre
   fanout.start(room.code)
 
   await waitFor(() => transport.sends.length === 1)
-  assert.equal(transport.sends[0]?.text, "live now\nhttps://x.test")
+  assert.equal(transport.sends[0]?.text, `live now\n${publicArtifactUrl(room.code)}`)
 
   await fanout.stopAll()
 })
@@ -334,6 +335,44 @@ test("a whisper reaches only its target with the private prefix; other members g
   await fanout.stopAll()
 })
 
+test("one turn addresses two different members plus a broadcast line: N addressed messages from a single turn-end, not N turns", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const alice = await store.addMember(room.code, memberInput("Alice", "messenger", "+1"))
+  const bob = await store.addMember(room.code, memberInput("Bob", "messenger", "+2"))
+  await store.update(room.code, { sessionId: "sess-1" })
+
+  const source = new FakeSource()
+  const transport = new FakeTransport()
+  const fanout = new RoomFanout({ store, transport, source: source.read() })
+
+  const reply = [
+    "Hi both.",
+    "[[whisper to Alice]]",
+    "went with your version",
+    "[[/whisper]]",
+    "[[whisper to Bob]]",
+    "yours conflicted, sorry",
+    "[[/whisper]]",
+    "moving ahead.",
+  ].join("\n")
+  source.push({ seq: 1, kind: "text-delta", text: reply })
+  source.push({ seq: 2, kind: "turn-end" })
+
+  fanout.start(room.code)
+
+  // One turn, one turn-end record, two differently addressed pushes.
+  await waitFor(() => transport.sends.length === 2)
+
+  const toAlice = transport.sends.find((send) => send.memberId === alice.id)
+  const toBob = transport.sends.find((send) => send.memberId === bob.id)
+  assert.equal(toAlice?.text, "Hi both.\n(private) went with your version\n(the agent whispered to Bob)\nmoving ahead.")
+  assert.equal(toBob?.text, "Hi both.\n(the agent whispered to Alice)\n(private) yours conflicted, sorry\nmoving ahead.")
+
+  await fanout.stopAll()
+})
+
 test("artifact url is not repeated on a later flush when it has not changed", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)
@@ -349,12 +388,40 @@ test("artifact url is not repeated on a later flush when it has not changed", as
   source.push({ seq: 2, kind: "turn-end" })
   fanout.start(room.code)
   await waitFor(() => transport.sends.length === 1)
-  assert.equal(transport.sends[0]?.text, "first\nhttps://x.test")
+  assert.equal(transport.sends[0]?.text, `first\n${publicArtifactUrl(room.code)}`)
 
   source.push({ seq: 3, kind: "text-delta", text: "second" })
   source.push({ seq: 4, kind: "turn-end" })
   await waitFor(() => transport.sends.length === 2)
   assert.equal(transport.sends[1]?.text, "second")
+
+  await fanout.stopAll()
+})
+
+test("a box replacement (a new raw artifactUrl behind the same code) does not re-trigger the artifact line — the public URL never changes", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  await store.addMember(room.code, memberInput("Alice", "messenger", "+1"))
+  await store.update(room.code, { sessionId: "sess-1", artifactUrl: "https://box-old.test" })
+
+  const source = new FakeSource()
+  const transport = new FakeTransport()
+  const fanout = new RoomFanout({ store, transport, source: source.read() })
+
+  source.push({ seq: 1, kind: "text-delta", text: "first" })
+  source.push({ seq: 2, kind: "turn-end" })
+  fanout.start(room.code)
+  await waitFor(() => transport.sends.length === 1)
+  assert.equal(transport.sends[0]?.text, `first\n${publicArtifactUrl(room.code)}`)
+
+  // Simulate a resume that cold-booted onto a different box (architecture.md
+  // §9.3b) — a new raw URL for the same room code.
+  await store.update(room.code, { artifactUrl: "https://box-new.test" })
+  source.push({ seq: 3, kind: "text-delta", text: "second" })
+  source.push({ seq: 4, kind: "turn-end" })
+  await waitFor(() => transport.sends.length === 2)
+  assert.equal(transport.sends[1]?.text, "second", "no artifact line: the public URL the member sees is unchanged")
 
   await fanout.stopAll()
 })
