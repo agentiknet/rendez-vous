@@ -509,3 +509,77 @@ advertised that URL and a member's own messenger thread still carried it as
 the last link sent — scrolling up or re-tapping it now hits a dead page. This
 is exactly why the artifact proxy (`GET /r/:code/artifact/*`, keyed on the
 room code, not the box) is being built, not a hypothetical risk.
+
+---
+
+## 11. agentpush parses Telegram voice notes and photos, then hands on an id nobody can resolve
+
+**An agentpush finding, not an agentproto one** — filed here because it is
+the same pattern as everything above and was found the same way: a real voice
+note, sent from a real phone into a live room, that produced no reply, no log
+line, and no error on either side.
+
+The Telegram driver does **not** drop non-text messages. `parse()` reads
+`photo`, `video`, `audio`, `voice`, `document` and `sticker`
+(`packages/messaging/src/providers/telegram/provider.ts:330-387`) and builds
+a proper `MediaAttachment`. The voice branch, verbatim:
+
+```ts
+} else if (message.voice) {
+  content.media = [{
+    type: "audio",
+    providerMediaId: message.voice.file_id,
+    size: message.voice.file_size,
+    mimeType: message.voice.mime_type,
+  }]
+}
+```
+
+`providerMediaId` and **no `url`** — on all six branches. The envelope builder
+faithfully copies it through
+(`packages/core/src/domain/inbound-route/messaging.ts:68,80`), so a notify
+consumer receives:
+
+```json
+{"type":"audio","providerMediaId":"AwACAgQAAx...","size":8452,"mimeType":"audio/ogg"}
+```
+
+…and can do nothing with it. Resolving a Telegram `file_id` needs a `getFile`
+call authenticated with the **bot token**, which the consumer does not have
+and should not have. The provider already implements the resolver —
+`getMediaUrl` at `provider.ts:235-245`, `downloadMedia` at `:211-233` — and
+**neither has a single caller anywhere in the repo**. The documented escape
+hatch is closed too: `messaging_attachment_fetch` throws
+`provider "telegram" does not support attachment fetch`
+(`packages/tools/src/tools/messaging-attachment-fetch.ts:31-35`), because
+`TelegramProvider` never implements the optional `fetchAttachment?()` port
+member (`packages/core/src/ports/messaging.ts:228-231`). Only Gmail does.
+
+**Do not fix this by having `parse()` call `getMediaUrl`.** The URL it returns
+embeds the bot token (`provider.ts:244`), and it would then be POSTed in
+plaintext to every matched `notify_url` and snapshotted verbatim onto the
+`inbound_route_notifies` payload row (`messaging.ts:207-215`) — a full bot
+credential handed to every route owner. The fix is an agentpush-side proxy or
+signed URL: resolve on demand, behind agentpush's own auth.
+
+**Second, smaller drop on the same path.** `keyword_contains` routes match on
+`msg.content.text ?? ""` (`evaluate.ts:64`). A bare voice note has no text, so
+it can never match one — only `catch_all`, `channel_is` and `from_contains`
+will fire. A workspace routing by keyword loses voice notes at the matcher,
+before any envelope exists.
+
+### What Rendez-vous did about it
+
+Our side was the other half of the silence: `parseMedia` dropped every entry
+without a `url`, reasoning that unfetchable is unnormalizable. That emptied
+the array, and with the empty text a media-only message carries, the whole
+turn fell to the "ignored" path. Each side behaved as documented and the
+message vanished between them.
+
+Fixed in `0293bd1`: an entry with a provider reference but no URL is kept and
+normalized into the existing visible failure line, naming the reference —
+`(voice note, could not be fetched: no fetchable URL from the provider
+(reference: AwACAgQAAx...), media:<id>)`. The content still cannot be
+recovered until the upstream fix lands, but the member is told their message
+arrived and why it could not be read. Only an entry naming nothing at all is
+still dropped.
