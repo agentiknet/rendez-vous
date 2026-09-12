@@ -21,12 +21,22 @@ export interface FanoutRecordLike {
   reason?: string
 }
 
+/** The daemon's own `SessionStatus` union (`sessions.ts:588`). */
+export type FakeSessionStatus = "starting" | "running" | "exited" | "killed" | "error"
+
 export interface ExtendedFakeDaemon {
   readonly url: string
   readonly requestsReceived: { readonly path: string; readonly body: unknown }[]
   pushRecord(sessionId: string, record: FanoutRecordLike): void
   /** Number of live `GET /sessions/:id/events/stream` connections currently held open for this session. */
   subscriberCount(sessionId: string): number
+  /** Force `GET /sessions/:id` to answer with this status, without going
+   *  through a real kill — for exercising the `exited`/`error` cases the fake
+   *  daemon has no other route to produce. */
+  setSessionStatus(sessionId: string, status: FakeSessionStatus): void
+  /** Make `GET /sessions/:id` answer `404`, as if the daemon had never heard
+   *  of the session or had `DELETE`d its bookkeeping row (`forget`). */
+  forgetSession(sessionId: string): void
   close(): Promise<void>
 }
 
@@ -46,7 +56,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 export async function startExtendedFakeDaemon(opts: FakeDaemonOptions = {}): Promise<ExtendedFakeDaemon> {
   const inner: FakeDaemon = await startFakeDaemon(opts)
-  const aliveSessions = new Set<string>()
+  const sessionStatus = new Map<string, FakeSessionStatus>()
   const history = new Map<string, FanoutRecordLike[]>()
   const subscribers = new Map<string, Set<ServerResponse>>()
 
@@ -72,6 +82,13 @@ export async function startExtendedFakeDaemon(opts: FakeDaemonOptions = {}): Pro
     for (const res of subscribersFor(sessionId)) {
       res.write(frame)
     }
+  }
+
+  function forgetSession(sessionId: string): void {
+    sessionStatus.delete(sessionId)
+    for (const subscriber of subscribersFor(sessionId)) subscriber.end()
+    subscribers.delete(sessionId)
+    history.delete(sessionId)
   }
 
   function proxy(req: IncomingMessage, res: ServerResponse, path: string, search: string): Promise<void> {
@@ -104,29 +121,29 @@ export async function startExtendedFakeDaemon(opts: FakeDaemonOptions = {}): Pro
                 const parsed: unknown = text.length > 0 ? JSON.parse(text) : undefined
                 if (isRecord(parsed)) {
                   const id = stringField(parsed, "id")
-                  if (id !== undefined) aliveSessions.add(id)
+                  if (id !== undefined) sessionStatus.set(id, "running")
                 }
               }
-              const forgetMatch = /^\/sessions\/([^/]+)$/.exec(path)
               // `POST /sessions/:id/kill` is the route that actually ends a
-              // session (real `agentSession.close()`, per DAEMON-NOTES.md);
-              // `DELETE /sessions/:id` only forgets the daemon's bookkeeping
-              // row. Both are treated as "gone" here so a test can simulate
-              // either an ordinary `RoomService.doPause` (which calls kill)
-              // or a direct, out-of-band kill (Rehearsal Run 1, Finding 2) —
-              // same daemon-side effect on `GET /sessions/:id` either way.
+              // session (real `agentSession.close()`, per DAEMON-NOTES.md) —
+              // the daemon keeps the bookkeeping row and answers `GET
+              // /sessions/:id` with `200 {status:"killed"}` afterwards, it
+              // does NOT 404 (that's what made the out-of-band-kill bug ship
+              // green: the old fake modeled a kill as a 404, which already
+              // read as dead). `DELETE /sessions/:id` is the one that forgets
+              // the row entirely and does 404 afterward.
+              const forgetMatch = /^\/sessions\/([^/]+)$/.exec(path)
               const killMatch = /^\/sessions\/([^/]+)\/kill$/.exec(path)
-              const deadSessionId =
-                forgetMatch !== null && req.method === "DELETE" && status < 300
-                  ? forgetMatch[1]
-                  : killMatch !== null && req.method === "POST" && status < 300
-                    ? killMatch[1]
-                    : undefined
-              if (deadSessionId !== undefined) {
-                aliveSessions.delete(deadSessionId)
-                for (const subscriber of subscribersFor(deadSessionId)) subscriber.end()
-                subscribers.delete(deadSessionId)
-                history.delete(deadSessionId)
+              if (forgetMatch !== null && req.method === "DELETE" && status < 300) {
+                const id = forgetMatch[1]
+                if (id !== undefined) forgetSession(id)
+              } else if (killMatch !== null && req.method === "POST" && status < 300) {
+                const id = killMatch[1]
+                if (id !== undefined) {
+                  sessionStatus.set(id, "killed")
+                  for (const subscriber of subscribersFor(id)) subscriber.end()
+                  subscribers.delete(id)
+                }
               }
 
               const responseContentType = proxyRes.headers["content-type"]
@@ -150,8 +167,9 @@ export async function startExtendedFakeDaemon(opts: FakeDaemonOptions = {}): Pro
     const aliveMatch = /^\/sessions\/([^/]+)$/.exec(path)
     if (aliveMatch !== null && req.method === "GET") {
       const id = aliveMatch[1]
-      if (id !== undefined && aliveSessions.has(id)) {
-        sendJson(res, 200, { id, status: "running" })
+      const status = id !== undefined ? sessionStatus.get(id) : undefined
+      if (status !== undefined) {
+        sendJson(res, 200, { id, status })
       } else {
         sendJson(res, 404, { error: "not_found" })
       }
@@ -206,6 +224,8 @@ export async function startExtendedFakeDaemon(opts: FakeDaemonOptions = {}): Pro
     requestsReceived: inner.requestsReceived,
     pushRecord,
     subscriberCount: (sessionId: string) => subscribersFor(sessionId).size,
+    setSessionStatus: (sessionId: string, status: FakeSessionStatus) => sessionStatus.set(sessionId, status),
+    forgetSession,
     close: async () => {
       for (const set of subscribers.values()) {
         for (const res of set) res.end()

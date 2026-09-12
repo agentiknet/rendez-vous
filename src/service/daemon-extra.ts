@@ -9,21 +9,39 @@ export interface DaemonExtraOptions {
   readonly token: string | undefined
 }
 
-/** A 200 means the daemon still knows the session; anything else (404, network
- *  failure) is treated as gone, never thrown — callers just boot fresh instead. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/** The daemon's own `SessionStatus` union (`sessions.ts:588`): `"starting" |
+ *  "running" | "exited" | "killed" | "error"`. Only these two count as a
+ *  process the daemon still considers live — the same test `sessions.ts`
+ *  itself uses at every call site that gates on liveness (e.g. `sessions.ts:4809`,
+ *  `:7419-7421`, `:7627`, `:7756`). */
+const LIVE_STATUSES: ReadonlySet<string> = new Set(["running", "starting"])
+
+/** A killed/exited/errored session still answers `GET /sessions/:id` with
+ *  `200` — the daemon keeps the bookkeeping row (only `DELETE` forgets it,
+ *  `docs/DAEMON-NOTES.md` "Session teardown") — so a bare `res.ok` check
+ *  reads a killed session as alive. Out-of-band kill (a daemon-side
+ *  `agent_kill`, a crash, a daemon restart) never runs `doPause`, so this is
+ *  the only place that later notices the death: alive means 200 AND a status
+ *  in `LIVE_STATUSES`; a 404, a malformed body, and a network failure are all
+ *  dead, never thrown — callers just boot fresh (or revive) instead. */
 export async function isSessionAlive(opts: DaemonExtraOptions, sessionId: string): Promise<boolean> {
   const base = opts.baseUrl.endsWith("/") ? opts.baseUrl.slice(0, -1) : opts.baseUrl
   const headers: Record<string, string> = opts.token !== undefined ? { authorization: `Bearer ${opts.token}` } : {}
   try {
     const res = await fetch(`${base}/sessions/${sessionId}`, { headers })
-    return res.ok
-  } catch {
+    if (!res.ok) return false
+    const body: unknown = await res.json()
+    if (!isRecord(body)) return false
+    const status = typeof body.status === "string" ? body.status : undefined
+    return status !== undefined && LIVE_STATUSES.has(status)
+  } catch (error) {
+    console.error(`isSessionAlive: treating session ${sessionId} as dead after a network error: ${error instanceof Error ? error.message : String(error)}`)
     return false
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 /** The session descriptor's own `status` field (e.g. `"running"`), or
