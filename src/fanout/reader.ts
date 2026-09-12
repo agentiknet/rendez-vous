@@ -1,12 +1,20 @@
 import type { RoomStore } from "../rooms/store.ts"
 import type { Ask, Member, Room } from "../rooms/types.ts"
-import { publicArtifactUrl } from "../service/artifact-proxy.ts"
+import type { TtsProvider } from "../media/openai.ts"
+import { publicArtifactUrl, publicMediaUrl } from "../service/artifact-proxy.ts"
+import type { MediaRecord, SaveMediaInput } from "../service/media-store.ts"
 import {
   attachmentFallbackText,
   hasSendAttachment,
   type OutboundAttachment,
 } from "../service/transports.ts"
-import { attachmentUrl, parseAttachments, type ParsedAttachment } from "./attach.ts"
+import { attachmentUrl, parseAttachments, parseSpeech, type ParsedAttachment } from "./attach.ts"
+
+/** Structural subset of `MediaStore` the speech path needs — injectable so
+ *  tests never touch a real directory. */
+export interface SpeechMediaStore {
+  save(roomCode: string, data: Buffer, opts: SaveMediaInput): Promise<MediaRecord>
+}
 import { renderForTier } from "./render.ts"
 import type { FanoutRecord, Transport } from "./types.ts"
 import { askMarkerForOthers, askTextForTarget, resolveAskSegments, type ResolvedTurnSegment } from "./ask.ts"
@@ -87,11 +95,26 @@ export class RoomFanout {
   /** Per-room, in-process only: reset on restart, so the first flush after boot is always treated as an artifact change (see start of `flush`). Keyed on the PUBLIC artifact URL (`publicArtifactUrl`), not the raw box URL — the public one never changes for a room, so a box replacement (architecture.md §9.3b) no longer trips this and re-sends. */
   private readonly lastArtifactUrl: Map<string, string | undefined> = new Map()
 
-  constructor(opts: { store: RoomStore; transport: Transport; source: Source; isAlive?: IsAlive }) {
+  /** Both undefined unless TTS is configured. `[[say …]]` needs somewhere to
+   *  put the rendered audio (the media store, which the artifact-independent
+   *  `/r/:code/media/:id` route serves) as well as something to render it. */
+  private readonly tts: TtsProvider | undefined
+  private readonly mediaStore: SpeechMediaStore | undefined
+
+  constructor(opts: {
+    store: RoomStore
+    transport: Transport
+    source: Source
+    isAlive?: IsAlive
+    tts?: TtsProvider
+    mediaStore?: SpeechMediaStore
+  }) {
     this.store = opts.store
     this.transport = opts.transport
     this.source = opts.source
     this.isAlive = opts.isAlive ?? (async () => true)
+    this.tts = opts.tts
+    this.mediaStore = opts.mediaStore
   }
 
   start(code: string): void {
@@ -195,6 +218,86 @@ export class RoomFanout {
   /** One attachment to one member. Never throws: a provider rejecting a file
    *  must not take down the rest of the turn's delivery, and the failure is
    *  logged rather than swallowed. */
+  /**
+   * Render each `[[say …]]` into a real voice note, once per turn rather than
+   * once per member: the audio is identical for everyone, and TTS is the
+   * expensive part.
+   *
+   * Returns `[]` when TTS is not configured or a render fails — and in the
+   * failure case the words are NOT lost, because `renderSpeech`'s caller has
+   * already put them in the caption. A room where the voice note fails should
+   * read the sentence, not fall silent.
+   */
+  private async renderSpeech(code: string, spoken: readonly string[]): Promise<OutboundAttachment[]> {
+    if (spoken.length === 0) return []
+    const tts = this.tts
+    const mediaStore = this.mediaStore
+    if (tts === undefined || mediaStore === undefined) {
+      // Nothing to render with. The text is already back in the caption path
+      // below, so members still get the words.
+      return spoken.map((text) => ({
+        url: "",
+        filename: "",
+        mimeType: "",
+        kind: "audio" as const,
+        caption: text,
+      }))
+    }
+
+    const notes: OutboundAttachment[] = []
+    for (const text of spoken) {
+      try {
+        const audio = await tts.speak(text)
+        if (audio === undefined) {
+          notes.push({ url: "", filename: "", mimeType: "", kind: "audio", caption: text })
+          continue
+        }
+        const record = await mediaStore.save(code, Buffer.from(audio.bytes), {
+          contentType: audio.mime,
+          pages: 1,
+        })
+        notes.push({
+          url: publicMediaUrl(code, record.id),
+          filename: `voice.${audio.extension}`,
+          mimeType: audio.mime,
+          kind: "audio",
+          caption: text,
+        })
+      } catch (error: unknown) {
+        console.error(
+          `tts failed for room ${code}: ${error instanceof Error ? error.message : String(error)}`,
+        )
+        notes.push({ url: "", filename: "", mimeType: "", kind: "audio", caption: text })
+      }
+    }
+    return notes
+  }
+
+  /** Deliver an already-built attachment. A voice note whose render failed
+   *  has no URL — it is sent as its caption, so the sentence still arrives. */
+  private async deliverAttachment(member: Member, code: string, attachment: OutboundAttachment): Promise<void> {
+    try {
+      if (attachment.url.length === 0) {
+        const text = attachment.caption
+        if (text !== undefined && text.length > 0) {
+          await this.transport.send(member, { text, artifactUrl: undefined })
+        }
+        return
+      }
+      if (hasSendAttachment(this.transport)) {
+        await this.transport.sendAttachment(member, attachment)
+        return
+      }
+      await this.transport.send(member, { text: attachmentFallbackText(attachment), artifactUrl: undefined })
+    } catch (error: unknown) {
+      console.error(
+        `failed to deliver attachment to ${member.displayName} in ${code}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
+  }
+
   private async sendAttachment(member: Member, code: string, parsed: ParsedAttachment): Promise<void> {
     const attachment: OutboundAttachment = {
       url: attachmentUrl(publicArtifactUrl(code), parsed.name),
@@ -222,11 +325,14 @@ export class RoomFanout {
     const room = this.store.get(code)
     if (room === undefined) return
 
-    // `[[attach …]]` markers come out FIRST, before whisper/ask parsing, so an
-    // attachment inside a whisper block is not silently swallowed with it and
-    // the marker never reaches a member as literal text. The files themselves
-    // are already served by the artifact proxy — see src/fanout/attach.ts.
-    const { text, attachments } = parseAttachments(rawText)
+    // `[[attach …]]` and `[[say …]]` come out FIRST, before whisper/ask
+    // parsing, so a marker inside a whisper block is not silently swallowed
+    // with it and never reaches a member as literal text. Attached files are
+    // already served by the artifact proxy; spoken text is rendered below.
+    const withoutAttachments = parseAttachments(rawText)
+    const { text, spoken } = parseSpeech(withoutAttachments.text)
+    const attachments = withoutAttachments.attachments
+    const voiceNotes = await this.renderSpeech(code, spoken)
 
     // The raw `room.artifactUrl` is the box's own ephemeral URL — never sent
     // to a member (architecture.md §9.3b). Everyone gets the room-code-keyed
@@ -266,6 +372,9 @@ export class RoomFanout {
         // file, even though `renderForTier` had no text to render.
         for (const attachment of attachments) {
           await this.sendAttachment(member, code, attachment)
+        }
+        for (const note of voiceNotes) {
+          await this.deliverAttachment(member, code, note)
         }
       }),
     )

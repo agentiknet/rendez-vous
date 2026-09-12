@@ -87,6 +87,9 @@ function capabilityLines(opts?: { appDir: string }): string[] {
     lines.push(
       `To SEND someone a file — a PDF, an image, a chart, an audio clip — write it into ${opts.appDir}/.agentproto/ui/ and then put "[[attach <filename> <optional one-line caption>]]" on its own line in your reply. Everyone in the room receives it as a real attachment, not a link. The filename must have no spaces and no directory traversal. Use this whenever someone asks you for a document or a picture: do not paste a long URL and do not claim you cannot send files.`,
     )
+    lines.push(
+      'To reply with a VOICE NOTE, put "[[say <the sentence to speak>]]" on its own line. It is spoken aloud and delivered as playable audio; the same words also reach anyone who cannot play it, so never repeat the sentence outside the marker. Keep a spoken line to one or two sentences — it is listened to, not skimmed. Use it when someone sends YOU a voice note, or asks you to speak.',
+    )
   }
   return lines
 }

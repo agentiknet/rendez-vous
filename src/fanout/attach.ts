@@ -100,6 +100,51 @@ export function sanitizeName(raw: string): string | undefined {
   return joined.length === 0 ? undefined : joined
 }
 
+const SAY_LINE = /^[ \t]*\[\[say[ \t]+([^\]]+)\]\][ \t]*$/i
+
+export interface ParsedSpeech {
+  /** The turn text with every `[[say …]]` line removed. */
+  readonly text: string
+  /** What the agent asked to say aloud, in order. */
+  readonly spoken: readonly string[]
+}
+
+/**
+ * `[[say …]]` — the agent replying with an actual voice note.
+ *
+ * Same shape as `[[attach …]]`, and deliberately a separate marker rather
+ * than an option on it: an attachment names a file that already exists, this
+ * names text that has to be rendered. Keeping them apart means a TTS outage
+ * degrades one and not the other.
+ *
+ * The spoken text is REMOVED from the broadcast text, not duplicated: hearing
+ * a sentence and reading it twice is worse than either alone. A member on a
+ * tier that cannot play audio still gets it, because the caption carries the
+ * same words.
+ */
+export function parseSpeech(text: string): ParsedSpeech {
+  const spoken: string[] = []
+  const kept: string[] = []
+
+  for (const line of text.split("\n")) {
+    const match = SAY_LINE.exec(line)
+    if (match === null) {
+      kept.push(line)
+      continue
+    }
+    const body = match[1]?.trim()
+    if (body === undefined || body.length === 0) {
+      // Nothing to speak. Leave the marker visible rather than dropping the
+      // line, so an empty `[[say]]` is a bug someone can see.
+      kept.push(line)
+      continue
+    }
+    spoken.push(body)
+  }
+
+  return { text: kept.join("\n").trim(), spoken }
+}
+
 export function parseAttachments(text: string): ParsedAttachments {
   const attachments: ParsedAttachment[] = []
   const kept: string[] = []

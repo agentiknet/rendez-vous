@@ -14,6 +14,7 @@ import type { SessionBooter } from "./booter.ts"
 import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
 import { DeliverableAwareTransport, DeliverableService, parseDeliverableCommand } from "./deliverable.ts"
+import { OpenAiTtsProvider } from "../media/openai.ts"
 import { MediaStore } from "./media-store.ts"
 import { buildSessionRecap } from "./recap.ts"
 import { hasSendMedia } from "./transports.ts"
@@ -213,11 +214,15 @@ export class RoomService {
         agentpush:
           env.agentpushUrl !== undefined ? new AgentpushToolClient({ baseUrl: env.agentpushUrl, apiKey: env.agentpushKey }) : undefined,
       })
+    // TTS is optional: without a key, `[[say …]]` degrades to the sentence as
+    // text rather than disappearing (src/fanout/reader.ts's `renderSpeech`).
+    const openaiKey = env.openaiApiKey
     this.fanout = new RoomFanout({
       store: this.store,
       transport: new DeliverableAwareTransport(this.transport, this.deliverable, this.store),
       source: (sessionId, since, signal) => this.client.events(sessionId, since, signal),
       isAlive: (sessionId) => isSessionAlive(this.daemon, sessionId),
+      ...(openaiKey !== undefined ? { tts: new OpenAiTtsProvider(openaiKey), mediaStore: this.mediaStore } : {}),
     })
   }
 

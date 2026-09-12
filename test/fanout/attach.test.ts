@@ -8,7 +8,7 @@
 
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { attachmentUrl, kindAndMimeFor, parseAttachments, sanitizeName } from "../../src/fanout/attach.ts"
+import { attachmentUrl, kindAndMimeFor, parseAttachments, parseSpeech, sanitizeName } from "../../src/fanout/attach.ts"
 
 test("an attach marker is lifted out of the turn and never reaches a member as text", () => {
   const { text, attachments } = parseAttachments(
@@ -96,6 +96,58 @@ test("kind and mime are derived from the extension, with a safe default", () => 
   // one, and guessing "image" for a non-image is how a provider hard-errors.
   assert.deepEqual(kindAndMimeFor("a.zzz"), { kind: "document", mime: "application/octet-stream" })
   assert.deepEqual(kindAndMimeFor("README"), { kind: "document", mime: "application/octet-stream" })
+})
+
+// --- [[say …]] — the agent replying with a voice note --------------------
+
+test("a say marker is lifted out and its text captured", () => {
+  const { text, spoken } = parseSpeech(
+    ["Sure — here's the short version.", "[[say The Lisbon offsite is in March.]]", "Ping me if that changes."].join("\n"),
+  )
+
+  assert.equal(text, "Sure — here's the short version.\nPing me if that changes.")
+  assert.deepEqual(spoken, ["The Lisbon offsite is in March."])
+})
+
+test("spoken text is removed from the broadcast, not duplicated", () => {
+  // Hearing a sentence and reading it immediately below is worse than either
+  // alone. The words still reach a member who cannot play audio, via the
+  // caption the fan-out attaches.
+  const { text, spoken } = parseSpeech("[[say Budget is twelve thousand euros.]]")
+
+  assert.equal(text, "")
+  assert.deepEqual(spoken, ["Budget is twelve thousand euros."])
+})
+
+test("several say markers keep their order", () => {
+  const { spoken } = parseSpeech(["[[say First point.]]", "[[say Second point.]]"].join("\n"))
+  assert.deepEqual(spoken, ["First point.", "Second point."])
+})
+
+test("an empty say marker stays visible rather than silently doing nothing", () => {
+  const { text, spoken } = parseSpeech("[[say    ]]")
+  assert.equal(spoken.length, 0)
+  assert.equal(text, "[[say    ]]")
+})
+
+test("say is only honoured on its own line, like attach", () => {
+  const { text, spoken } = parseSpeech("write [[say hello]] to speak")
+  assert.equal(spoken.length, 0)
+  assert.equal(text, "write [[say hello]] to speak")
+})
+
+test("attach and say coexist in one turn without eating each other", () => {
+  const first = parseAttachments(
+    ["Here you go.", "[[attach deck.pdf]]", "[[say I have sent the deck over.]]"].join("\n"),
+  )
+  const second = parseSpeech(first.text)
+
+  assert.deepEqual(
+    first.attachments.map((a) => a.name),
+    ["deck.pdf"],
+  )
+  assert.deepEqual(second.spoken, ["I have sent the deck over."])
+  assert.equal(second.text, "Here you go.")
 })
 
 test("the attachment URL is room-keyed and percent-encoded per segment", () => {

@@ -27,8 +27,10 @@ function fail(message: string): never {
   process.exit(1)
 }
 
-const apiKey = env.openaiApiKey
-if (apiKey === undefined) fail("RDV_OPENAI_API_KEY is not set — nothing to probe")
+// `?? fail(...)` rather than an `if`: TypeScript does not carry a module-level
+// narrowing into the function bodies below, and `fail` returning `never` makes
+// the expression itself `string`.
+const apiKey: string = env.openaiApiKey ?? fail("RDV_OPENAI_API_KEY is not set — nothing to probe")
 
 const SPOKEN = "The Lisbon offsite is in March and the budget is twelve thousand euros."
 
