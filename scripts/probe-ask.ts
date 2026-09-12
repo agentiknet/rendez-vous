@@ -70,12 +70,13 @@ async function main(): Promise<void> {
   const client = new DaemonClient(daemonOpts)
   let sessionId: string | undefined
   let collector: AbortController | undefined
+  let service: RoomService | undefined
 
   try {
     const store = await RoomStore.open(dir)
     const booter = new LocalBooter(client, daemonOpts)
     const transport = new MemoryTransport()
-    const service = new RoomService({ store, client, booter, transport, daemon: daemonOpts })
+    service = new RoomService({ store, client, booter, transport, daemon: daemonOpts })
 
     console.log("Julie sends: new")
     const created = await service.handleInbound(julie("new"))
@@ -217,6 +218,7 @@ async function main(): Promise<void> {
     }
   } finally {
     collector?.abort()
+    await service?.stop()
     if (sessionId !== undefined) {
       await client.kill(sessionId).catch(() => undefined)
     }
