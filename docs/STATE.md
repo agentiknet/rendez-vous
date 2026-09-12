@@ -166,9 +166,10 @@ https://github.com/agentiknet/rendez-vous.
    §2.5). BUILD IN PROGRESS: executor rdv-middleman (`sess_8389db7e`, GLM)
    builds §7 steps i (Ask record on Room), ii (`[[ask <name>]]` parser and
    marker in fan-out), iii (answer tagging on fan-in, `skip`) and vi (opening
-   prompt), one commit per step. NEXT executor after it lands: steps iv (web
-   "Outstanding" panel, `src/web/**` + `/r/:code/state`) and v (nudge and
-   proceed timers with the never-answered test).
+   prompt), one commit per step; step i landed (`b793097`). Step iv (web
+   "Outstanding" panel) runs in parallel on rdv-ask-panel (`sess_51add8b9`).
+   NEXT executor once rdv-middleman lands: step v (nudge and proceed timers,
+   `skip`, service-originated proceed turn, the never-answered test).
 7. Multimodal — SPEC DONE (`docs/MULTIMODAL.md`); INGRESS DONE (`b769180`):
    inbound voice and images become text plus a stored media ref before enqueue,
    attribution `[Name · channel · voice|image]`, served by `GET /r/:code/media/:id`;
@@ -220,6 +221,8 @@ re-proven on a phone after `4e73786`.
 - `sess_8389db7e` rdv-middleman, GLM: owns `src/rooms/types.ts`, `src/rooms/store.ts`,
   `src/fanout/**`, `src/service/room-service.ts`, prompt text in `booter.ts`
   (step vi, last), their tests. Fenced from web, http.ts, deliverable, sandbox.
+- `sess_51add8b9` rdv-ask-panel, GLM: Middleman step iv only; owns `src/web/**`,
+  the `GET /r/:code/state` route in `http.ts`, `test/web/**`, `test/service/http.test.ts`.
 - `sess_636d22ec` rdv-up-reconnect-pause, GLM: agentproto worktree
   `reconnect-pause` only (upstream PR for finding #3).
 - Retired 03:13–03:20 UTC after verification: rdv-polish-gaps, rdv-room-page,
