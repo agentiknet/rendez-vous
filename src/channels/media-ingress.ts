@@ -72,8 +72,14 @@ export interface IngressStore {
  *  envelope carried no URL — every Telegram voice note and photo. Returns a
  *  reason instead of throwing; see `src/channels/telegram-media.ts`. */
 export interface MediaReferenceResolver {
+  /** `channel` is the provider that ISSUED the reference (`telegram`,
+   *  `whatsapp`, …). It is not decoration: an attachment id is only
+   *  meaningful to its own provider, and a resolver that has to guess sends
+   *  Telegram file_ids to Meta and calls the result a platform limit. The
+   *  envelope always knows it, so it is always passed. */
   resolve(
     providerMediaId: string,
+    channel: string,
   ): Promise<{ ok: true; bytes: Uint8Array; mime: string | undefined } | { ok: false; reason: string }>
 }
 
@@ -205,7 +211,7 @@ export async function normalizeInboundMedia(
         acquireError = `no fetchable URL from the provider (reference: ${reference})`
       } else {
         try {
-          const resolved = await deps.resolveReference.resolve(reference)
+          const resolved = await deps.resolveReference.resolve(reference, envelope.provider)
           if (resolved.ok) {
             if (resolved.bytes.byteLength > maxBytes) {
               acquireError = `too large (${resolved.bytes.byteLength} > ${maxBytes} bytes)`

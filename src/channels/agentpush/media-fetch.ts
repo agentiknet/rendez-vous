@@ -42,8 +42,6 @@ export type MediaFetch = (
 export interface AgentpushMediaFetcherOptions {
   readonly baseUrl: string
   readonly apiKey: string | undefined
-  /** Channel this fetcher resolves for — `telegram`, `whatsapp`, … Passed
-   *  straight through; agentpush picks the provider from the workspace. */
   readonly fetch?: MediaFetch
   readonly maxBytes?: number
 }
@@ -85,8 +83,20 @@ export class AgentpushMediaFetcher {
     this.maxBytes = opts.maxBytes
   }
 
-  /** Never throws. `providerMediaId` is the envelope's own reference. */
-  async resolve(providerMediaId: string): Promise<ResolvedMedia> {
+  /**
+   * Never throws. `providerMediaId` is the envelope's own reference, and
+   * `channel` is the provider that issued it.
+   *
+   * `channel` is not optional in practice. An attachment id only means
+   * something to the provider that minted it, and agentpush's REST tool
+   * surface otherwise resolves ONE static provider headed by WhatsApp — so
+   * once the WhatsApp account was added for this demo, every Telegram
+   * `file_id` was handed to Meta's Graph API, which answered
+   * `Unsupported get request`. The member was told their voice note "could
+   * not be fetched" and the agent generalised it into "I cannot hear audio".
+   * The channel was known at every step; nothing carried it.
+   */
+  async resolve(providerMediaId: string, channel?: string): Promise<ResolvedMedia> {
     const headers: Record<string, string> = { "content-type": "application/json" }
     if (this.apiKey !== undefined) headers["authorization"] = `Bearer ${this.apiKey}`
 
@@ -96,7 +106,11 @@ export class AgentpushMediaFetcher {
         headers,
         // `message_id` is ignored by both chat providers (a file_id / media id
         // is self-contained) but the tool's schema requires it.
-        body: JSON.stringify({ message_id: providerMediaId, attachment_id: providerMediaId }),
+        body: JSON.stringify({
+          message_id: providerMediaId,
+          attachment_id: providerMediaId,
+          ...(channel !== undefined ? { channel } : {}),
+        }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       })
       if (!res.ok) {

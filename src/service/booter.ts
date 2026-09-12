@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url"
 import type { DaemonClient } from "../daemon/client.ts"
 import { env } from "../env.ts"
+import { joinLinks } from "../links/index.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import type { Room } from "../rooms/types.ts"
 import { bootRoomSession, isSandboxNotFoundError, resumeRoomSession, type OrphanSandboxKiller } from "../sandbox/boot.ts"
@@ -69,7 +70,40 @@ export interface SessionBooter {
  *  `appDir` line, so after any pause the room stopped being able to whisper
  *  and the agent no longer knew which file backed the artifact — with no
  *  error anywhere (the `docs/UPSTREAM.md` pattern, found live 2026-09-12). */
-function capabilityLines(opts?: { appDir: string }): string[] {
+/**
+ * How a member invites someone else into the room.
+ *
+ * The agent lives in a sandbox with no tool back into this service, so it
+ * knows only what the prompt tells it. Asked "how does my colleague join?",
+ * it had nothing and improvised — the room code exists, the web page exists,
+ * the wa.me and t.me deep links exist, and none of it reached the one
+ * participant everybody was asking. The links are a pure function of the room
+ * code, so they are computed here and stated plainly.
+ *
+ * Channels with no configured number or bot are simply omitted: naming a
+ * `wa.me` link for a WhatsApp account that does not exist would be worse than
+ * saying nothing.
+ */
+function invitationLines(code: string): string[] {
+  const links = joinLinks(code, {
+    publicUrl: env.publicUrl,
+    whatsappNumber: env.whatsappNumber,
+    telegramBot: env.telegramBot,
+    smsNumber: env.smsNumber,
+  })
+
+  const ways = [`open ${links.web} in a browser (no app, no account)`]
+  if (links.whatsapp !== undefined) ways.push(`on WhatsApp: ${links.whatsapp}`)
+  if (links.telegram !== undefined) ways.push(`on Telegram: ${links.telegram}`)
+  if (links.sms !== undefined) ways.push(`by SMS: ${links.sms}`)
+
+  return [
+    `ANYONE CAN BE INVITED INTO THIS ROOM, and you are the one who knows how. When a member asks how to add someone — a colleague, a friend, a client — give them the ways in: ${ways.join("; ")}. Each link is preconfigured for this room, so the person who taps it joins THIS conversation.`,
+    `The room code is ${code}. Someone already talking to the bot on any channel joins by sending "join ${code}" — that is also how a member moves themselves from one room to another, and moving means leaving the room they were in. Anyone who joins sees everything said from then on, so say in one line that a new person has arrived rather than letting the room wonder.`,
+  ]
+}
+
+function capabilityLines(code: string, opts?: { appDir: string }): string[] {
   const lines = [
     "Several humans drive this one session together, each from their own device — a phone, email, or a laptop.",
     'Every message you receive is prefixed with its sender AND the channel they are on, like "[Alice · telegram] ..." or "[Alice · whatsapp] ...", so you always know who is speaking and where.',
@@ -83,6 +117,7 @@ function capabilityLines(opts?: { appDir: string }): string[] {
     'Voice notes and images reach you already converted to text, and you must read them as what the member said or sent. A line like "(voice note) Can you hear me? media:abc123" IS a successful transcription of their audio — answer the words, never claim you cannot hear or play audio. "(image) a screenshot of a login form  media:abc123" is likewise a real description of their picture. Only a line that explicitly says it FAILED — "(voice note, could not be fetched: …)" or "(…, transcription unavailable, …)" — means the media could not be read, and only then should you say so and ask them to type it. Never generalise a past failure into a standing limitation: judge each line on what it says.',
     "Keep replies short: some members are reading you on a phone screen.",
   ]
+  lines.push(...invitationLines(code))
   if (opts !== undefined) {
     lines.push(
       `Members see the room's artifact page at the artifact URL. You have a render_artifact MCP tool: call it with the document data (a list of typed blocks — the tool's inputSchema shows the shape) and it renders the branded live page every member can open AND the deliverable PDF in one go. Calling render_artifact is how members see anything you produce; if it returns an error, the canvakit message is verbatim — read it, fix the data, call it again.`,
@@ -98,7 +133,7 @@ function capabilityLines(opts?: { appDir: string }): string[] {
 }
 
 export function openingPrompt(room: Room, opts?: { appDir: string }): string {
-  const lines = [`You are the shared agent for Rendez-vous room ${room.code}.`, ...capabilityLines(opts)]
+  const lines = [`You are the shared agent for Rendez-vous room ${room.code}.`, ...capabilityLines(room.code, opts)]
   lines.push(`Reply to this message with exactly one short line and nothing else: "Room ${room.code} is open. Say what you want built."`)
   return lines.join(" ")
 }
@@ -139,7 +174,7 @@ export function resumePrompt(room: Room, opts?: { appDir?: string; recap?: strin
     )
   }
 
-  lines.push(...capabilityLines(appDirOpts))
+  lines.push(...capabilityLines(room.code, appDirOpts))
 
   if (recap === undefined) {
     lines.push(

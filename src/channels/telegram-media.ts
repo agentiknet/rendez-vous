@@ -86,7 +86,15 @@ export class TelegramMediaResolver {
   }
 
   /** `file_id` → bytes. Never throws. */
-  async resolve(fileId: string): Promise<ResolvedMedia> {
+  /** Refuses any channel but Telegram by name rather than by outcome. Handed
+   *  a WhatsApp media id once, this resolver called `getFile` on it, Telegram
+   *  rejected it, and the member was told their voice note could not be
+   *  fetched — our own mis-wiring wearing a platform limit's clothes. A
+   *  resolver that knows which channel it serves must say so out loud. */
+  async resolve(fileId: string, channel?: string): Promise<ResolvedMedia> {
+    if (channel !== undefined && channel.toLowerCase() !== "telegram") {
+      return { ok: false, reason: `telegram resolver cannot resolve a ${channel} reference` }
+    }
     let filePath: string
     try {
       const res = await this.doFetch(`${this.apiBase}/bot${this.token}/getFile?file_id=${encodeURIComponent(fileId)}`, {
