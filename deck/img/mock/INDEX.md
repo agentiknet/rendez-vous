@@ -8,7 +8,14 @@ avatars and the villa photo, called out below. Room code `RDV-7F3K`, bot handle
 `@Agentpush_agentik_bot`, public host `rdv.clipgen.co` are consistent across
 every asset.
 
-## Cast portraits (OpenAI gpt-image-1)
+## Cast portraits (OpenAI gpt-image-2.5-sunburst)
+
+Generated with `gpt-image-2.5-sunburst` — it worked on the first call (HTTP
+200), so none of the documented fallbacks (`gpt-image-2.5-flare` →
+`gpt-image-2` → `gpt-image-1`) were needed. All three image-model outputs
+below (two avatars + villa) were generated in the same batch of prompts with
+this one model, for style consistency with each other and with the three
+existing deck illustrations.
 
 - `avatar-julie.png` — Julie, square 1024×1024 Pixar-style portrait, brown bob,
   mustard sweater. Matches the cast established in `p2-two-phones.png` etc.
@@ -18,6 +25,17 @@ every asset.
 - `villa-photo.png` — Basque-country surf villa, cropped to a 4:3 chat-bubble
   photo. Embedded in `tg-conflict.png`, `wa-julie-conflict.png`,
   `tg-tom-conflict.html`, `deliverable-gate.png`, and the artifact document.
+
+**Text-legibility probe (one call, not reused elsewhere):** asked
+`gpt-image-2.5-sunburst` for a phone screenshot of a chat bubble containing
+the short French sentence "Budget 12k max, train uniquement." The text came
+back genuinely clean and correctly spelled, along with several other UI
+strings in the same image ("Aujourd'hui", "10:24", "En ligne", "Message") —
+a real capability jump from gpt-image-1, which reliably garbled text at this
+length. This does not change anything in this asset set: every chat mock
+here is still HTML rendered by headless Chrome, because that's what let me
+fix a wrong euro amount or a badge with one edit instead of a re-roll. Worth
+knowing for future work where exact copy isn't required.
 
 ## Deck assets (in storyboard order)
 
