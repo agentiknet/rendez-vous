@@ -5,12 +5,18 @@ import type { Member } from "../rooms/types.ts"
  *  with `hasSendMedia`/`"sendMedia" in transport` rather than assuming it —
  *  most transports (console, memory, room-web fan-out) don't have it. */
 export interface MediaTransport extends Transport {
-  sendMedia?(member: Member, png: Uint8Array, caption: string): Promise<void>
+  /** `publicUrl`, when given, is a already-published URL for the same
+   *  bytes (`publicMediaUrl`). Providers with no upload path of their own —
+   *  Telegram — can ONLY send media that way, so omitting it is what makes
+   *  an image silently degrade to text there. */
+  sendMedia?(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<void>
 }
 
 export function hasSendMedia(
   transport: Transport,
-): transport is Transport & { sendMedia(member: Member, png: Uint8Array, caption: string): Promise<void> } {
+): transport is Transport & {
+  sendMedia(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<void>
+} {
   return "sendMedia" in transport && typeof transport.sendMedia === "function"
 }
 
@@ -29,6 +35,7 @@ export interface RecordedMediaSend {
   member: Member
   png: Uint8Array
   caption: string
+  publicUrl: string | undefined
 }
 
 /** Records every send in order; used by tests and the no-phone simulator.
@@ -42,8 +49,8 @@ export class MemoryTransport implements MediaTransport {
     this.sends.push({ member, message })
   }
 
-  async sendMedia(member: Member, png: Uint8Array, caption: string): Promise<void> {
-    this.mediaSends.push({ member, png, caption })
+  async sendMedia(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<void> {
+    this.mediaSends.push({ member, png, caption, publicUrl })
   }
 }
 
@@ -76,10 +83,10 @@ export class CompositeTransport implements MediaTransport {
     await this.routeFor(member).send(member, message)
   }
 
-  async sendMedia(member: Member, png: Uint8Array, caption: string): Promise<void> {
+  async sendMedia(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<void> {
     const target = this.routeFor(member)
     if (hasSendMedia(target)) {
-      await target.sendMedia(member, png, caption)
+      await target.sendMedia(member, png, caption, publicUrl)
       return
     }
     await target.send(member, { text: caption, artifactUrl: undefined })

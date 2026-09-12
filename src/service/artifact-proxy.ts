@@ -48,6 +48,17 @@ export function publicArtifactUrl(code: string): string {
   return `${env.publicUrl}/r/${code}/artifact/`
 }
 
+/** The public, stable URL for one stored media record — `GET /r/:code/media/:id`.
+ *
+ *  This is not only a convenience for links in text. It is the ONLY way an
+ *  image reaches a Telegram member: that driver has no buffer or base64
+ *  upload path and can send media exclusively by public URL
+ *  (`src/channels/agentpush/outbound.ts`). Bytes we hold locally are
+ *  unsendable there until they have one of these. */
+export function publicMediaUrl(roomCode: string, mediaId: string): string {
+  return `${env.publicUrl}/r/${roomCode}/media/${mediaId}`
+}
+
 function unavailablePage(): string {
   return (
     "<!doctype html>\n" +

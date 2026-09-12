@@ -9,7 +9,7 @@ import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
 import { ensureMembership, handleCommand, parseCommand } from "../rooms/commands.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import type { Address, Member, Room, Tier } from "../rooms/types.ts"
-import { publicArtifactUrl } from "./artifact-proxy.ts"
+import { publicArtifactUrl, publicMediaUrl } from "./artifact-proxy.ts"
 import type { SessionBooter } from "./booter.ts"
 import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
@@ -476,7 +476,28 @@ export class RoomService {
     const transport = this.transport
     if (!hasSendMedia(transport)) return
     const png = await qrPng(links.web)
-    await transport.sendMedia(member, png, `Scan to join ${room.code}`)
+    // Publish the bytes before sending. Telegram has no upload path of its
+    // own and can only send media by public URL, so without this the QR
+    // reaches a Telegram member as the caption alone — a "scan this" with
+    // nothing to scan. Publishing is cheap and the URL is the same one the
+    // deliverable flow already serves.
+    const publicUrl = await this.publishPng(room, png)
+    await transport.sendMedia(member, png, `Scan to join ${room.code}`, publicUrl)
+  }
+
+  /** Store a PNG against the room and return its public URL, or `undefined`
+   *  if it could not be stored — a QR that fails to publish must still go
+   *  out as a caption rather than throwing inside a join. */
+  private async publishPng(room: Room, png: Uint8Array): Promise<string | undefined> {
+    try {
+      const record = await this.mediaStore.save(room.code, Buffer.from(png), {
+        contentType: "image/png",
+        pages: 1,
+      })
+      return publicMediaUrl(room.code, record.id)
+    } catch {
+      return undefined
+    }
   }
 
   private async handleResume(

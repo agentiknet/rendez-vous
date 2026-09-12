@@ -67,16 +67,33 @@ export class AgentpushTransport implements Transport {
     await this.sendText(member.id, provider, member.address.contactRef, message.text)
   }
 
-  /** WhatsApp gets a real upload + media send. Telegram (or any other
-   *  messenger provider) degrades to a caption-only text send — see the
-   *  module doc comment for why that is a verified limitation, not a
-   *  shortcut. */
-  async sendMedia(member: Member, png: Uint8Array, caption: string): Promise<void> {
+  /** Two real paths, one fallback:
+   *
+   *  - **WhatsApp** — upload the bytes (`upload_media`), then send by the
+   *    returned `providerMediaId`.
+   *  - **Telegram and the rest** — no buffer/base64 upload path exists in
+   *    that driver at all; it can only send media by a public
+   *    `content.media[].url`. So when the caller has published the bytes
+   *    (`publicMediaUrl`, served by `GET /r/:code/media/:id`) we send the
+   *    URL and the image actually arrives.
+   *  - **No URL available** — caption-only text, as before. That fallback
+   *    used to be the ONLY behaviour here, which meant every image to a
+   *    Telegram member silently became a line of text. The limitation was
+   *    real; treating it as unfixable was not.
+   */
+  async sendMedia(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<void> {
     const provider = messengerProvider(member.address.provider)
     if (provider === undefined) return
 
     if (provider !== "whatsapp") {
-      await this.sendText(member.id, provider, member.address.contactRef, caption)
+      if (publicUrl === undefined) {
+        await this.sendText(member.id, provider, member.address.contactRef, caption)
+        return
+      }
+      await this.client.call(`member ${member.id}`, "send_message", {
+        to: { channel: provider, address: member.address.contactRef },
+        content: { text: caption, media: [{ type: "image", url: publicUrl, caption }] },
+      })
       return
     }
 

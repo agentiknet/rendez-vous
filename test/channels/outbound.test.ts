@@ -257,7 +257,35 @@ test("sendMedia is unconditionally caption-only for sms — Twilio's driver decl
   }
 })
 
-test("sendMedia falls back to a caption-only send for telegram (no verified media path)", async () => {
+test("sendMedia actually sends the image to telegram when the bytes have a public URL", async () => {
+  // Telegram's driver has no buffer/base64 upload path — it can send media
+  // only by public URL. Publishing the bytes first (publicMediaUrl, served
+  // by GET /r/:code/media/:id) is therefore the difference between a QR
+  // arriving and a "scan this" with nothing to scan.
+  const fake = await startFakeAgentpush()
+  try {
+    const transport = new AgentpushTransport({ baseUrl: fake.url, apiKey: "apk_test" })
+    const png = Uint8Array.from([1, 2, 3])
+    const url = "https://rdv.example.com/r/RDV-7F3K/media/abc-123"
+    await transport.sendMedia(telegramMember(), png, "Scan to join RDV-7F3K", url)
+
+    assert.equal(fake.requests.length, 1, "no upload_media call — telegram has no upload path")
+    const req = fake.requests[0]
+    assert.ok(req)
+    assert.equal(req.path, "/tools/send_message")
+    assert.deepEqual(req.body, {
+      to: { channel: "telegram", address: "123456789" },
+      content: {
+        text: "Scan to join RDV-7F3K",
+        media: [{ type: "image", url, caption: "Scan to join RDV-7F3K" }],
+      },
+    })
+  } finally {
+    await fake.close()
+  }
+})
+
+test("sendMedia falls back to a caption-only send for telegram when there is no public URL", async () => {
   const fake = await startFakeAgentpush()
   try {
     const transport = new AgentpushTransport({ baseUrl: fake.url, apiKey: "apk_test" })

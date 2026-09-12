@@ -88,10 +88,26 @@ export class MediaStore {
     return join(this.baseDir, roomCode, extension.length > 0 ? `${id}.${extension}` : id)
   }
 
+  /** On-disk extension for a stored record. The store used to hardcode
+   *  `"pdf"` for every `save`, which was harmless only as long as the
+   *  deliverable flow (PDFs) was the sole caller — the HTTP route serves
+   *  `record.contentType` regardless. Now that images go through here too,
+   *  a PNG written as `<id>.pdf` is a trap for anyone reading the directory.
+   *  `read` derives it identically, so the two can never disagree. */
+  private extensionFor(contentType: string): string {
+    const type = contentType.split(";")[0]?.trim().toLowerCase() ?? ""
+    if (type === "application/pdf") return "pdf"
+    if (type === "image/png") return "png"
+    if (type === "image/jpeg") return "jpg"
+    if (type === "image/webp") return "webp"
+    if (type === "image/gif") return "gif"
+    return "bin"
+  }
+
   async save(roomCode: string, data: Buffer, opts: SaveMediaInput): Promise<MediaRecord> {
     const id = randomUUID()
     await mkdir(join(this.baseDir, roomCode), { recursive: true })
-    await writeFile(this.filePath(roomCode, id, "pdf"), data)
+    await writeFile(this.filePath(roomCode, id, this.extensionFor(opts.contentType)), data)
     const record: MediaRecord = {
       id,
       roomCode,
@@ -114,7 +130,7 @@ export class MediaStore {
     const record = this.get(roomCode, id)
     if (record === undefined) return undefined
     try {
-      return await readFile(this.filePath(roomCode, id, "pdf"))
+      return await readFile(this.filePath(roomCode, id, this.extensionFor(record.contentType)))
     } catch {
       return undefined
     }
