@@ -68,6 +68,15 @@ export interface IngressStore {
   saveIngress(data: Uint8Array, opts: SaveIngressInput): Promise<IngressMediaRecord>
 }
 
+/** Turns a provider's own reference (`providerMediaId`) into bytes when the
+ *  envelope carried no URL — every Telegram voice note and photo. Returns a
+ *  reason instead of throwing; see `src/channels/telegram-media.ts`. */
+export interface MediaReferenceResolver {
+  resolve(
+    providerMediaId: string,
+  ): Promise<{ ok: true; bytes: Uint8Array; mime: string | undefined } | { ok: false; reason: string }>
+}
+
 export interface NormalizeInboundMediaDeps {
   /** Storage sink for the fetched bytes (and for empty-byte records on a
    *  failed fetch — the reference always lands). */
@@ -76,6 +85,10 @@ export interface NormalizeInboundMediaDeps {
   readonly vision?: VisionProvider
   readonly fetch?: IngressFetch
   readonly maxBytes?: number
+  /** Optional: without it, a URL-less item lands as a visible "could not be
+   *  fetched" line, which is the honest floor. With it, the bytes are
+   *  recovered and transcription/captioning runs as for any other item. */
+  readonly resolveReference?: MediaReferenceResolver
 }
 
 export interface NormalizedInboundMedia {
@@ -169,56 +182,74 @@ export async function normalizeInboundMedia(
     let record: IngressMediaRecord
     let line: string
 
+    // --- acquire the bytes ------------------------------------------------
+    // Two routes in, one outcome shape. Either the envelope carried a URL we
+    // fetch, or it carried only the provider's own reference and a resolver
+    // is configured to turn that into bytes (`resolveReference`). Both end
+    // with `bytes` set, or `acquireError` explaining why not — and the
+    // failure path is identical either way, so a new route can never
+    // accidentally become a silent one.
+    const source = item.url ?? item.providerMediaId ?? ""
+    let bytes: Uint8Array | undefined
+    let acquireError: string | undefined
+    let effectiveMime = item.mimeType
+
     if (item.url === undefined) {
-      // No URL to fetch from — the provider sent only its own reference
-      // (every Telegram voice note and photo, see `parseMedia`). Resolving
-      // it needs that provider's credentials, which this service does not
-      // hold. Land the record and SAY SO: the member sees the turn was
-      // received and why it could not be read, instead of the silence this
-      // path used to produce.
-      const reference = item.providerMediaId ?? "no reference"
-      const reason = `no fetchable URL from the provider (reference: ${reference})`
-      record = await deps.store.saveIngress(new Uint8Array(0), {
-        kind,
-        source: item.providerMediaId ?? "",
-        mime: item.mimeType,
-        error: reason,
-      })
-      line = failureLine(kind, record.mediaId, reason)
+      const reference = item.providerMediaId
+      if (reference === undefined) {
+        acquireError = "no fetchable URL from the provider (no reference)"
+      } else if (deps.resolveReference === undefined) {
+        // The honest floor: no credentials to resolve the reference with, so
+        // the member is told the turn arrived and could not be read, rather
+        // than the silence this path used to produce (docs/UPSTREAM.md §11).
+        acquireError = `no fetchable URL from the provider (reference: ${reference})`
+      } else {
+        try {
+          const resolved = await deps.resolveReference.resolve(reference)
+          if (resolved.ok) {
+            if (resolved.bytes.byteLength > maxBytes) {
+              acquireError = `too large (${resolved.bytes.byteLength} > ${maxBytes} bytes)`
+            } else {
+              bytes = resolved.bytes
+              // The provider's own path knows the real format even when the
+              // envelope's mimeType was absent — and Whisper rejects an
+              // upload whose extension it cannot recognise.
+              if (resolved.mime !== undefined) effectiveMime = resolved.mime
+            }
+          } else {
+            acquireError = resolved.reason
+          }
+        } catch (error: unknown) {
+          acquireError = reasonOf(error)
+        }
+      }
     } else if (item.size !== undefined && item.size > maxBytes) {
-      const reason = `too large (${item.size} > ${maxBytes} bytes)`
-      record = await deps.store.saveIngress(new Uint8Array(0), {
-        kind,
-        source: item.url,
-        mime: item.mimeType,
-        error: reason,
-      })
-      line = failureLine(kind, record.mediaId, reason)
+      acquireError = `too large (${item.size} > ${maxBytes} bytes)`
     } else {
-      let bytes: Uint8Array | undefined
-      let fetchError: string | undefined
       try {
         const response = await doFetch(item.url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
         if (!response.ok) {
-          fetchError = `HTTP ${response.status}`
+          acquireError = `HTTP ${response.status}`
         } else {
           const buffer = await response.arrayBuffer()
           if (buffer.byteLength > maxBytes) {
-            fetchError = `too large (${buffer.byteLength} > ${maxBytes} bytes)`
+            acquireError = `too large (${buffer.byteLength} > ${maxBytes} bytes)`
           } else {
             bytes = new Uint8Array(buffer)
           }
         }
       } catch (error: unknown) {
-        fetchError = reasonOf(error)
+        acquireError = reasonOf(error)
       }
+    }
 
+    {
       if (bytes === undefined) {
-        const reason = fetchError ?? "unknown error"
+        const reason = acquireError ?? "unknown error"
         record = await deps.store.saveIngress(new Uint8Array(0), {
           kind,
-          source: item.url,
-          mime: item.mimeType,
+          source,
+          mime: effectiveMime,
           error: reason,
         })
         line = failureLine(kind, record.mediaId, reason)
@@ -226,13 +257,13 @@ export async function normalizeInboundMedia(
         const data: Uint8Array = bytes
         const outcome =
           kind === "voice"
-            ? await runProvider(() => stt.transcribe(data, item.mimeType))
+            ? await runProvider(() => stt.transcribe(data, effectiveMime))
             : kind === "image"
-              ? await runProvider(() => vision.caption(data, item.mimeType))
+              ? await runProvider(() => vision.caption(data, effectiveMime))
               : undefined
 
         const providerText = outcome !== undefined && outcome.ok ? outcome.text : undefined
-        const saveOpts: SaveIngressInput = { kind, source: item.url, mime: item.mimeType }
+        const saveOpts: SaveIngressInput = { kind, source, mime: effectiveMime }
         if (kind === "voice" && providerText !== undefined) saveOpts.transcript = providerText
         if (kind === "image" && providerText !== undefined) saveOpts.caption = providerText
         record = await deps.store.saveIngress(data, saveOpts)

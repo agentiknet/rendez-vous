@@ -111,6 +111,28 @@ export interface Env {
    *  the fan-in line says so instead (docs/MULTIMODAL.md, "Failure modes
    *  stay visible"). Default 20 MiB. */
   readonly mediaMaxBytes: number
+  /** Telegram bot token, from `RDV_TELEGRAM_BOT_TOKEN`. Undefined when unset,
+   *  which is the safe default.
+   *
+   *  This exists because agentpush hands on inbound Telegram media as a bare
+   *  `file_id` with no fetchable URL, and resolving one requires a `getFile`
+   *  call authenticated with the BOT TOKEN (docs/UPSTREAM.md §11). With this
+   *  set, the service resolves and downloads the bytes itself, so a voice
+   *  note or photo can actually be transcribed or described. With it unset,
+   *  inbound media still lands and is still announced to the room — it just
+   *  says it could not be read.
+   *
+   *  The token never leaves this service: it is used for the `getFile` call
+   *  and the download, and the resulting token-bearing URL is never stored,
+   *  never logged, and never sent to a member. That is exactly the leak
+   *  docs/UPSTREAM.md §11 warns agentpush against introducing. */
+  readonly telegramBotToken: string | undefined
+  /** OpenAI API key, from `RDV_OPENAI_API_KEY`. One key covers all three
+   *  media capabilities: Whisper for inbound speech-to-text, a vision model
+   *  for inbound images, and TTS for the agent's own voice replies. Undefined
+   *  when unset — every path degrades to a visible "unavailable" line rather
+   *  than failing. */
+  readonly openaiApiKey: string | undefined
 }
 
 type Source = Readonly<Record<string, string | undefined>>
@@ -224,6 +246,8 @@ export function loadEnv(source: Source): Env {
     mediaDir: readString(source, "RDV_MEDIA_DIR", ".rdv/media"),
     deliveryAllowlist: readAllowlist(source, "RDV_DELIVERY_ALLOWLIST"),
     mediaMaxBytes: readPositiveInt(source, "RDV_MEDIA_MAX_MB", 20) * 1024 * 1024,
+    telegramBotToken: readOptionalString(source, "RDV_TELEGRAM_BOT_TOKEN"),
+    openaiApiKey: readOptionalString(source, "RDV_OPENAI_API_KEY"),
   })
 }
 

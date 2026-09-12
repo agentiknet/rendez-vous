@@ -1,6 +1,15 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { MessageDedup, parseAgentpushWebhook, parseEmailInbound, type InboundEnvelope } from "../channels/index.ts"
-import { NullProviders, normalizeInboundMedia, type IngressFetch, type SttProvider, type VisionProvider } from "../channels/media-ingress.ts"
+import {
+  NullProviders,
+  normalizeInboundMedia,
+  type IngressFetch,
+  type MediaReferenceResolver,
+  type SttProvider,
+  type VisionProvider,
+} from "../channels/media-ingress.ts"
+import { TelegramMediaResolver } from "../channels/telegram-media.ts"
+import { OpenAiSttProvider, OpenAiVisionProvider } from "../media/openai.ts"
 import type { TranscriptRecord } from "../daemon/records.ts"
 import { env } from "../env.ts"
 import { joinLinks } from "../links/index.ts"
@@ -76,14 +85,15 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /** Injectable media-ingress pieces for the webhook handlers and the media
- *  route (docs/MULTIMODAL.md). Defaults: a `MediaStore` over `env.mediaDir`
- *  and `NullProviders` — real STT/vision providers are NOT wired tonight. */
+ *  route (docs/MULTIMODAL.md). Every default is the degraded-but-visible one,
+ *  and each is upgraded only when the matching credential is configured. */
 export interface HttpMediaHooks {
   mediaStore?: MediaStore
   stt?: SttProvider
   vision?: VisionProvider
   fetch?: IngressFetch
   maxBytes?: number
+  resolveReference?: MediaReferenceResolver
 }
 
 interface MediaIngress {
@@ -92,15 +102,34 @@ interface MediaIngress {
   readonly vision: VisionProvider
   readonly fetch: IngressFetch | undefined
   readonly maxBytes: number | undefined
+  readonly resolveReference: MediaReferenceResolver | undefined
 }
 
+/** Credentials decide capability, and each one is independent:
+ *
+ *  - no `RDV_TELEGRAM_BOT_TOKEN` → a Telegram voice note or photo lands as a
+ *    visible "could not be fetched" line, because agentpush sends only a
+ *    `file_id` (docs/UPSTREAM.md §11) and nothing here can resolve it.
+ *  - no `RDV_OPENAI_API_KEY` → the bytes land and are stored, but nobody can
+ *    say what is in them: "transcription unavailable".
+ *  - both set → a voice note arrives as its transcript, an image as a
+ *    description, attributed like any other message.
+ *
+ *  Explicit hooks always win, so tests never depend on the environment. */
 function resolveMediaIngress(hooks: HttpMediaHooks | undefined): MediaIngress {
+  const openaiKey = env.openaiApiKey
+  const telegramToken = env.telegramBotToken
   return {
     store: hooks?.mediaStore ?? new MediaStore(),
-    stt: hooks?.stt ?? NullProviders.stt,
-    vision: hooks?.vision ?? NullProviders.vision,
+    stt: hooks?.stt ?? (openaiKey !== undefined ? new OpenAiSttProvider(openaiKey) : NullProviders.stt),
+    vision: hooks?.vision ?? (openaiKey !== undefined ? new OpenAiVisionProvider(openaiKey) : NullProviders.vision),
     fetch: hooks?.fetch,
     maxBytes: hooks?.maxBytes,
+    resolveReference:
+      hooks?.resolveReference ??
+      (telegramToken !== undefined
+        ? new TelegramMediaResolver({ token: telegramToken, maxBytes: env.mediaMaxBytes })
+        : undefined),
   }
 }
 
@@ -128,6 +157,7 @@ async function ingestEnvelopeMedia(
     vision: media.vision,
     ...(media.fetch !== undefined ? { fetch: media.fetch } : {}),
     ...(media.maxBytes !== undefined ? { maxBytes: media.maxBytes } : {}),
+    ...(media.resolveReference !== undefined ? { resolveReference: media.resolveReference } : {}),
   })
   if (normalized.text === undefined || normalized.attributionSuffix === undefined) {
     return { text: envelope.text, records: [] }
