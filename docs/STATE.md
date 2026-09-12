@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 01:24 UTC (03:24 local). Repo: this directory,
+Last updated: 2026-09-12 01:27 UTC (03:27 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -105,6 +105,10 @@ Last updated: 2026-09-12 01:24 UTC (03:24 local). Repo: this directory,
     (rdv-up-reap-orphans). NOT STARTED: sandbox liveness signal, brief at
     `/tmp/rdv-briefs/up3.txt`; the remaining docs/UPSTREAM.md items
     (app-serve ui.path, reconnect not pausing, spawn surviving disconnect).
+
+12. Morning email to Jeremy (deck PDF, script, status body) to jeremy@agentik.net ONLY,
+    by 02:20 UTC — NOT STARTED; brief at `/tmp/rdv-briefs/email-jeremy.txt` (Sonnet).
+    The only outbound email authorised overnight. Verify the attachment arrives.
 
 Demo status: run 3 on a real phone passed (attribution, fan-out, artifact
 edit). Resume-after-kill is marked NOT demo-safe in `docs/DEMO.md` until
