@@ -4,7 +4,7 @@
     "isTitle": true,
     "title": "Rendez-vous",
     "subtitle": "One room, one agent, one artifact — many humans, on the surfaces they already use.",
-    "page": "1 / 12"
+    "page": "1 / 13"
   },
   {
     "type": "statement",
@@ -16,7 +16,7 @@
       "Every one of them is single-principal — one key, one developer, one session."
     ],
     "highlight": "The uncontested ground isn't the sandbox. It's the room around it.",
-    "page": "2 / 12"
+    "page": "2 / 13"
   },
   {
     "type": "list",
@@ -30,7 +30,7 @@
       "One session — the one agent turn-loop",
       "One artifact URL — stable, public, live"
     ],
-    "page": "3 / 12"
+    "page": "3 / 13"
   },
   {
     "type": "ladder",
@@ -43,7 +43,7 @@
       { "tier": "3", "surface": "Laptop web room", "sends": "turns, permission answers", "receives": "full transcript + live artifact iframe", "latency": "live" }
     ],
     "caption": "Telegram and laptop are already two real surfaces.",
-    "page": "4 / 12"
+    "page": "4 / 13"
   },
   {
     "type": "timeline",
@@ -58,7 +58,7 @@
       { "time": "~33s", "label": "Agent finds and edits the artifact, unaided" }
     ],
     "caption": "Curl-verified at every step. Delivery to the phone: operator-confirmed.",
-    "page": "5 / 12"
+    "page": "5 / 13"
   },
   {
     "type": "findings",
@@ -74,7 +74,7 @@
     ],
     "highlight": "The first four lost data quietly. The fifth reported success while doing nothing — the correct field was already parsed one function over.",
     "caption": "None crash. All look like working code or correct config. This is evidence you only get by running it.",
-    "page": "6 / 12"
+    "page": "6 / 13"
   },
   {
     "type": "statement",
@@ -86,7 +86,22 @@
       "Our position: each member attaches their own tools over rendezvous — nothing inherited.",
       "Revocation is an unpair, not a key rotation — there was never a shared secret to rotate."
     ],
-    "page": "7 / 12"
+    "page": "7 / 13"
+  },
+  {
+    "type": "findings",
+    "isFindings": true,
+    "eyebrow": "Why a room",
+    "title": "Why a room, not two people and one bot",
+    "findingsItems": [
+      { "n": "1", "label": "the agent asks Alice for the product shot" },
+      { "n": "2", "label": "the agent asks Bob for the one-line positioning" },
+      { "n": "3", "label": "each answers on their own channel, in their own time" },
+      { "n": "4", "label": "the agent synthesizes both into the deck — and it goes to the client as a PDF" }
+    ],
+    "highlight": "The agent addresses each member individually and reconciles what they contribute — not a group chat with a bot bolted on.",
+    "caption": "Specced, not yet built.",
+    "page": "8 / 13"
   },
   {
     "type": "code",
@@ -100,7 +115,7 @@
     "code": "agent_start({ adapter: \"codex\", model: \"gpt-5.2-codex\", ... })\n\n→ 500 sandbox_proxy_failed\n   \"no codex login found — run `codex login`\"\n\nbox destroyed on failure — boots used: 1 of 1",
     "highlight": "Same box, same seed, same port with a different CLI is plausible from source, but unobserved. The real second-brain work is the credential model (§9.3, device-auth) — not the adapter swap.",
     "caption": "docs/CODEX-FLIP.md — variant A only; B and C untested (1-boot budget).",
-    "page": "8 / 12"
+    "page": "9 / 13"
   },
   {
     "type": "statement",
@@ -112,7 +127,7 @@
       "The room layer is every line that's new — the judged artifact.",
       "8 upstream findings, shipped as a maintainer write-up (docs/UPSTREAM.md)."
     ],
-    "page": "9 / 12"
+    "page": "10 / 13"
   },
   {
     "type": "list",
@@ -127,7 +142,7 @@
       "WhatsApp: not provisioned. No number, no key.",
       "Phase 2 pairing-back: untested — box-to-broker egress, which side mints the token, post-pairing scope."
     ],
-    "page": "10 / 12"
+    "page": "11 / 13"
   },
   {
     "type": "findings",
@@ -143,13 +158,13 @@
     ],
     "highlight": "Every other capability keeps work inside the room. This one lets the room produce a work product that leaves it — the confirmation gate is a room with a notion of authority, not just relay.",
     "caption": "Chains fan-in, the artifact, canvakit and agentpush end to end. Being built, not yet observed.",
-    "page": "11 / 12"
+    "page": "12 / 13"
   },
   {
     "type": "closing",
     "isClosing": true,
     "title": "The room is the primitive.",
     "subtitle": "The runtime is a detail.",
-    "page": "12 / 12"
+    "page": "13 / 13"
   }
 ]

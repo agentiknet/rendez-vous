@@ -1,6 +1,6 @@
 # Rendez-vous pitch deck
 
-12 slides, dark kit, one idea per slide. Every number is sourced from
+13 slides, dark kit, one idea per slide. Every number is sourced from
 `docs/REHEARSAL.md` or `docs/ARCHITECTURE.md` (see `SCRIPT.md` for the
 speaker read and shot list).
 
@@ -11,8 +11,8 @@ directory because `kit:` refs resolve relative to the CWD.
 ## Files
 
 - `rendez-vous.canvakit.html` — the template
-- `data.json` — the 12 slides' content
-- `rendez-vous.pdf` — rendered output (12 pages)
+- `data.json` — the 13 slides' content
+- `rendez-vous.pdf` — rendered output (13 pages)
 - `SCRIPT.md` — ~4 minute speaker script + shot list for the recording
 
 ## Render command
@@ -28,13 +28,16 @@ node /Volumes/SSDExternalMacStudio/Code/products/agentik/agentik-studio/projects
 
 ## Notes on content sourcing
 
-- Slide 8 ("The swap needs a login first") reflects `docs/CODEX-FLIP.md`'s
+- Slide 8 ("Why a room, not two people and one bot") — the middleman arc —
+  is operator-specified directly, no doc anchor yet. Marked "specced, not
+  yet built" on-slide per the same rule as slides 9 and 12.
+- Slide 9 ("The swap needs a login first") reflects `docs/CODEX-FLIP.md`'s
   verdict: the one-parameter claim does not hold as stated — a fresh box
   has no codex credentials, `installAdapters` installs the binary not the
   login, and the tested boot failed at the auth gate before the mechanical
   swap could be observed. Framed as the credential model (§9.3,
   device-auth) being the real second-brain work, not the adapter swap.
-- Slide 10's "responder double reply" risk is sourced from
+- Slide 11's "responder double reply" risk is sourced from
   `docs/AGENTPUSH.md` ("Do not pin a route to a bot account" — routes
   evaluate independently, not first-match-wins) and `docs/WORKSPACE-OPTION.md`
   (the demo runs on the shared `default` workspace, not a dedicated one).
@@ -44,14 +47,14 @@ node /Volumes/SSDExternalMacStudio/Code/products/agentik/agentik-studio/projects
   `status`) is `docs/UPSTREAM.md` finding 9, "A liveness check that tests
   existence reports success against a corpse" — found live on a real phone
   during the Run 3 continuation.
-- Slide 10's dead-artifact-link line (box `i7jos61ixgkcfrekmi1vl` expiring
+- Slide 11's dead-artifact-link line (box `i7jos61ixgkcfrekmi1vl` expiring
   mid-rehearsal) is operator-reported, confirming the risk
   `docs/ARCHITECTURE.md` §9.3b predicted. As of this render,
   `docs/REHEARSAL.md`'s Run 3 continuation is still marked "WAITING" on the
   resume-after-kill check, so the slide and script call the fix "fixed
   after rehearsal, re-proof pending" rather than claiming it's verified —
   update that framing once `docs/REHEARSAL.md` records a completed re-test.
-- Slide 11 ("The deliverable flow") describes a capability not yet in any
+- Slide 12 ("The deliverable flow") describes a capability not yet in any
   doc as of this render — operator-specified directly. Marked "being
   built, not yet observed" on-slide per the same rule: update once
   `docs/REHEARSAL.md` records it run live.
