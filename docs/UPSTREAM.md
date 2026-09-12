@@ -24,6 +24,25 @@ self-contained without them.
 
 ---
 
+## The pattern: plausible config, silent drop, no error anywhere
+
+Three of the cases below read like three unrelated bugs — a missing flag, a
+stale cursor, a filtered account id. They are the same class: a config or
+piece of state that is completely reasonable in isolation, checked by
+nothing, and the system routes around it without a stack trace, a non-2xx,
+or a log line. The only symptom is a human noticing a reply never came back.
+
+| Case | Plausible config | Silent drop |
+| --- | --- | --- |
+| Daemon prompt path (finding 1) | Caller omits `queue: true` on a mid-turn prompt | Both the built-in inbound router and the MCP `agent_prompt` tool never pass it either, so a mid-turn message is rejected with no error delivered to any sender |
+| Resume cursor (`docs/REHEARSAL.md` finding 3, fixed in `b58de3d`) | Our fan-out reader keeps its cursor across a resume | A new session's stream renumbers from near 1; the reader waits at the old session's stale seq, so every reply after a resume vanishes |
+| agentpush account-pinned inbound route | Route created with `provider_account_id` set, matching the per-account setup the provider UI encourages | `listEnabledMessagingRoutes` filters `provider_account_id IS NULL` (`packages/core/src/domain/inbound-route/repository.ts:335`, in the read-only agentpush checkout) — the route never fires; the comment above it says so: "account-pinned routes can't be honoured yet (Phase 3)" |
+
+The hard part of multiplayer agents is not the model. It is that every one
+of these fails quietly.
+
+---
+
 ## 1. Mid-turn prompt loss without `queue: true`
 
 **Summary.** `POST /sessions/:id/prompt?wait=false` on a busy session throws

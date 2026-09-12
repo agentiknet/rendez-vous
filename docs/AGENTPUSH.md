@@ -218,6 +218,21 @@ journaled `failed` and retried later. **Our `MessageDedup` on `messageId`
 is required, not optional** — this is not a hypothetical redelivery, it's
 the documented default.
 
+### Do not pin a route to a bot account
+
+Routes evaluate independently, not first-match-wins
+(`packages/core/src/domain/inbound-route/evaluate.ts:12`) — matching is by
+`channel` string and `match_type` only; `matchesInboundRoute` never looks at
+`provider_account_id`. So a second Telegram bot added to the same workspace
+is still caught by any workspace-wide "telegram → responder" catch-all
+route already configured — the two bots are indistinguishable to the
+matcher. Pinning our own route to a specific provider account instead
+doesn't scope it to that bot; it makes it never fire at all, since
+`listEnabledMessagingRoutes` filters `provider_account_id IS NULL`
+(§3's own citation, `repository.ts:335`). The real isolation boundary here
+is `workspace_id`, not the account — one workspace per bot you need
+distinct routing for.
+
 ## 4. Minting an API key for a workspace
 
 ```
