@@ -39,15 +39,14 @@ The agent builds a PDF or puts a site online and everyone opens the same link.
 Nothing leaves the room until a member confirms the recipient and the content,
 and every send is logged with who asked and who confirmed.
 
-Stack: TypeScript, no framework. agentpush puts Telegram, WhatsApp and email
-behind one API. Our open-source agentproto runtime is consumed unmodified from
-npm. OpenAI for speech, vision and voice replies; OpenRouter for the coding
-agents; e2b for the machine; an MCP tool we expose so the agent renders on
-brand by construction. 500 tests green.
-
-We hit eight silent failures on the way. A killed session still answers 200, so
-resume reported success in 0.7s having resumed nothing. We opened seven pull
-requests upstream instead of patching around them.
+Stack: TypeScript, no framework. Two open-source runtimes of ours do the heavy
+lifting: agentpush, our messaging unification runtime, puts Telegram, WhatsApp
+and email behind one API, inbound and outbound; agentproto, our orchestration
+layer, runs the agents and the sandboxes, consumed unmodified from npm. Plus
+OpenAI for speech, vision and voice replies, OpenRouter for the coding agents,
+e2b for the machine, and an MCP tool we expose so the agent renders on brand by
+construction. 500 tests green, and seven pull requests contributed upstream to
+agentproto during the hackathon.
 ```
 
 ---
@@ -60,9 +59,9 @@ Other Products field:
 
 ```
 e2b (sandbox per room), Telegram Bot API, Cloudflare Tunnel, agentpush (our own
-messaging layer), agentproto (our own open-source agent runtime, from npm),
-canvakit (our own template + design-kit renderer), Anthropic Claude and
-z-ai GLM 5.3 via OpenRouter
+open-source messaging unification runtime), agentproto (our own open-source
+orchestration layer, from npm), canvakit (our own template and design-kit
+renderer), Anthropic Claude and z-ai GLM 5.3 via OpenRouter
 ```
 
 ---
@@ -72,8 +71,8 @@ z-ai GLM 5.3 via OpenRouter
 ```
 Jeremy ANDRE (lead): all of it. The room model (members, presence tiers,
 attributed fan-in, tier-aware fan-out). Telegram in and out through agentpush,
-including a fix landed upstream in agentpush so inbound Telegram media can be
-read at all. e2b sandbox boot, artifact serving, liveness. The MCP endpoint
+including a fix landed in agentpush so inbound Telegram media can be read at
+all. e2b sandbox boot, artifact serving, liveness. The MCP endpoint
 that gives the sandboxed agent a render tool. Voice and vision in, voice and
 files out, through the OpenAI API. The deliverable flow and its confirmation
 gate. Seven pull requests upstream to agentproto. GLM 5.3 coding agents
@@ -88,9 +87,10 @@ was verified by hand before it landed.
 State this plainly. It is the honest answer and judges reward it.
 
 ```
-Three of ours pre-date the hackathon and were used as dependencies: agentproto
-(our open-source agent runtime, consumed unmodified from npm), agentpush (our
-messaging layer) and canvakit (our template renderer).
+Three of ours pre-date the hackathon and were used as dependencies, all
+open-source: agentproto (our orchestration layer, consumed unmodified from
+npm), agentpush (our messaging unification runtime) and canvakit (our template
+renderer).
 
 Built during the hackathon: the entire Rendez-vous room service, multimodal in
 and out, the private-reply and solicitation protocols, the deliverable flow and
@@ -122,7 +122,8 @@ We put several people AND several agents in one shared room, from the messaging
 app they already use. The agent sees every thread, so it can tell Julie her
 12k budget does not fit the 16k venue Tom just sent.
 
-Built with @OpenAI @openrouter, e2b sandboxes and our own open-source runtime.
+Built on our open-source runtimes, agentpush for messaging and agentproto for
+orchestration, with @OpenAI @openrouter and e2b sandboxes.
 Thanks @AITinkerers @CopilotKit @exaailabs @auth0 @ambiguousio @triggerdotdev
 @mozillaAI
 
@@ -152,9 +153,9 @@ Each room runs in its own sandbox with a real terminal and a public URL. Build
 a PDF or a site, everyone opens the same link. Nothing leaves until someone
 confirms.
 
-Built with OpenAI, OpenRouter, e2b and our own open-source runtime, consumed
-unmodified. We hit eight silent failures and opened seven pull requests
-upstream rather than patching around them.
+Built on our two open-source runtimes: agentpush for messaging unification,
+agentproto for orchestration. Plus OpenAI, OpenRouter and e2b. Seven pull
+requests contributed upstream along the way.
 
 Thanks to AI Tinkerers, OpenAI, CopilotKit, OpenRouter, Exa, Auth0, Ambiguous
 AI, Trigger.dev, Mozilla.ai and Google Cloud.
