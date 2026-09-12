@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 02:08 UTC (04:08 local). Repo: this directory,
+Last updated: 2026-09-12 02:13 UTC (04:13 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -76,6 +76,15 @@ Last updated: 2026-09-12 02:08 UTC (04:08 local). Repo: this directory,
   billable): `i7jos61ixgkcfrekmi1vl` (the live room; keep),
   `i70vb4teaxca9r1id1c4p` (from the boot-fix work, 00:34; PAUSED by the supervisor at 01:17 UTC, will expire on its own),
   `i5fln5g688isw18enzov9` (unattributed, 01:07; PAUSED 01:30 UTC).
+- UNBUDGETED BOXES, root cause found 02:12 UTC: the agentproto full test gate
+  (`pnpm test` in the agentproto/ts worktrees) runs real e2b end-to-end tests
+  whenever `E2B_API_KEY` is set; upstream executors ran it repeatedly and their
+  timeouts left five boxes running (started 01:31 to 01:42 UTC), none in our
+  ledger. All five were killed via the e2b API at 02:12 UTC. RULE: run any
+  agentproto gate with `env -u E2B_API_KEY pnpm test`.
+- The live room's box `i7jos61ixgkcfrekmi1vl` EXPIRED on e2b around 02:00 UTC;
+  the room store shows RDV-NG7F paused with no session; the next message boots a
+  fresh box (rdv-flow-exercise is doing this; count that boot).
 - Pause: `POST https://api.e2b.dev/sandboxes/<id>/pause` with header
   `X-API-Key: $E2B_API_KEY`. Paused boxes expire on e2b's side within about an
   hour; the local ledger (`agentproto sandbox list`) is NOT trustworthy.
