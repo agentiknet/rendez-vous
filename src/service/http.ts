@@ -239,7 +239,32 @@ async function handleRoomSend(
     sendJson(res, 409, { error: "no_session" })
     return
   }
+  if (outcome.kind === "delivered") {
+    sendJson(res, 200, { delivered: true, text: outcome.text })
+    return
+  }
   sendJson(res, 200, outcome.result)
+}
+
+/** `GET /r/:code/media/:id` (docs/DELIVERABLE.md) — the link every delivery
+ *  preview points at. An unknown room or media id both 404; there is
+ *  nothing to self-heal toward the way a momentarily-dead artifact box is
+ *  (`handleRoomArtifact`) — a rendered PDF that's gone is gone. */
+async function handleRoomMedia(
+  service: RoomService,
+  res: ServerResponse,
+  encodedCode: string,
+  encodedId: string,
+): Promise<void> {
+  const code = decodeURIComponent(encodedCode)
+  const id = decodeURIComponent(encodedId)
+  const data = await service.readMedia(code, id)
+  if (data === undefined) {
+    sendJson(res, 404, { error: "not_found" })
+    return
+  }
+  res.writeHead(200, { "content-type": "application/pdf", "content-length": data.length })
+  res.end(data)
 }
 
 /**
@@ -380,6 +405,18 @@ async function handle(service: RoomService, dedup: MessageDedup, req: IncomingMe
       return
     }
     await handleRoomArtifact(service, req, res, encodedCode, artifactMatch[2] ?? "", url.search)
+    return
+  }
+
+  const mediaMatch = /^\/r\/([^/]+)\/media\/([^/]+)$/.exec(url.pathname)
+  if (mediaMatch !== null && req.method === "GET") {
+    const encodedCode = mediaMatch[1]
+    const encodedId = mediaMatch[2]
+    if (encodedCode === undefined || encodedId === undefined) {
+      sendJson(res, 400, { error: "invalid_code" })
+      return
+    }
+    await handleRoomMedia(service, res, encodedCode, encodedId)
     return
   }
 

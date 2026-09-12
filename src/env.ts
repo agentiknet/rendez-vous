@@ -74,6 +74,12 @@ export interface Env {
   readonly idleSweepSeconds: number
   /** How long a room may sit with no activity before the sweep pauses it. */
   readonly idlePauseMinutes: number
+  /** How often the idle sweep probes an active room's own e2b box for
+   *  liveness via the e2b API (docs/UPSTREAM.md #10) — independent of, and
+   *  cheaper than, the idle-pause cadence above. A box found gone marks the
+   *  room `artifactReady: false` and `state: "paused"` so the next message
+   *  triggers a fresh boot. */
+  readonly boxProbeMinutes: number
   /** HMAC secret for verifying `x-agentpush-signature` on the tier-2 email
    *  inbound webhook (src/channels/email/inbound.ts). Independent from
    *  `agentpushWebhookSecret`: agentpush's Gmail poll path dispatches
@@ -82,6 +88,14 @@ export interface Env {
    *  email reuses `agentpushUrl`/`agentpushKey` — it's the same
    *  `/tools/send_message` endpoint, just `channel: "mail"`. */
   readonly emailWebhookSecret: string | undefined
+  /** Absolute path to the canvakit CLI's built entrypoint, invoked as
+   *  `node <path> export ...` (deck/README.md's render command;
+   *  docs/DELIVERABLE.md). Defaults to the same absolute path deck/README.md
+   *  documents on this host. */
+  readonly canvakitCli: string
+  /** Directory rendered deliverables are stored under, one subdirectory per
+   *  room code (src/service/media-store.ts). */
+  readonly mediaDir: string
 }
 
 type Source = Readonly<Record<string, string | undefined>>
@@ -175,7 +189,14 @@ export function loadEnv(source: Source): Env {
     prewarmSandboxId: readOptionalString(source, "RDV_PREWARM_SANDBOX_ID"),
     idleSweepSeconds: readPositiveInt(source, "RDV_IDLE_SWEEP_SECONDS", 60),
     idlePauseMinutes: readPositiveInt(source, "RDV_IDLE_PAUSE_MINUTES", 20),
+    boxProbeMinutes: readPositiveInt(source, "RDV_BOX_PROBE_MINUTES", 5),
     emailWebhookSecret: readOptionalString(source, "RDV_EMAIL_WEBHOOK_SECRET"),
+    canvakitCli: readString(
+      source,
+      "RDV_CANVAKIT_CLI",
+      "/Volumes/SSDExternalMacStudio/Code/products/agentik/agentik-studio/projects/openagentik/canvakit/packages/cli/dist/index.js",
+    ),
+    mediaDir: readString(source, "RDV_MEDIA_DIR", ".rdv/media"),
   })
 }
 

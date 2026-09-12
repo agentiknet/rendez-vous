@@ -1,5 +1,6 @@
 import type { DaemonClient, HealthResult, PromptResult } from "../daemon/client.ts"
 import type { TranscriptRecord } from "../daemon/records.ts"
+import { AgentpushToolClient } from "../channels/agentpush/tools-client.ts"
 import { env } from "../env.ts"
 import { fanIn } from "../fanin/index.ts"
 import { RoomFanout } from "../fanout/reader.ts"
@@ -10,7 +11,10 @@ import type { RoomStore } from "../rooms/store.ts"
 import type { Address, Member, Room, Tier } from "../rooms/types.ts"
 import { publicArtifactUrl } from "./artifact-proxy.ts"
 import type { SessionBooter } from "./booter.ts"
+import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
+import { DeliverableAwareTransport, DeliverableService, parseDeliverableCommand } from "./deliverable.ts"
+import { MediaStore } from "./media-store.ts"
 import { hasSendMedia } from "./transports.ts"
 
 /** What every member-facing surface shows instead of `room.artifactUrl`
@@ -19,7 +23,8 @@ import { hasSendMedia } from "./transports.ts"
  *  room-code-keyed URL that survives that — the raw URL never leaves the
  *  store. */
 function memberFacingArtifactUrl(room: Room): string | undefined {
-  return room.artifactUrl !== undefined ? publicArtifactUrl(room.code) : undefined
+  if (room.artifactUrl === undefined || room.artifactReady === false) return undefined
+  return publicArtifactUrl(room.code)
 }
 
 export interface InboundInput {
@@ -42,6 +47,7 @@ export type InboundOutcome =
 
 export type RoomWebSendOutcome =
   | { kind: "sent"; member: Member; result: PromptResult }
+  | { kind: "delivered"; member: Member; text: string }
   | { kind: "unknown-code" }
   | { kind: "no-session" }
 
@@ -121,9 +127,12 @@ export class RoomService {
   private readonly booter: SessionBooter
   private readonly transport: Transport
   private readonly daemon: DaemonExtraOptions
+  private readonly mediaStore: MediaStore
+  private readonly deliverable: DeliverableService
   private readonly fanout: RoomFanout
   private readonly idlePauseMs: number
   private readonly idleSweepMs: number
+  private readonly boxProbeMs: number
   /** Cursor last observed per room, sweep to sweep — a jump means the room's
    *  own fan-out flushed something new since the last tick, which counts as
    *  activity just as much as an inbound message (R10). Cheaper and more
@@ -131,6 +140,12 @@ export class RoomService {
    *  file's ownership): the cursor it already persists on every flush is
    *  itself the signal, sampled at sweep granularity. */
   private readonly lastSeenCursor = new Map<string, number>()
+  /** Last time (`Date.now()`) each room's box was probed for liveness via the
+   *  e2b API (docs/UPSTREAM.md #10) — in-process only, reset on restart, so a
+   *  fresh process simply probes every active room again on its first sweep
+   *  rather than waiting out the interval a second time. */
+  private readonly lastBoxProbeAt = new Map<string, number>()
+  private readonly checkBoxLiveness: BoxLivenessCheck
   private idleSweepTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(opts: {
@@ -140,6 +155,10 @@ export class RoomService {
     transport: Transport
     idlePauseMinutes?: number
     idleSweepSeconds?: number
+    boxProbeMinutes?: number
+    /** Injectable for tests — see `BoxLivenessCheck`'s doc. Defaults to the
+     *  real e2b API call. */
+    checkBoxLiveness?: BoxLivenessCheck
     /** Defaults to the same daemon connection the rest of the process uses
      *  (`env.daemonUrl`/`env.daemonToken`) — override in tests to point at a
      *  fake daemon instead. Needed for the out-of-band-kill liveness check
@@ -147,6 +166,16 @@ export class RoomService {
      *  detection, neither of which can be derived from `DaemonClient` (it
      *  keeps its base URL/token private). */
     daemon?: DaemonExtraOptions
+    /** Overrides the default `MediaStore`/`DeliverableService` pair for
+     *  tests — inject `mediaStore` alone to point rendered PDFs at a temp
+     *  dir while keeping the real render/send pipeline, or `deliverable`
+     *  alone for a fully scripted delivery flow. When `deliverable` is
+     *  given without `mediaStore`, the media HTTP route
+     *  (`RoomService.readMedia`) reads through whichever `MediaStore` the
+     *  caller built that `DeliverableService` with, not this one — pass
+     *  both together in that case. */
+    mediaStore?: MediaStore
+    deliverable?: DeliverableService
   }) {
     this.store = opts.store
     this.client = opts.client
@@ -155,9 +184,20 @@ export class RoomService {
     this.daemon = opts.daemon ?? { baseUrl: env.daemonUrl, token: env.daemonToken }
     this.idlePauseMs = (opts.idlePauseMinutes ?? env.idlePauseMinutes) * 60_000
     this.idleSweepMs = (opts.idleSweepSeconds ?? env.idleSweepSeconds) * 1000
+    this.boxProbeMs = (opts.boxProbeMinutes ?? env.boxProbeMinutes) * 60_000
+    this.checkBoxLiveness = opts.checkBoxLiveness ?? ((sandboxId) => isSandboxAlive(sandboxId))
+    this.mediaStore = opts.mediaStore ?? new MediaStore()
+    this.deliverable =
+      opts.deliverable ??
+      new DeliverableService({
+        mediaStore: this.mediaStore,
+        client: this.client,
+        agentpush:
+          env.agentpushUrl !== undefined ? new AgentpushToolClient({ baseUrl: env.agentpushUrl, apiKey: env.agentpushKey }) : undefined,
+      })
     this.fanout = new RoomFanout({
       store: this.store,
-      transport: this.transport,
+      transport: new DeliverableAwareTransport(this.transport, this.deliverable, this.store),
       source: (sessionId, since, signal) => this.client.events(sessionId, since, signal),
       isAlive: (sessionId) => isSessionAlive(this.daemon, sessionId),
     })
@@ -209,6 +249,14 @@ export class RoomService {
     return false
   }
 
+  /** `GET /r/:code/media/:id` (docs/DELIVERABLE.md) — `undefined` for an
+   *  unknown room or an unknown/missing media id, never throws. */
+  async readMedia(code: string, id: string): Promise<Buffer | undefined> {
+    const room = this.store.get(code)
+    if (room === undefined) return undefined
+    return this.mediaStore.read(room.code, id)
+  }
+
   async daemonHealth(): Promise<HealthResult | "unreachable"> {
     try {
       return await this.client.health()
@@ -236,10 +284,14 @@ export class RoomService {
 
   /** Checked every `idleSweepSeconds`; pauses any active room whose cursor
    *  hasn't moved and whose `lastActivityAt` is older than `idlePauseMinutes`
-   *  (R10 — nothing upstream enforces this, so the room service must). */
+   *  (R10 — nothing upstream enforces this, so the room service must). Also
+   *  probes each active room's own box for liveness (docs/UPSTREAM.md #10),
+   *  independent of idle time — a box can vanish mid-conversation. */
   async sweepIdleRooms(): Promise<void> {
     const now = Date.now()
-    for (const room of this.store.list()) {
+    for (const room0 of this.store.list()) {
+      const room = room0.state === "active" ? await this.probeBoxLiveness(room0, now) : room0
+
       const previousCursor = this.lastSeenCursor.get(room.code)
       if (room.cursor !== previousCursor) {
         this.lastSeenCursor.set(room.code, room.cursor)
@@ -256,6 +308,28 @@ export class RoomService {
         await this.doPause(room)
       }
     }
+  }
+
+  /** At most once per `boxProbeMinutes`, ask e2b directly whether this room's
+   *  box still exists. A box confirmed GONE marks the room `artifactReady:
+   *  false` and pauses it — the same shape as `doPause` — so the web page and
+   *  fan-out stop claiming the artifact is live, and the next message (or an
+   *  explicit `resume`) drives it through `reviveIfSessionDied`/`doResume`,
+   *  which boot a fresh box (`E2bBooter.resume`'s own liveness gate). A room
+   *  with no `sandboxId` (`LocalBooter`) or a probe result of `"alive"`,
+   *  `"paused"`, or `"unknown"` returns the room unchanged — `"unknown"` (a
+   *  network error reaching e2b) must never be treated as gone. */
+  private async probeBoxLiveness(room: Room, now: number): Promise<Room> {
+    if (room.sandboxId === undefined) return room
+    const lastProbe = this.lastBoxProbeAt.get(room.code)
+    if (lastProbe !== undefined && now - lastProbe < this.boxProbeMs) return room
+    this.lastBoxProbeAt.set(room.code, now)
+
+    const liveness = await this.checkBoxLiveness(room.sandboxId)
+    if (liveness !== "gone") return room
+
+    await this.doPause(room, { artifactReady: false })
+    return this.store.get(room.code) ?? room
   }
 
   /** A plain message from the room-web tier: no `new`/`join`/`resume`
@@ -275,6 +349,12 @@ export class RoomService {
       tier: "room-web",
       address: { provider: "room-web", source: "room-web", contactRef: slugify(displayName) },
     })
+
+    const deliverableText = await this.resolveDeliverableText(room, member, text)
+    if (deliverableText !== undefined) {
+      await this.broadcast(room, deliverableText)
+      return { kind: "delivered", member, text: deliverableText }
+    }
 
     if (room.state === "paused") {
       await this.transport.send(member, { text: RESUMING_TEXT, artifactUrl: memberFacingArtifactUrl(room) })
@@ -421,6 +501,12 @@ export class RoomService {
     let { room } = found
     const { member } = found
 
+    const deliverableText = await this.resolveDeliverableText(room, member, input.text)
+    if (deliverableText !== undefined) {
+      await this.broadcast(room, deliverableText)
+      return { kind: "message", room, member }
+    }
+
     room = await this.reviveIfSessionDied(room)
     if (room.state === "paused") {
       await this.transport.send(member, { text: RESUMING_TEXT, artifactUrl: memberFacingArtifactUrl(room) })
@@ -446,6 +532,45 @@ export class RoomService {
     return { kind: "message", room, member }
   }
 
+  /** `send pdf to <address>` / `confirm <token>` / `cancel <token>`
+   *  (docs/DELIVERABLE.md) — any member, any tier. Returns `undefined` when
+   *  `text` isn't one of these commands, so the caller falls through to the
+   *  ordinary chat/fan-in path unchanged. Deliberately does not revive a
+   *  paused session first: none of these three actions need the agent's
+   *  session to be running (rendering only needs the stored `artifactUrl` to
+   *  be reachable, and confirming/cancelling touches no session at all) —
+   *  only the transcript audit note (`DeliverableService`'s own
+   *  `postSystemNote`) is skipped when there is no live session to post it to. */
+  private async resolveDeliverableText(room: Room, member: Member, text: string): Promise<string | undefined> {
+    const command = parseDeliverableCommand(text)
+    if (command === undefined) return undefined
+
+    if (command.kind === "send") {
+      const outcome = await this.deliverable.requestFromCommand(room, member, command.to)
+      return outcome.ok ? outcome.previewText : `Could not start that delivery: ${outcome.error}`
+    }
+
+    if (command.kind === "confirm") {
+      const outcome = await this.deliverable.confirm(room, member, command.token)
+      if (outcome.kind === "sent") return outcome.resultText
+      if (outcome.kind === "not-found") return `No pending delivery found for token ${command.token}.`
+      return `Delivery ${command.token} expired 30 minutes after it was requested — ask again.`
+    }
+
+    const outcome = await this.deliverable.cancel(room, member, command.token)
+    if (outcome.kind === "cancelled") return `Delivery ${command.token} cancelled — nothing sent.`
+    if (outcome.kind === "not-found") return `No pending delivery found for token ${command.token}.`
+    return `Delivery ${command.token} had already expired — nothing was sent.`
+  }
+
+  /** Every deliverable preview/confirmation/cancellation reaches every
+   *  current member, not just whoever triggered it — the whole point of the
+   *  preview gate is that anyone in the room can see and confirm it. */
+  private async broadcast(room: Room, text: string): Promise<void> {
+    const artifactUrl = memberFacingArtifactUrl(room)
+    await Promise.allSettled(room.members.map((member) => this.transport.send(member, { text, artifactUrl })))
+  }
+
   private async touchActivity(code: string): Promise<void> {
     await this.store.update(code, { lastActivityAt: new Date().toISOString() })
   }
@@ -466,14 +591,14 @@ export class RoomService {
     return this.store.update(room.code, { sessionId: undefined, state: "paused" })
   }
 
-  private async doPause(room: Room): Promise<void> {
+  private async doPause(room: Room, extra: Partial<Pick<Room, "artifactReady">> = {}): Promise<void> {
     await this.fanout.stop(room.code)
     if (room.sessionId !== undefined) {
       await this.client.kill(room.sessionId).catch((error: unknown) => {
         console.error(`failed to kill session for room ${room.code}: ${error instanceof Error ? error.message : String(error)}`)
       })
     }
-    await this.store.update(room.code, { sessionId: undefined, state: "paused" })
+    await this.store.update(room.code, { sessionId: undefined, state: "paused", ...extra })
   }
 
   private async doResume(room: Room): Promise<Room> {
@@ -503,21 +628,23 @@ export class RoomService {
     })
     this.fanout.start(updated.code)
     if (boxReplaced) {
-      await this.notifyBoxReplaced(updated)
+      await this.notifyBoxReplaced(updated, booted.boxWasGone === true)
     }
     return updated
   }
 
   /** The single explicit notice architecture.md §9.3b asks for: broadcast to
    *  every current member, not just whoever triggered the resume — anyone
-   *  already in the room may have the artifact open or bookmarked. */
-  private async notifyBoxReplaced(room: Room): Promise<void> {
+   *  already in the room may have the artifact open or bookmarked. A box
+   *  confirmed GONE (docs/UPSTREAM.md #10, `E2bBooter.resume`'s own liveness
+   *  gate) gets the more precise wording; every other box replacement (R8's
+   *  same-or-reused-box re-serve) keeps the original generic notice. */
+  private async notifyBoxReplaced(room: Room, boxWasGone: boolean): Promise<void> {
     const artifactUrl = memberFacingArtifactUrl(room)
-    await Promise.allSettled(
-      room.members.map((member) =>
-        this.transport.send(member, { text: "Artifact restored on a new box, same link.", artifactUrl }),
-      ),
-    )
+    const text = boxWasGone
+      ? "The previous box expired; artifact restored on a new box."
+      : "Artifact restored on a new box, same link."
+    await Promise.allSettled(room.members.map((member) => this.transport.send(member, { text, artifactUrl })))
   }
 
   private async replyGuidance(input: InboundInput, text: string): Promise<void> {
