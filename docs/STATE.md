@@ -5,7 +5,7 @@ Assume no other context exists. You have full authority to continue. Read
 this file, then `docs/DEMO.md`, then `docs/REHEARSAL.md`, then run
 `bash scripts/sv.sh status` and `bash scripts/sv.sh boxes`.
 
-Last updated: 2026-09-12 02:50 UTC (04:50 local). Repo: this directory,
+Last updated: 2026-09-12 03:01 UTC (05:01 local). Repo: this directory,
 `main`, published private at https://github.com/agentiknet/rendez-vous.
 
 ## Hard limits (verbatim from the operator; never work around them)
@@ -68,16 +68,20 @@ Last updated: 2026-09-12 02:50 UTC (04:50 local). Repo: this directory,
 
 ## e2b boot budget and boxes (these bill)
 
-- Overnight budget: 10 fresh boots. Spent so far, as of 02:30 UTC: 1
+- RULE: ONLY THE SUPERVISOR RESTARTS THE DEMO SERVICE. Two executors restarting
+  `node src/cli.ts serve` concurrently collided twice tonight (EADDRINUSE, pid
+  swaps, lost in-memory pending deliveries). Executors report "restart needed".
+- Overnight budget: 10 fresh boots. Spent so far, as of 03:00 UTC: 1
   unattributed (`i5fln5g…`, 01:07, paused); 2 for waking RDV-NG7F after its box
   expired (a raced revive produced two sessions and two boxes at 01:45 and
   01:47; the orphan session `sess_13a08221` and box `i65mye…` were killed by
   the supervisor at 02:30; the room now runs on `icc84uy0qdas650d1sntl`,
   session `sess_1696a06c`); 1 for the box-liveness proof room RDV-8WLG
-  (`i6s6gs…`, deleted by the proof); plus `iw1ylk7jshrtfj9bvsqw2` (01:48,
-  running, not in the ledger, attribution pending: probably the box-liveness
-  restore-on-fresh-box step, else an upstream test-gate box). Count: 5 of 10.
-  Remaining: 5. The raced double revive is a NEW bug to fix (see findings).
+  (`i6s6gs…`, deleted by the proof) plus 1 for its restore box
+  (`i3htjrl6af3yzfo95c93b`, paused 01:54 UTC); plus `iw1ylk7jshrtfj9bvsqw2`
+  (01:48, unclaimed by any executor, an upstream test-gate box; KILLED 03:00 UTC).
+  Count: 6 of 10. Remaining: 4. The raced double revive and the probe race are
+  being fixed by rdv-box-liveness (per-room revive lock).
 - Boxes e2b currently lists (state filter is unreliable; treat all as
   billable): `i7jos61ixgkcfrekmi1vl` (the live room; keep),
   `i70vb4teaxca9r1id1c4p` (from the boot-fix work, 00:34; PAUSED by the supervisor at 01:17 UTC, will expire on its own),
@@ -116,9 +120,13 @@ Last updated: 2026-09-12 02:50 UTC (04:50 local). Repo: this directory,
    Jeremy's messenger AND the connected mailbox, every send in the transcript,
    recipient allowlist enforced — CODE DONE (`46912d3`, `docs/DELIVERABLE.md`,
    commands `send pdf to <address>`, `confirm <token>`, `cancel <token>`).
-   First real exercise against Jeremy's own contact and mailbox: IN PROGRESS
-   (executor rdv-flow-exercise). The demo service was restarted on `46912d3`
-   at 01:38 UTC (pid 85899), so the proxy URL and the flow are live.
+   First real exercise through the room's own commands: DONE 01:53 UTC (email
+   leg to jeremy@agentik.net sent and verified in the mailbox, message id
+   1a0935074773122c, PDF 21913 bytes; allowlist refusal verified; `docs/REHEARSAL.md`).
+   GAPS found: no address form to deliver to another member's messenger
+   contact by ref (only self or an email), pending deliveries are in-memory
+   and die on a service restart, and the resume probe raced the reconnect
+   (double boot). Fixes: staged for the next executors.
    First real exercise: DONE 2026-09-12T01:53Z (docs/REHEARSAL.md, "Deliverable
    flow, first real exercise (through the flow)"), email verified yes
    (jeremy@agentik.net, message 1a0935074773122c, attachment byte-matched via
@@ -176,9 +184,6 @@ re-proven on a phone after `4e73786`.
 ## Executors running (session id, model, owns / fenced to)
 
 - `sess_1114ae10` rdv-up-sandbox-liveness, GLM: worktree `wt/sandbox-liveness` (upstream PR).
-- `sess_8d869128` rdv-flow-exercise, sonnet: drives the first real deliverable send to
-  Jeremy's own contact and mailbox via the simulated inbound route; edits only
-  docs/REHEARSAL.md, docs/STATE.md and `.env.local` (allowlist line).
 - `sess_d233dc3a` rdv-up-app-serve-ui-path, GLM: worktree `wt/app-serve-ui-path` (upstream PR).
 - `sess_0f657dd5` rdv-room-page, GLM: `src/web/**`, the `GET /r/:code/state` route only in
   `src/service/http.ts`, one helper in `daemon-extra.ts` if needed, `test/web/**`, `test/service/http.test.ts`.
