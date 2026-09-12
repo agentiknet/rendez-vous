@@ -99,6 +99,24 @@ test("resumePrompt with an appDir names the served-page path, so a resumed agent
   )
 })
 
+test("the [[ask]] syntax reaches the fresh-boot prompt and BOTH resume branches", () => {
+  const room = fakeRoom("RDV-7F3K")
+  const prompts: Array<[string, string]> = [
+    ["fresh boot", openingPrompt(room)],
+    ["resume with recap", resumePrompt(room, { appDir: "/home/user/apps/rdv-hello", recap: "Alain: red. Claire: blue." })],
+    ["resume without recap", resumePrompt(room)],
+  ]
+
+  for (const [label, prompt] of prompts) {
+    assert.ok(prompt.includes("[[ask <their display name>]]"), `${label} should teach the opening ask marker`)
+    assert.ok(prompt.includes("[[/ask]]"), `${label} should teach the closing ask marker`)
+    assert.ok(
+      prompt.includes('"[Name · tier]" prefix — one member, not the whole room'),
+      `${label} should say the ask addresses ONE member by their attribution name`,
+    )
+  }
+})
+
 test("resumePrompt carries the same capability lines as openingPrompt", () => {
   const room = fakeRoom("RDV-7F3K")
   const opts = { appDir: "/home/user/apps/rdv-hello" }
@@ -109,6 +127,7 @@ test("resumePrompt carries the same capability lines as openingPrompt", () => {
     "Several humans drive this one session together",
     "[[whisper to <their display name>]]",
     "do not stall waiting for consensus",
+    "[[ask <their display name>]]",
     "Keep replies short",
     "/home/user/apps/rdv-hello/.agentproto/ui/index.html",
   ]) {
