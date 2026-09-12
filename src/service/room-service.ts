@@ -289,6 +289,12 @@ export class RoomService {
     return this.store.get(code)
   }
 
+  /** Every room in the store — what the room MCP endpoint's token resolver
+   *  iterates to bind a bearer token to its room (src/service/mcp-room.ts). */
+  listRooms(): Room[] {
+    return this.store.list()
+  }
+
   roomCount(): number {
     return this.store.list().length
   }
@@ -465,6 +471,9 @@ export class RoomService {
       artifactReady: booted.artifactReady,
       state: "active",
       lastActivityAt: new Date().toISOString(),
+      // Set at boot from what the room was actually given, never changed in
+      // place (PLAN §3.5): step 2 gates marker parsing on it.
+      ...(booted.protocol !== undefined ? { protocol: booted.protocol } : {}),
     })
     this.fanout.start(room.code)
 

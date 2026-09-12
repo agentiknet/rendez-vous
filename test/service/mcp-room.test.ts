@@ -1,0 +1,280 @@
+import assert from "node:assert/strict"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { after, test } from "node:test"
+import { env } from "../../src/env.ts"
+import { RoomStore } from "../../src/rooms/store.ts"
+import type { Member, Room } from "../../src/rooms/types.ts"
+import { roomRenderToken, type McpResponse } from "../../src/service/mcp-canvakit.ts"
+import {
+  createMcpRoomHandler,
+  localRoomMcpServer,
+  roomAudienceToken,
+  roomMcpServer,
+  type McpRoomDeps,
+} from "../../src/service/mcp-room.ts"
+
+async function freshDir(): Promise<string> {
+  return mkdtemp(join(tmpdir(), "rdv-mcp-room-"))
+}
+
+const dirs: string[] = []
+after(async () => {
+  await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
+})
+
+function trackDir(dir: string): string {
+  dirs.push(dir)
+  return dir
+}
+
+function member(id: string, displayName: string, tier: Member["tier"], provider: string): Member {
+  return {
+    id,
+    displayName,
+    tier,
+    address: { provider, source: "test", contactRef: `ref-${id}` },
+    joinedAt: "2026-09-12T10:00:00.000Z",
+  }
+}
+
+function room(code: string, members: Member[]): Room {
+  return {
+    code,
+    sessionId: undefined,
+    sandboxId: undefined,
+    artifactUrl: undefined,
+    artifactReady: undefined,
+    members,
+    createdAt: "2026-09-12T10:00:00.000Z",
+    updatedAt: "2026-09-12T10:00:00.000Z",
+    cursor: 0,
+    lastActivityAt: "2026-09-12T10:00:00.000Z",
+    state: "active",
+  }
+}
+
+/** Flattens a handler response into the fields the assertions below need,
+ *  with narrowing `node:test`'s `assert.ok` can't give across union types. */
+function asRpc(res: McpResponse): { readonly status: number; readonly result?: Record<string, unknown>; readonly error?: { readonly code: number; readonly message: string } } {
+  if (res.status === 202) return { status: 202 }
+  if ("result" in res.body) return { status: res.status, result: res.body.result }
+  return { status: res.status, error: res.body.error }
+}
+
+const ROOM_A = "RDV-AAAA"
+const ROOM_B = "RDV-BBBB"
+
+const MEMBERS_A: Member[] = [
+  member("m1", "Alice", "messenger", "telegram"),
+  member("m2", "Bob", "messenger", "whatsapp"),
+  member("m3", "Screen", "room-web", "room-web"),
+]
+
+function harness(rooms: readonly Room[]) {
+  const deps: McpRoomDeps = { rooms: () => rooms }
+  return { handler: createMcpRoomHandler(deps) }
+}
+
+function tokenFor(code: string): string {
+  return `Bearer ${roomAudienceToken(code, env.roomTokenSecret)}`
+}
+
+test("roomAudienceToken is deterministic in (code, secret) and 40 hex chars", () => {
+  const a = roomAudienceToken(ROOM_A, "secret-1")
+  assert.equal(a, roomAudienceToken(ROOM_A, "secret-1"))
+  assert.notEqual(a, roomAudienceToken(ROOM_A, "secret-2"))
+  assert.notEqual(a, roomAudienceToken(ROOM_B, "secret-1"))
+  assert.match(a, /^[0-9a-f]{40}$/)
+})
+
+test("roomAudienceToken differs from roomRenderToken for the same inputs (the labels must not collide)", () => {
+  assert.notEqual(roomAudienceToken(ROOM_A, env.roomTokenSecret), roomRenderToken(ROOM_A, env.roomTokenSecret))
+})
+
+test("roster with the room's valid token returns one entry per member, keyed by member_id", async () => {
+  const { handler } = harness([room(ROOM_A, MEMBERS_A)])
+
+  const res = asRpc(await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "roster", arguments: {} } }, tokenFor(ROOM_A)))
+
+  assert.equal(res.status, 200)
+  assert.equal(res.result?.isError, false)
+  const content = res.result?.content
+  assert.ok(Array.isArray(content) && content.length === 1)
+  const payload = JSON.parse(String((content[0] as Record<string, unknown>).text)) as {
+    count: number
+    members: { member_id: string; display_name: string; surface: string; tier: string; joined_at: string }[]
+  }
+  assert.equal(payload.count, 3)
+  assert.deepEqual(
+    payload.members.map((m) => [m.member_id, m.display_name, m.surface, m.tier]),
+    [
+      ["m1", "Alice", "telegram", "messenger"],
+      ["m2", "Bob", "whatsapp", "messenger"],
+      ["m3", "Screen", "room-web", "room-web"],
+    ],
+  )
+  assert.ok(payload.members.every((m) => m.joined_at === "2026-09-12T10:00:00.000Z"))
+})
+
+test("the two messengers are distinguishable by surface even though their tier is identical", async () => {
+  const { handler } = harness([room(ROOM_A, MEMBERS_A)])
+
+  const res = asRpc(await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "roster", arguments: {} } }, tokenFor(ROOM_A)))
+  const content = res.result?.content
+  assert.ok(Array.isArray(content))
+  const payload = JSON.parse(String((content[0] as { text: string }).text)) as { members: { member_id: string; surface: string; tier: string }[] }
+  const surfaces = payload.members.filter((m) => m.tier === "messenger").map((m) => `${m.member_id}:${m.surface}`).sort()
+  assert.deepEqual(surfaces, ["m1:telegram", "m2:whatsapp"])
+})
+
+test("room A's token is rejected when it targets room B's server instance (the room binding)", async () => {
+  // A server instance scoped to room B only — the same scoping canvakit's
+  // room-binding test gets from its roomExists dep.
+  const { handler } = harness([room(ROOM_B, MEMBERS_A)])
+
+  const res = await handler(
+    { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "roster", arguments: {} } },
+    tokenFor(ROOM_A),
+  )
+
+  assert.equal(res.status, 401, "a valid token for room A is INVALID on room B's instance")
+})
+
+test("a missing or malformed bearer is rejected", async () => {
+  const { handler } = harness([room(ROOM_A, MEMBERS_A)])
+  const call = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "roster", arguments: {} } }
+
+  const noToken = await handler(call, undefined)
+  assert.equal(noToken.status, 401)
+
+  const garbage = await handler(call, "Bearer deadbeef")
+  assert.equal(garbage.status, 401)
+
+  const notBearer = await handler(call, "Basic dXNlcjpwYXNz")
+  assert.equal(notBearer.status, 401)
+})
+
+test("roster ignores any arguments passed to it — it must not accept a room code", async () => {
+  const { handler } = harness([room(ROOM_A, MEMBERS_A)])
+
+  // Even a call that NAMES another room resolves nothing: the room comes
+  // from the token, and the arguments are never read.
+  const res = asRpc(
+    await handler(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "roster", arguments: { roomCode: ROOM_B } } },
+      tokenFor(ROOM_A),
+    ),
+  )
+
+  assert.equal(res.status, 200)
+  const content = res.result?.content
+  assert.ok(Array.isArray(content))
+  const payload = JSON.parse(String((content[0] as { text: string }).text)) as { count: number }
+  assert.equal(payload.count, 3, "the roster is room A's — the roomCode argument was ignored")
+})
+
+test("roster reflects live membership (a member added after the handler was built is visible)", async () => {
+  const members = [...MEMBERS_A]
+  const deps: McpRoomDeps = { rooms: () => [room(ROOM_A, members)] }
+  const handler = createMcpRoomHandler(deps)
+
+  members.push(member("m4", "Late", "email", "email"))
+  const res = asRpc(await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "roster", arguments: {} } }, tokenFor(ROOM_A)))
+  const content = res.result?.content
+  assert.ok(Array.isArray(content))
+  const payload = JSON.parse(String((content[0] as { text: string }).text)) as { count: number }
+  assert.equal(payload.count, 4)
+})
+
+test("tools/list advertises exactly the roster tool, with no required arguments", async () => {
+  const { handler } = harness([room(ROOM_A, MEMBERS_A)])
+  const res = asRpc(await handler({ jsonrpc: "2.0", id: "a", method: "tools/list" }, undefined))
+
+  assert.equal(res.status, 200)
+  const tools = res.result?.tools
+  assert.ok(Array.isArray(tools) && tools.length === 1)
+  const tool = tools[0]
+  assert.equal((tool as { name: string }).name, "roster")
+  const schema = (tool as { inputSchema: Record<string, unknown> }).inputSchema
+  assert.deepEqual(schema.required, undefined, "roster takes no arguments — the room is fixed by the token")
+})
+
+test("a notification (no id) gets 202 with no body", async () => {
+  const { handler } = harness([room(ROOM_A, MEMBERS_A)])
+  const res = await handler({ jsonrpc: "2.0", method: "notifications/initialized" }, undefined)
+  assert.equal(res.status, 202)
+  assert.equal(res.body, undefined)
+})
+
+test("an unknown tool or method is a JSON-RPC failure, not a roster call", async () => {
+  const { handler } = harness([room(ROOM_A, MEMBERS_A)])
+
+  const unknownTool = asRpc(await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "say", arguments: {} } }, tokenFor(ROOM_A)))
+  assert.equal(unknownTool.status, 200)
+  assert.equal(unknownTool.error?.code, -32601, "say is step 2 — it must not appear advertised or callable")
+
+  const unknownMethod = asRpc(await handler({ jsonrpc: "2.0", id: 2, method: "resources/list" }, tokenFor(ROOM_A)))
+  assert.equal(unknownMethod.error?.code, -32601)
+})
+
+test("the mounts carry the room's token: tunnel ref for e2b, loopback ref for local", () => {
+  const tunnel = roomMcpServer(ROOM_A)
+  assert.equal(tunnel.name, "room")
+  assert.equal(tunnel.transport, "http")
+  assert.equal(tunnel.ref, `${env.publicUrl}/mcp/room`)
+  assert.equal(tunnel.headers.authorization, tokenFor(ROOM_A))
+
+  const local = localRoomMcpServer(ROOM_A)
+  assert.equal(local.ref, `http://127.0.0.1:${env.port}/mcp/room`)
+  assert.equal(local.headers.authorization, tokenFor(ROOM_A))
+})
+
+test("a room round-tripped through the store with protocol 'tools' keeps it", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const created = await store.create()
+  await store.update(created.code, { protocol: "tools" })
+
+  const reopened = await RoomStore.open(dir)
+  assert.equal(reopened.get(created.code)?.protocol, "tools")
+})
+
+test("a room persisted WITHOUT the protocol key still loads (the pre-existing-rooms guard)", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const created = await store.create()
+  await store.addMember(created.code, {
+    displayName: "Alice",
+    tier: "messenger",
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+15551234567" },
+  })
+
+  // Rewrite the store file without the key, exactly as an older service
+  // version would have left it.
+  const filePath = join(dir, "rooms.json")
+  const parsed = JSON.parse(await readFile(filePath, "utf8")) as { rooms: Record<string, unknown>[] }
+  for (const room of parsed.rooms) delete room.protocol
+  await writeFile(filePath, JSON.stringify(parsed, null, 2), "utf8")
+
+  const reopened = await RoomStore.open(dir)
+  const loaded = reopened.get(created.code)
+  assert.ok(loaded !== undefined)
+  assert.equal(loaded.protocol, undefined)
+  assert.equal(loaded.members.length, 1)
+})
+
+test("a room persisted with a nonsense protocol value is rejected, not silently loaded", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const created = await store.create()
+
+  const filePath = join(dir, "rooms.json")
+  const parsed = JSON.parse(await readFile(filePath, "utf8")) as { rooms: Record<string, unknown>[] }
+  parsed.rooms[0]!.protocol = "smoke-signals"
+  await writeFile(filePath, JSON.stringify(parsed, null, 2), "utf8")
+  void created
+
+  await assert.rejects(() => RoomStore.open(dir), /corrupt room store/i)
+})

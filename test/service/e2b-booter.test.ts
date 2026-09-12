@@ -50,6 +50,7 @@ const { DaemonClient } = await import("../../src/daemon/client.ts")
 const { RoomStore } = await import("../../src/rooms/store.ts")
 const { E2bBooter } = await import("../../src/service/booter.ts")
 const { canvakitMcpServer } = await import("../../src/service/mcp-canvakit.ts")
+const { roomMcpServer } = await import("../../src/service/mcp-room.ts")
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -111,8 +112,9 @@ test("E2bBooter.boot sends the sandbox spec, appServe and the pre-warm reuse id 
   assert.equal(body.appServe.port, 3210)
 
   // The render tool is mounted on the session, carrying THIS room's bearer
-  // token — the agent renders the artifact through it, over the tunnel.
-  assert.deepEqual(body.mcpServers, [canvakitMcpServer(room.code)])
+  // token — the agent renders the artifact through it, over the tunnel. The
+  // room MCP (audience tools) rides along beside it, same tunnel, own token.
+  assert.deepEqual(body.mcpServers, [canvakitMcpServer(room.code), roomMcpServer(room.code)])
   const mount = Array.isArray(body.mcpServers) ? body.mcpServers[0] : undefined
   assert.ok(isRecord(mount))
   if (!isRecord(mount)) return
@@ -233,7 +235,7 @@ test("E2bBooter.resume reconnects normally when the box probes alive", async () 
 
     // The mount survives the resume: a reconnected agent must keep the
     // render tool or the room silently loses its artifact after a pause.
-    assert.deepEqual(body.mcpServers, [canvakitMcpServer(room.code)])
+    assert.deepEqual(body.mcpServers, [canvakitMcpServer(room.code), roomMcpServer(room.code)])
   } finally {
     await artifact.close()
   }
@@ -257,7 +259,7 @@ test("E2bBooter.resume keeps the mcp mount on the fresh re-serve branch too", as
   const body = spawnRequests[0]?.body
   assert.ok(isRecord(body))
   if (!isRecord(body)) return
-  assert.deepEqual(body.mcpServers, [canvakitMcpServer(room.code)])
+  assert.deepEqual(body.mcpServers, [canvakitMcpServer(room.code), roomMcpServer(room.code)])
 })
 
 test("E2bBooter.resume reconnects normally when the box probes paused, not gone", async () => {

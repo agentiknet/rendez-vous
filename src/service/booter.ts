@@ -7,6 +7,7 @@ import type { Room } from "../rooms/types.ts"
 import { bootRoomSession, isSandboxNotFoundError, resumeRoomSession, type OrphanSandboxKiller } from "../sandbox/boot.ts"
 import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
 import { canvakitMcpServer } from "./mcp-canvakit.ts"
+import { localRoomMcpServer, roomMcpServer } from "./mcp-room.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
 /** Local (this host's) path to the artifact app source the sandbox executor
  *  maintains, seeded into the box on every boot/resume (src/sandbox/boot.ts's
@@ -41,6 +42,11 @@ export interface BootedSession {
    *  "the previous box expired" notice instead of the generic one. Always
    *  `undefined` otherwise. */
   boxWasGone?: boolean
+  /** Which addressing protocol the booted agent was given: `"tools"` when
+   *  the room MCP mount rode along on this spawn, `"markers"` when not.
+   *  Recorded on the room at first boot (never changed in place) so later
+   *  steps can gate marker parsing on what THIS session can actually do. */
+  protocol?: "markers" | "tools"
 }
 
 export interface ResumeOptions {
@@ -213,14 +219,19 @@ export class LocalBooter implements SessionBooter {
   }
 
   async boot(room: Room, opts: { label: string }): Promise<BootedSession> {
+    // The room MCP rides along on local rooms too (PLAN §4 R3), over this
+    // service's own loopback address — the tool path must exist here or the
+    // test harness diverges from production. Canvakit stays e2b-only: no
+    // artifact to render and no tunnel.
     const spawned = await this.client.spawnAgent({
       adapter: env.agentAdapter,
       model: env.agentModel,
       cwd: process.cwd(),
       label: opts.label,
       prompt: openingPrompt(room),
+      mcpServers: [localRoomMcpServer(room.code)],
     })
-    return { sessionId: spawned.id, sandboxId: undefined, artifactUrl: undefined, artifactReady: undefined }
+    return { sessionId: spawned.id, sandboxId: undefined, artifactUrl: undefined, artifactReady: undefined, protocol: "tools" }
   }
 
   async resume(room: Room, opts?: ResumeOptions): Promise<BootedSession> {
@@ -244,8 +255,9 @@ export class LocalBooter implements SessionBooter {
       cwd: process.cwd(),
       label: `rdv-${room.code}`,
       prompt: resumePrompt(room, opts?.recap !== undefined ? { recap: opts.recap } : undefined),
+      mcpServers: [localRoomMcpServer(room.code)],
     })
-    return { sessionId: spawned.id, sandboxId: undefined, artifactUrl: undefined, artifactReady: undefined }
+    return { sessionId: spawned.id, sandboxId: undefined, artifactUrl: undefined, artifactReady: undefined, protocol: "tools" }
   }
 }
 
@@ -309,10 +321,12 @@ export class E2bBooter implements SessionBooter {
       appDir: env.artifactAppDir,
       port: env.artifactPort,
       seedFromDir: ARTIFACT_SEED_DIR,
-      // The render tool, mounted on the agent session for THIS room — the
-      // mount carries the room's own bearer token, and only the e2b booter
-      // builds one (LocalBooter gets nothing).
-      mcpServers: [canvakitMcpServer(room.code)],
+      // The render tool plus the room's audience tools, mounted on the agent
+      // session for THIS room — the mounts carry the room's own bearer
+      // token. LocalBooter gets the room MCP too (loopback ref), so the tool
+      // path exists in every environment (PLAN §4 R3); canvakit stays
+      // e2b-only, there is no artifact to render locally.
+      mcpServers: [canvakitMcpServer(room.code), roomMcpServer(room.code)],
       ...(reuseSandboxId !== undefined ? { reuseSandboxId } : {}),
       ...(this.killOrphanSandbox !== undefined ? { killOrphanSandbox: this.killOrphanSandbox } : {}),
     })
@@ -321,6 +335,7 @@ export class E2bBooter implements SessionBooter {
       sandboxId: result.sandboxId,
       artifactUrl: result.artifactUrl,
       artifactReady: result.artifactReady,
+      protocol: "tools",
     }
   }
 
@@ -365,7 +380,7 @@ export class E2bBooter implements SessionBooter {
         sandboxId: room.sandboxId,
         artifactUrl: room.artifactUrl,
         seedFromDir: ARTIFACT_SEED_DIR,
-        mcpServers: [canvakitMcpServer(room.code)],
+        mcpServers: [canvakitMcpServer(room.code), roomMcpServer(room.code)],
         ...(this.killOrphanSandbox !== undefined ? { killOrphanSandbox: this.killOrphanSandbox } : {}),
       })
     } catch (err) {
@@ -387,6 +402,7 @@ export class E2bBooter implements SessionBooter {
       sandboxId: result.sandboxId,
       artifactUrl: result.artifactUrl,
       artifactReady: result.artifactReady,
+      protocol: "tools",
     }
   }
 }

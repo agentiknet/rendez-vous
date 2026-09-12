@@ -108,4 +108,8 @@ export interface Room {
    *  fresh rooms, absent on rooms that predate the field — same JSON
    *  round-trip rule as `pendingDeliveries` below. */
   asks?: Ask[]
+  /** Which addressing protocol this room's agent was booted with. Absent on
+   *  rooms that predate the field — same JSON round-trip rule as
+   *  `pendingDeliveries` and `asks`. Never changed in place. */
+  protocol?: "markers" | "tools"
 }

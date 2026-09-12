@@ -26,6 +26,12 @@ function isRoomState(value: unknown): value is RoomState {
   return value === "active" || value === "paused"
 }
 
+/** Optional key on `Room`: absent on rooms that predate the field, same
+ *  JSON round-trip rule as `pendingDeliveries` and `asks`. */
+function isProtocol(value: unknown): value is Room["protocol"] {
+  return value === undefined || value === "markers" || value === "tools"
+}
+
 function isTier(value: unknown): value is Tier {
   return typeof value === "string" && (TIERS as readonly string[]).includes(value)
 }
@@ -150,6 +156,7 @@ function isRoom(value: unknown): value is Room {
   const artifactReady = "artifactReady" in value ? value.artifactReady : undefined
   const pendingDeliveries = "pendingDeliveries" in value ? value.pendingDeliveries : undefined
   const asks = "asks" in value ? value.asks : undefined
+  const protocol = "protocol" in value ? value.protocol : undefined
   return (
     isString(value.code) &&
     isStringOrUndefined(sessionId) &&
@@ -159,6 +166,7 @@ function isRoom(value: unknown): value is Room {
     isBooleanOrUndefined(artifactReady) &&
     (pendingDeliveries === undefined || (Array.isArray(pendingDeliveries) && pendingDeliveries.every(isPendingDelivery))) &&
     (asks === undefined || (Array.isArray(asks) && asks.every(isAsk))) &&
+    isProtocol(protocol) &&
     Array.isArray(value.members) &&
     value.members.every(isMember) &&
     isString(value.createdAt) &&
@@ -348,6 +356,7 @@ export class RoomStore {
         | "state"
         | "pendingDeliveries"
         | "asks"
+        | "protocol"
       >
     >,
   ): Promise<Room> {

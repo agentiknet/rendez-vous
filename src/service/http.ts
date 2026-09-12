@@ -19,7 +19,8 @@ import type { Room, Tier } from "../rooms/types.ts"
 import { renderRoomNotFoundPage, renderRoomPage } from "../web/page.ts"
 import { proxyArtifact, publicArtifactUrl } from "./artifact-proxy.ts"
 import { ArtifactRenderStore } from "./artifact-renders.ts"
-import { createMcpCanvakitHandler, defaultMcpCanvakitDeps } from "./mcp-canvakit.ts"
+import { createMcpCanvakitHandler, defaultMcpCanvakitDeps, type McpResponse } from "./mcp-canvakit.ts"
+import { createMcpRoomHandler } from "./mcp-room.ts"
 import { getSessionBusy, type DaemonExtraOptions } from "./daemon-extra.ts"
 import type { RoomService } from "./room-service.ts"
 import { MediaStore, type IngressMediaRecord } from "./media-store.ts"
@@ -648,11 +649,12 @@ async function handleAgentpushMailWebhook(
 
 /** `POST /mcp/canvakit` — the MCP-over-HTTP endpoint the sandbox agents'
  *  `render_artifact` tool calls through the tunnel (src/service/mcp-canvakit.ts).
- *  Per-room bearer auth is enforced inside the handler (the token binds to
- *  the room code in the payload), after the body is parsed — so the handler
- *  function stays directly testable. */
-async function handleMcpCanvakit(
-  handler: ReturnType<typeof createMcpCanvakitHandler>,
+ *  `POST /mcp/room` — the audience-tools endpoint (src/service/mcp-room.ts),
+ *  same wire shape. Per-room bearer auth is enforced inside each handler
+ *  (the token binds to the room), after the body is parsed — so the handler
+ *  functions stay directly testable. */
+async function handleMcpPost(
+  handler: (body: unknown, authorization: string | undefined) => Promise<McpResponse>,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
@@ -683,6 +685,7 @@ async function handle(
   media: MediaIngress,
   daemon: DaemonExtraOptions,
   mcpCanvakit: ReturnType<typeof createMcpCanvakitHandler>,
+  mcpRoom: ReturnType<typeof createMcpRoomHandler>,
   hasStoredRender: (code: string) => Promise<boolean>,
   req: IncomingMessage,
   res: ServerResponse,
@@ -695,7 +698,12 @@ async function handle(
   }
 
   if (url.pathname === "/mcp/canvakit" && req.method === "POST") {
-    await handleMcpCanvakit(mcpCanvakit, req, res)
+    await handleMcpPost(mcpCanvakit, req, res)
+    return
+  }
+
+  if (url.pathname === "/mcp/room" && req.method === "POST") {
+    await handleMcpPost(mcpRoom, req, res)
     return
   }
 
@@ -812,8 +820,9 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
     ...defaultMcpCanvakitDeps(media.renders),
     roomExists: (code) => service.getRoom(code) !== undefined,
   })
+  const mcpRoom = createMcpRoomHandler({ rooms: () => service.listRooms() })
   return createServer((req, res) => {
-    handle(service, dedup, media, daemon, mcpCanvakit, hasStoredRender, req, res).catch((error: unknown) => {
+    handle(service, dedup, media, daemon, mcpCanvakit, mcpRoom, hasStoredRender, req, res).catch((error: unknown) => {
       if (!res.headersSent) {
         sendJson(res, 500, { error: "internal_error", message: error instanceof Error ? error.message : String(error) })
       }
