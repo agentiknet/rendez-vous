@@ -35,12 +35,14 @@ test("openingPrompt has no artifact path when called with no appDir (LocalBooter
   assert.ok(!prompt.includes(".agentproto/ui/index.html"), "LocalBooter has no artifact to point at")
 })
 
-test("openingPrompt explains the whisper syntax and its visibility rule", () => {
+test("openingPrompt teaches the say/whisper tools and no longer teaches the addressing markers", () => {
   const prompt = openingPrompt(fakeRoom("RDV-7F3K"))
-  assert.ok(prompt.includes("[[whisper to"), "should mention the opening delimiter")
-  assert.ok(prompt.includes("[[/whisper]]"), "should mention the closing delimiter")
+  assert.ok(prompt.includes("you call `say` or `whisper`"), "should teach the audience tools")
+  assert.ok(prompt.includes("Start by calling `roster`"), "should teach the roster call")
+  assert.ok(!prompt.includes("[[to"), "the [[to]] marker teaching is retired")
+  assert.ok(!prompt.includes("[[whisper to"), "the [[whisper to]] marker teaching is retired")
   assert.ok(
-    prompt.includes("but not what you said"),
+    prompt.includes("never what it said"),
     "should tell the agent that a whisper is visible as an event but not its content",
   )
 })
@@ -94,11 +96,29 @@ test("resumePrompt never asks the agent to imply it remembers", () => {
   )
 })
 
-test("resumePrompt keeps the whisper protocol a fresh boot gets", () => {
+test("resumePrompt keeps the say/whisper tools a fresh boot gets", () => {
   const prompt = resumePrompt(fakeRoom("RDV-7F3K"))
 
-  assert.ok(prompt.includes("[[whisper to <their display name>]]"), "a resumed room must still be able to whisper")
-  assert.ok(prompt.includes("[[/whisper]]"), "should include the closing marker too")
+  assert.ok(prompt.includes("you call `say` or `whisper`"), "a resumed room must still know the audience tools")
+  assert.ok(!prompt.includes("[[whisper to"), "the retired marker teaching must not survive on resume")
+})
+
+test("the forced boot and resume replies are delivered by a say call, not bare text", () => {
+  const room = fakeRoom("RDV-7F3K")
+  const prompts: Array<[string, string]> = [
+    ["fresh boot", openingPrompt(room)],
+    ["resume with recap", resumePrompt(room, { recap: "Alain: red. Claire: blue." })],
+    ["resume without recap", resumePrompt(room)],
+  ]
+
+  for (const [label, prompt] of prompts) {
+    assert.match(prompt, /calling `say` with no `to`/, `${label} should instruct a say broadcast`)
+    assert.ok(!prompt.includes("Reply to this message"), `${label} must not ask for a bare-text reply`)
+  }
+  assert.ok(
+    openingPrompt(room).includes('Room RDV-7F3K is open. Say what you want built.'),
+    "the greeting sentence itself is unchanged",
+  )
 })
 
 test("resumePrompt with an appDir keeps the render_artifact tool, so a resumed agent can still publish", () => {
@@ -137,9 +157,11 @@ test("resumePrompt carries the same capability lines as openingPrompt", () => {
 
   for (const line of [
     "Several humans drive this one session together",
-    "[[whisper to <their display name>]]",
+    "you call `say` or `whisper`",
     "do not stall waiting for consensus",
     "[[ask <their display name>]]",
+    "[[attach <filename>",
+    "[[say <the sentence to speak>]]",
     "Keep replies short",
     "render_artifact MCP tool",
   ]) {

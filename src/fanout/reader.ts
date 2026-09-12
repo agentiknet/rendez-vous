@@ -143,6 +143,12 @@ export class RoomFanout {
   private readonly readers: Map<string, ActiveReader> = new Map()
   /** Per-room, in-process only: reset on restart, so the first flush after boot is always treated as an artifact change (see start of `flush`). Keyed on the PUBLIC artifact URL (`publicArtifactUrl`), not the raw box URL — the public one never changes for a room, so a box replacement (architecture.md §9.3b) no longer trips this and re-sends. */
   private readonly lastArtifactUrl: Map<string, string | undefined> = new Map()
+  /** Per-room, in-process only: how many `say`/`whisper` `Delivery` records
+   *  the room held at the last flush of a `"tools"` room. A turn that ends
+   *  with the count unchanged means the agent called neither tool — nobody's
+   *  phone received anything (PLAN risk R2). Logged, not fixed: the web
+   *  transcript still shows the turn, so a human can see why. */
+  private readonly lastToolDeliveries: Map<string, number> = new Map()
 
   /** Both undefined unless TTS is configured. `[[say …]]` needs somewhere to
    *  put the rendered audio (the media store, which the artifact-independent
@@ -466,12 +472,30 @@ export class RoomFanout {
     await this.recordAsks(code, room, turnSegments)
     const pieces = buildTurnPieces(turnSegments, room.members)
 
+    // `protocol === "tools"` gates ONLY the agent's bare text: under the
+    // tools protocol a person hears from the agent when, and only when, it
+    // calls `say`/`whisper` — the turn's own text is thinking, projected on
+    // the web page. Everything else below (attachments, voice notes, the
+    // unservable notices, the cursor) runs identically for both protocols.
+    const textGated = room.protocol === "tools"
+
     await Promise.allSettled(
       room.members.map(async (member) => {
-        const memberText = renderTurnForMember(pieces, member)
-        const message = renderForTier(member.tier, memberText, artifactUrl, artifactChanged)
-        if (message !== undefined) {
-          await this.transport.send(member, message)
+        if (textGated) {
+          // The artifact-change notice is not the agent's speech — it is the
+          // room telling members its deliverable moved — so it survives the
+          // gate as its own standalone message. This is the same line
+          // `renderMessenger` appends to the text for `"markers"` rooms;
+          // here the text itself is suppressed, so the line must not be.
+          if (artifactChanged && artifactUrl !== undefined && member.tier !== "room-web") {
+            await this.transport.send(member, { text: artifactUrl, artifactUrl })
+          }
+        } else {
+          const memberText = renderTurnForMember(pieces, member)
+          const message = renderForTier(member.tier, memberText, artifactUrl, artifactChanged)
+          if (message !== undefined) {
+            await this.transport.send(member, message)
+          }
         }
         // Attachments go to everyone, after the text, and are independent of
         // it: a turn that is nothing BUT an attachment still delivers the
@@ -490,6 +514,20 @@ export class RoomFanout {
         }
       }),
     )
+
+    // PLAN risk R2: for a `"tools"` room, delivery depends on the agent
+    // actually calling `say`/`whisper` — counted via the `Delivery` records
+    // the tool handlers wrote this turn. A turn that added none left every
+    // phone silent while the web page looks healthy; say so, loudly.
+    if (textGated) {
+      const toolDeliveries = (room.deliveries ?? []).filter(
+        (delivery) => delivery.kind === "say" || delivery.kind === "whisper",
+      ).length
+      if (toolDeliveries === (this.lastToolDeliveries.get(code) ?? 0)) {
+        console.warn(`room ${code}: turn ended with zero say/whisper tool calls — no phone received anything this turn`)
+      }
+      this.lastToolDeliveries.set(code, toolDeliveries)
+    }
 
     // Cursor is persisted only after the flush attempt: a crash between send and
     // persist re-sends this turn on the next boot (at-least-once), never drops it.

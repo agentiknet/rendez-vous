@@ -562,13 +562,20 @@ test("start() after reopening the store resumes fan-out from the persisted curso
   assert.ok(sessionId !== undefined)
   if (sessionId === undefined) return
 
+  // LocalBooter rooms boot `protocol: "tools"`, so a turn's BARE text no
+  // longer reaches any transport (PLAN §3.4) — the reader's consumption of
+  // the turn is observable through the cursor, and the tools' own sends are
+  // covered in test/fanout/reader-tools.test.ts and delivery.test.ts.
+  const transport1CountBeforeFirstTurn = transport1.sends.length
   daemon.pushRecord(sessionId, { seq: 1, kind: "text-delta", text: "hello " })
   daemon.pushRecord(sessionId, { seq: 2, kind: "text-delta", text: "world" })
   daemon.pushRecord(sessionId, { seq: 3, kind: "turn-end", reason: "completed" })
-
-  await waitFor(() => transport1.sends.some((s) => s.message.text === "hello world"))
   await waitFor(() => (store1.get(created.room.code)?.cursor ?? 0) === 3)
-  const transport1CountAfterFirstTurn = transport1.sends.length
+  assert.equal(
+    transport1.sends.length,
+    transport1CountBeforeFirstTurn,
+    "a tools room's bare turn text reaches no transport",
+  )
   await service1.stop()
 
   const store2 = await RoomStore.open(dir)
@@ -580,11 +587,11 @@ test("start() after reopening the store resumes fan-out from the persisted curso
   daemon.pushRecord(sessionId, { seq: 4, kind: "text-delta", text: "second turn" })
   daemon.pushRecord(sessionId, { seq: 5, kind: "turn-end", reason: "completed" })
 
-  await waitFor(() => transport2.sends.length === 1)
-  assert.equal(transport2.sends[0]?.message.text, "second turn")
+  await waitFor(() => (store2.get(created.room.code)?.cursor ?? 0) === 5)
+  assert.equal(transport2.sends.length, 0, "the reopened service re-delivers nothing from before the cursor")
   assert.equal(
     transport1.sends.length,
-    transport1CountAfterFirstTurn,
+    transport1CountBeforeFirstTurn,
     "the original transport must never see the second turn",
   )
 
