@@ -2,31 +2,31 @@
   {
     "type": "closing",
     "isClosing": true,
-    "title": "Work is multiplayer.",
-    "subtitle": "Agents are single-player.",
+    "title": "AI is already in your pocket.",
+    "subtitle": "It is just only ever in one pocket at a time.",
     "page": "1 / 7"
   },
   {
     "type": "statement",
     "isStatement": true,
     "eyebrow": "Today",
-    "title": "You spend your day copy-pasting between two chats.",
+    "title": "Your AI and your colleague's have never met.",
     "bullets": [
-      "One thread per person. One chat per AI.",
-      "You carry the context between them, by hand.",
-      "Nobody else ever sees it."
+      "Two people, two phones, two separate assistants.",
+      "You screenshot one and paste it into the other.",
+      "Whatever you agreed never reaches either of them."
     ],
-    "illustration": "Two chat windows side by side, the same message being dragged from one to the other. Build this one — no shoot needed.",
+    "illustration": "Two phones side by side, each with its own AI chat, and a screenshot being forwarded from one to the other. Buildable without a shoot.",
     "page": "2 / 7"
   },
   {
     "type": "statement",
     "isStatement": true,
     "eyebrow": "Rendez-vous",
-    "title": "Everyone works in one room — people and agents.",
+    "title": "Put everyone's pocket in the same room.",
     "bullets": [
-      "Several people. Several agents. One conversation.",
-      "Each on the app they already use.",
+      "One conversation, shared across everybody's phone.",
+      "In the messaging app they already have open.",
       "An agent in the middle, sorting out who wants what."
     ],
     "illustration": "THE money shot. The 4-up frame mid-conflict: Julie's phone, Tom's phone, the room view showing the agent's “Tom's villa is 16k, Julie's cap is 12k”, and the artifact.",
@@ -36,11 +36,11 @@
     "type": "statement",
     "isStatement": true,
     "eyebrow": "Getting in",
-    "title": "You join by texting a bot.",
+    "title": "Text a bot. You are in.",
     "bullets": [
-      "Nothing to install. No account to share.",
-      "Phone, browser, or just reply to the email.",
-      "An agent joins the same way a person does."
+      "No app to download. No account to create. No login to share.",
+      "Send someone the code and their phone is in the room too.",
+      "An agent joins exactly the same way a person does."
     ],
     "illustration": "One phone: “new” → the room code and QR come straight back. A second phone joins. Two real screens.",
     "page": "4 / 7"
@@ -170,51 +170,21 @@
   {
     "type": "closing",
     "isClosing": true,
-    "title": "You are not the middleman anymore.",
-    "subtitle": "Humans and agents, finally in the same room.",
+    "title": "One room, in everyone's pocket.",
+    "subtitle": "You are not the middleman anymore.",
     "page": "7 / 7"
-  },
-  {
-    "type": "findings",
-    "isFindings": true,
-    "eyebrow": "Appendix — how it holds up",
-    "title": "Eight findings, and where each fix landed.",
-    "findingsItems": [
-      {
-        "n": "1",
-        "tag": "PR 1274 · PR 1273",
-        "label": "a mid-turn prompt is lost without queue: true, and a killed session still answers 200 so resume reports success doing nothing"
-      },
-      {
-        "n": "2",
-        "tag": "PR 1279 · PR 1278 · PR 1286",
-        "label": "sandbox liveness unreported; orphaned boxes never reaped; a failed reconnect leaves the box running and billing"
-      },
-      {
-        "n": "3",
-        "tag": "PR 1281 · PR 1277",
-        "label": "app serve ignores the declared UI path; a mutating proxy route had no auth gate"
-      },
-      {
-        "n": "4",
-        "tag": "fixed in the room",
-        "label": "the fan-out cursor froze on resume, the artifact link outlived its box, and a recap fix shipped dead on arrival — each now has a regression test"
-      }
-    ],
-    "highlight": "Day one rule: never fork, never vendor, never patch the runtime. Eight findings later it held — seven pull requests open upstream, each with a test that reproduces the failure first.",
-    "page": "Appendix"
   },
   {
     "type": "list",
     "isList": true,
-    "eyebrow": "Appendix — proven live",
-    "title": "On a real phone, in the rehearsal log.",
+    "eyebrow": "Appendix — what we proved, live",
+    "title": "On a real phone, not a mock.",
     "bullets": [
-      "Cold boot to a working room with a shared artifact: 86.5 seconds.",
-      "Two members on two surfaces, every message attributed, one reply reaching both.",
-      "The agent edits the shared artifact on request, confirmed live on its URL.",
-      "A PDF previewed, confirmed by a member, byte-matched in the inbox.",
-      "The sandbox deleted out from under the room — the next message revived it."
+      "Texted “new” from a phone — a working room, with a shared document, in 86 seconds.",
+      "Two people on two surfaces: every message attributed, one answer reaching both.",
+      "Voice notes and photos in; a voice note, a PDF and a live website back out.",
+      "A private answer to one member — the others see that it happened, not what it said.",
+      "We deleted the machine out from under the room; the next message brought it back."
     ],
     "page": "Appendix"
   }
