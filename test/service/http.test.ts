@@ -414,7 +414,7 @@ async function startFakeArtifactUpstream(): Promise<string> {
  *  needs its own harness (architecture.md §9.3b). */
 async function newRoomHarnessWithArtifact(
   artifactUrl: string,
-): Promise<{ baseUrl: string; code: string; daemon: ExtendedFakeDaemon; sessionId: string }> {
+): Promise<{ baseUrl: string; code: string; daemon: ExtendedFakeDaemon; sessionId: string; store: RoomStore }> {
   const dir = await freshDir()
   const daemon = await freshDaemon()
   const store = await RoomStore.open(dir)
@@ -442,7 +442,7 @@ async function newRoomHarnessWithArtifact(
   if (created.kind !== "created") throw new Error("unreachable")
 
   const baseUrl = await listenOnRandomPort(service, { daemon: { baseUrl: daemon.url, token: undefined } })
-  return { baseUrl, code: created.room.code, daemon, sessionId: booted.sessionId }
+  return { baseUrl, code: created.room.code, daemon, sessionId: booted.sessionId, store }
 }
 
 test("GET /r/:code/artifact/ reverse-proxies to the room's current artifactUrl", async () => {
@@ -475,6 +475,22 @@ test("GET /r/:code/artifact/ self-heals with a refreshing 503 when the room has 
   assert.equal(res.status, 503)
   assert.match(res.headers.get("content-type") ?? "", /text\/html/)
   assert.match(await res.text(), /not available yet/i)
+})
+
+test("a room whose artifactReady is false emits no artifact URL to clients — the page shows its paused state instead", async () => {
+  const upstreamUrl = await startFakeArtifactUpstream()
+  const { baseUrl, code, store } = await newRoomHarnessWithArtifact(upstreamUrl)
+  await store.update(code, { artifactReady: false })
+
+  const json = await fetch(`${baseUrl}/rooms/${code}`)
+  assert.equal(json.status, 200)
+  const body = await readJson(json)
+  assert.equal(body.artifactUrl, undefined, "the JSON API must not advertise a dead box's URL")
+
+  const page = await fetch(`${baseUrl}/r/${code}`)
+  assert.equal(page.status, 200)
+  const html = await page.text()
+  assert.ok(!html.includes(`/r/${code}/artifact/`), "the page must not embed a clickable dead artifact link")
 })
 
 // Ingress media on the media route (docs/MULTIMODAL.md): the same

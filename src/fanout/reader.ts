@@ -132,7 +132,11 @@ export class RoomFanout {
     // proxy URL instead, which is why box replacement (a new raw URL behind
     // the same code) does not register as a change here: `RoomService`
     // already sends its own one-time "restored on a new box" notice for that.
-    const artifactUrl = room.artifactUrl !== undefined ? publicArtifactUrl(code) : undefined
+    // `artifactReady === false` means the box was last confirmed dead (the
+    // idle sweep's probe) — the URL is a dead link until something revives
+    // the box and re-marks it ready, so no artifact line goes out at all.
+    const artifactUrl =
+      room.artifactUrl !== undefined && room.artifactReady !== false ? publicArtifactUrl(code) : undefined
     const hasSeenArtifact = this.lastArtifactUrl.has(code)
     const previousArtifactUrl = this.lastArtifactUrl.get(code)
     const artifactChanged = hasSeenArtifact ? previousArtifactUrl !== artifactUrl : artifactUrl !== undefined

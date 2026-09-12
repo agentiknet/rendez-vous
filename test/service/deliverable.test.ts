@@ -7,7 +7,7 @@ import { after, test } from "node:test"
 import { AgentpushToolClient } from "../../src/channels/agentpush/tools-client.ts"
 import { DaemonClient } from "../../src/daemon/client.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
-import type { Address, Member, Room, Tier } from "../../src/rooms/types.ts"
+import type { Address, Member, PendingDelivery, Room, Tier } from "../../src/rooms/types.ts"
 import { LocalBooter } from "../../src/service/booter.ts"
 import {
   DeliverableAwareTransport,
@@ -128,6 +128,8 @@ async function buildDeliverable(opts?: {
   now?: () => number
   expiryMs?: number
   pages?: number
+  store?: RoomStore
+  deliveryAllowlist?: readonly string[]
 }): Promise<{ deliverable: DeliverableService; client: DaemonClient; daemon: FakeDaemon; mediaStore: MediaStore }> {
   const daemon = opts?.daemon ?? (await freshDaemon())
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
@@ -139,6 +141,8 @@ async function buildDeliverable(opts?: {
     publicUrl: "https://rdv.example.com",
     fetchHtml: async () => "<!doctype html><html><body><h1>the artifact</h1></body></html>",
     renderPdf: fakeRenderPdf(opts?.pages),
+    ...(opts?.store !== undefined ? { store: opts.store } : {}),
+    ...(opts?.deliveryAllowlist !== undefined ? { deliveryAllowlist: opts.deliveryAllowlist } : {}),
     ...(opts?.now !== undefined ? { now: opts.now } : {}),
     ...(opts?.expiryMs !== undefined ? { expiryMs: opts.expiryMs } : {}),
   })
@@ -178,6 +182,18 @@ function promptTexts(daemon: FakeDaemon, sessionId: string): string[] {
   return daemon.requestsReceived
     .filter((r) => r.path === `/sessions/${sessionId}/prompt`)
     .map((r) => (isRecord(r.body) && typeof r.body.prompt === "string" ? r.body.prompt : ""))
+}
+
+function fail(reason: string): never {
+  throw new Error(reason)
+}
+
+async function waitFor(check: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now()
+  while (!check()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor timed out")
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +265,39 @@ test("resolveDeliveryTargets: a bare email address resolves to an email target; 
   assert.deepEqual(resolveDeliveryTargets(r, "alice@client.com", undefined), [{ kind: "email", address: "alice@client.com" }])
   const bad = resolveDeliveryTargets(r, "not an address", undefined)
   assert.ok(!Array.isArray(bad))
+})
+
+test("resolveDeliveryTargets: a member's display name resolves to their own address — messenger contact, or contact ref as mail", () => {
+  const alice = member({ id: "mem_alice", displayName: "Alice" })
+  const bobMail = member({
+    id: "mem_bob",
+    displayName: "Bob",
+    tier: "email",
+    address: { provider: "agentpush", source: "mail", contactRef: "bob@example.com" },
+  })
+  const r = room({ members: [alice, bobMail] })
+
+  assert.deepEqual(resolveDeliveryTargets(r, "Alice", undefined), [{ kind: "messenger", member: alice }])
+  assert.deepEqual(resolveDeliveryTargets(r, "bob", undefined), [{ kind: "email", address: "bob@example.com" }])
+  // Case-insensitive, and a member's name beats the "not a valid target" fallback.
+  assert.deepEqual(resolveDeliveryTargets(r, "  ALICE  ", undefined), [{ kind: "messenger", member: alice }])
+})
+
+test("resolveDeliveryTargets: a room-web member's name is refused (no deliverable address), a non-member name is refused, an ambiguous name is refused with a visible line", () => {
+  const web = member({ id: "mem_web", displayName: "Chloe", tier: "room-web", address: { provider: "room-web", source: "room-web", contactRef: "chloe" } })
+  const refused = resolveDeliveryTargets(room({ members: [web] }), "Chloe", undefined)
+  assert.ok(!Array.isArray(refused))
+  assert.match(refused.error, /no messenger or email address/)
+
+  const nonMember = resolveDeliveryTargets(room({ members: [member()] }), "Mallory", undefined)
+  assert.ok(!Array.isArray(nonMember))
+  assert.match(nonMember.error, /no member named "Mallory"/)
+
+  const chris = member({ id: "mem_1", displayName: "Chris" })
+  const chris2 = member({ id: "mem_2", displayName: "Chris", address: { provider: "whatsapp", source: "agentpush", contactRef: "+299" } })
+  const ambiguous = resolveDeliveryTargets(room({ members: [chris, chris2] }), "Chris", undefined)
+  assert.ok(!Array.isArray(ambiguous))
+  assert.match(ambiguous.error, /matches 2 members/)
 })
 
 // ---------------------------------------------------------------------------
@@ -415,6 +464,135 @@ test("a pending delivery expires after 30 minutes and confirming it afterwards s
   const outcome = await deliverable.confirm(r, requester, token)
   assert.equal(outcome.kind, "expired")
   assert.equal(deliverable.peek(r.code, token), undefined)
+})
+
+// ---------------------------------------------------------------------------
+// The delivery allowlist (docs/STATE.md hard limit): a resolved address not
+// on it is refused at request time, before any render and before a token
+// even exists to confirm.
+// ---------------------------------------------------------------------------
+
+test("a target not on the delivery allowlist is refused before rendering; an allowlisted member address passes", async () => {
+  const agentpush = await freshAgentpush()
+  const before = renderCalls
+  const { deliverable, daemon } = await buildDeliverable({
+    agentpushUrl: agentpush.url,
+    deliveryAllowlist: ["jeremy@agentik.net", "+15550001111"],
+  })
+  const requester = member()
+  const r = room({ members: [requester] })
+
+  const refused = await deliverable.requestFromCommand(r, requester, "nobody@example.com")
+  assert.ok(!refused.ok)
+  if (refused.ok) return
+  assert.match(refused.error, /not on the delivery allowlist/)
+  assert.equal(renderCalls, before, "a refused target must never render")
+  assert.equal(agentpush.requests.length, 0)
+  assert.match(promptTexts(daemon, "sess_test")[0] ?? "", /refused: not on the delivery allowlist/)
+
+  // The resolved address of a member by name is checked the same way.
+  const refusedName = await deliverable.requestFromCommand(r, requester, "Mallory")
+  assert.ok(!refusedName.ok)
+
+  const allowed = await deliverable.requestFromCommand(r, requester, "me")
+  assert.ok(allowed.ok, allowed.ok ? "" : allowed.error)
+})
+
+// ---------------------------------------------------------------------------
+// Persistence (the restart finding): pending deliveries live on the room
+// record, so a fresh service over the reopened store can still confirm —
+// and expired leftovers are swept with the usual transcript line.
+// ---------------------------------------------------------------------------
+
+function pendingFixture(memberOfRoom: Member, token: string, expiresAt: number): PendingDelivery {  return {
+    token,
+    requestedBy: "Jeremy",
+    target: { kind: "messenger", member: memberOfRoom },
+    subject: "Room RDV-TEST deliverable",
+    mediaId: "00000000-0000-4000-8000-000000000001",
+    pageCount: 1,
+    createdAt: expiresAt - 30 * 60_000,
+    expiresAt,
+  }
+}
+
+async function persistedRoom(dir: string): Promise<{ store: RoomStore; code: string; requester: Member; confirmer: Member }> {
+  const store = await RoomStore.open(dir)
+  const created = await store.create()
+  const requester = await store.addMember(created.code, {
+    displayName: "Jeremy",
+    tier: "messenger",
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+15550001111" },
+  })
+  const confirmer = await store.addMember(created.code, {
+    displayName: "Bob",
+    tier: "messenger",
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+15550002222" },
+  })
+  await store.update(created.code, { sessionId: "sess_test", artifactUrl: "https://artifact.example.com" })
+  const room = store.get(created.code)
+  if (room === undefined) throw new Error("unreachable")
+  return { store, code: room.code, requester, confirmer }
+}
+
+test("a pending delivery survives a service restart: request, reopen the store in a new service, confirm works", async () => {
+  const agentpush = await freshAgentpush()
+  const dir = await freshDir("rdv-persist-")
+  const { store, code, requester, confirmer } = await persistedRoom(dir)
+  const { deliverable } = await buildDeliverable({ agentpushUrl: agentpush.url, store, pages: 1 })
+
+  const requested = await deliverable.requestFromCommand(store.get(code) ?? fail(`room ${code} vanished`), requester, "me")
+  assert.ok(requested.ok)
+  if (!requested.ok) return
+  const token = /confirm (PDF-[A-Z0-9]{4})/.exec(requested.previewText)?.[1]
+  assert.ok(token)
+  if (token === undefined) return
+
+  const persisted = store.get(code)?.pendingDeliveries
+  assert.equal(persisted?.length, 1, "the request must be written through to the room record")
+  assert.equal(persisted?.[0]?.token, token)
+  assert.equal(persisted?.[0]?.target.kind, "messenger")
+
+  // A genuinely new store AND a genuinely new service — the in-memory map is
+  // empty, so confirm proves it hydrated the pending back from the room
+  // record. The MediaStore index is also empty (fresh dir), exercising the
+  // confirm-time re-render fallback against the room's artifactUrl.
+  const reopened = await RoomStore.open(dir)
+  assert.equal(reopened.get(code)?.pendingDeliveries?.[0]?.token, token)
+  const { deliverable: revived, daemon: revivedDaemon } = await buildDeliverable({ agentpushUrl: agentpush.url, store: reopened, pages: 1 })
+  assert.notEqual(revived.peek(code, token), undefined, "the restarted service must know the pending token")
+
+  agentpush.respondOnce(200, { media_id: "media_restart" })
+  agentpush.respondOnce(200, { status: "sent", message_id: "restart-msg-1" })
+  const confirmed = await revived.confirm(reopened.get(code) ?? fail(`room ${code} vanished`), confirmer, token)
+  assert.equal(confirmed.kind, "sent")
+  if (confirmed.kind !== "sent") return
+  assert.match(confirmed.resultText, /restart-msg-1/)
+
+  await waitFor(() => (reopened.get(code)?.pendingDeliveries ?? []).length === 0)
+  assert.match(promptTexts(revivedDaemon, "sess_test").join("\n"), /Bob confirmed delivery/)
+})
+
+test("pending deliveries expired before the restart are swept on startup with the usual transcript line, live ones survive", async () => {
+  const dir = await freshDir("rdv-sweep-")
+  const { store, code, requester } = await persistedRoom(dir)
+  const clock = 1_000_000
+  await store.update(code, {
+    pendingDeliveries: [
+      pendingFixture(requester, "PDF-DEAD", clock - 1),
+      pendingFixture(requester, "PDF-LIVE", clock + 30 * 60_000),
+    ],
+  })
+
+  const { deliverable, daemon } = await buildDeliverable({ store, now: () => clock })
+  await waitFor(() => (store.get(code)?.pendingDeliveries ?? []).length === 1)
+
+  const kept = store.get(code)?.pendingDeliveries?.[0]
+  assert.equal(kept?.token, "PDF-LIVE")
+  assert.notEqual(deliverable.peek(code, "PDF-LIVE"), undefined, "a live pending must be confirmable after the restart")
+  assert.equal(deliverable.peek(code, "PDF-DEAD"), undefined, "an expired pending must never become confirmable again")
+  await waitFor(() => promptTexts(daemon, "sess_test").some((text) => text.includes("PDF-DEAD")))
+  assert.match(promptTexts(daemon, "sess_test").join("\n"), /Delivery PDF-DEAD \("Room RDV-TEST deliverable"\) expired before anyone confirmed it\./)
 })
 
 // ---------------------------------------------------------------------------

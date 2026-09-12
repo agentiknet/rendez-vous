@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, test } from "node:test"
 import { RoomStore } from "../../src/rooms/store.ts"
-import type { Address, Member } from "../../src/rooms/types.ts"
+import type { Address, Member, PendingDelivery } from "../../src/rooms/types.ts"
 
 async function freshDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "rdv-store-"))
@@ -271,8 +271,65 @@ test("open accepts a room whose optional artifactReady key is entirely absent", 
   assert.equal(store.get("RDV-7F3K")?.artifactReady, undefined)
 })
 
-test("writes are atomic: no partial rooms.json is ever left behind", async () => {
+test("pendingDeliveries update and round-trip through a reopen", async () => {
   const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const alice = await store.addMember(room.code, aliceInput())
+  const pending: PendingDelivery = {
+    token: "PDF-7F3K",
+    requestedBy: "Alice",
+    target: { kind: "messenger", member: alice },
+    subject: "Room deliverable",
+    mediaId: "00000000-0000-4000-8000-000000000001",
+    pageCount: 2,
+    createdAt: 1000,
+    expiresAt: 61_000,
+  }
+  const updated = await store.update(room.code, { pendingDeliveries: [pending] })
+  assert.deepEqual(updated.pendingDeliveries, [pending])
+
+  const reopened = await RoomStore.open(dir)
+  const reloaded = reopened.get(room.code)
+  assert.deepEqual(reloaded?.pendingDeliveries, [pending])
+
+  const cleared = await reopened.update(room.code, { pendingDeliveries: [] })
+  assert.deepEqual(cleared.pendingDeliveries, [])
+})
+
+test("open rejects a room whose pendingDeliveries entry is not the right shape", async () => {
+  const dir = trackDir(await freshDir())
+  const room = {
+    code: "RDV-7F3K",
+    members: [],
+    createdAt: "2026-09-12T00:00:00.000Z",
+    updatedAt: "2026-09-12T00:00:00.000Z",
+    cursor: 0,
+    lastActivityAt: "2026-09-12T00:00:00.000Z",
+    state: "active",
+    pendingDeliveries: [{ token: 7 }],
+  }
+  await writeFile(join(dir, "rooms.json"), JSON.stringify({ rooms: [room] }), "utf8")
+  await assert.rejects(() => RoomStore.open(dir), /corrupt room store/i)
+})
+
+test("open accepts a room without a pendingDeliveries key (predates the field)", async () => {
+  const dir = trackDir(await freshDir())
+  const room = {
+    code: "RDV-7F3K",
+    members: [],
+    createdAt: "2026-09-12T00:00:00.000Z",
+    updatedAt: "2026-09-12T00:00:00.000Z",
+    cursor: 0,
+    lastActivityAt: "2026-09-12T00:00:00.000Z",
+    state: "active",
+  }
+  await writeFile(join(dir, "rooms.json"), JSON.stringify({ rooms: [room] }), "utf8")
+  const store = await RoomStore.open(dir)
+  assert.equal(store.get("RDV-7F3K")?.pendingDeliveries, undefined)
+})
+
+test("writes are atomic: no partial rooms.json is ever left behind", async () => {  const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)
   const room = await store.create()
   await Promise.all([

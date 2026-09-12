@@ -197,6 +197,9 @@ export class RoomService {
       new DeliverableService({
         mediaStore: this.mediaStore,
         client: this.client,
+        // Persist pending deliveries on the room record so they survive a
+        // restart (docs/DELIVERABLE.md) — the minimal wiring hook.
+        store: this.store,
         agentpush:
           env.agentpushUrl !== undefined ? new AgentpushToolClient({ baseUrl: env.agentpushUrl, apiKey: env.agentpushKey }) : undefined,
       })

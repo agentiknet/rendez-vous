@@ -49,6 +49,44 @@ own tier to actually be `messenger` — a room-web member asking to deliver to
 "me" has no messenger address to send to, and is told so rather than
 silently doing nothing.
 
+A **current member's display name** also works — `send pdf to Bob` resolves
+to Bob's own address (his messenger contact, or his contact ref as a mail
+target when his tier is `email`), matched case-insensitively against the
+room's current roster. It never reaches a non-member: an unknown name is
+refused with a visible line, two members sharing a name are refused
+(ambiguity is never guessed — use an exact address), and a room-web member
+has no deliverable address and is told so.
+
+## The delivery allowlist
+
+The operator hard limit (docs/STATE.md): `RDV_DELIVERY_ALLOWLIST` — a
+comma-separated list of email addresses and messenger contact refs. When
+set, `DeliverableService` refuses any resolved target whose address (the
+email address, or the member's contact ref) is not on the list — at request
+time, before any render, before a token even exists to confirm. The refusal
+is posted into the room's transcript and nothing is rendered or stored.
+When unset, every target is allowed and a loud warning is logged at
+construction; `confirm` is still required either way.
+
+## Persistence: a pending delivery survives a restart
+
+Each pending delivery is persisted on the room record
+(`Room.pendingDeliveries` in `src/rooms/types.ts`, guarded and written
+through `RoomStore.update`) — one record per target, fields `token`,
+`requestedBy`, `target`, `subject`, `mediaId`, `pageCount`, `createdAt`,
+`expiresAt`. On startup `DeliverableService` hydrates them back from the
+store and **sweeps the expired ones** with the usual
+`[system · delivery] ... expired before anyone confirmed it.` transcript
+line — a token that expired before the restart can never become
+confirmable again. Confirm and cancel remove the record from the room.
+
+One wrinkle, handled: the `MediaStore`'s index is in-memory, so after a
+restart the stored PDF is no longer indexed even though the file is on
+disk. If a confirmed delivery's PDF can no longer be read but the room's
+raw artifact URL is still set, `confirm` re-renders the PDF from the live
+artifact and sends that (noted in the transcript) rather than failing the
+send.
+
 ## Why this never touches `src/fanout`
 
 The agent-authored `[[deliver]]` block arrives as part of an ordinary

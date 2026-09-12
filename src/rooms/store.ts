@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { generateCode, normalizeCode } from "./code.ts"
-import type { Address, Member, Room, RoomState, Tier } from "./types.ts"
+import type { Address, DeliveryTarget, Member, PendingDelivery, Room, RoomState, Tier } from "./types.ts"
 
 interface RoomFile {
   rooms: Room[]
@@ -60,6 +60,40 @@ function isMember(value: unknown): value is Member {
   )
 }
 
+function isDeliveryTarget(value: unknown): value is DeliveryTarget {
+  if (!isObject(value)) return false
+  if (!("kind" in value)) return false
+  if (value.kind === "messenger") return "member" in value && isMember(value.member)
+  if (value.kind === "email") return "address" in value && isString(value.address)
+  return false
+}
+
+function isPendingDelivery(value: unknown): value is PendingDelivery {
+  if (!isObject(value)) return false
+  if (
+    !("token" in value) ||
+    !("requestedBy" in value) ||
+    !("target" in value) ||
+    !("subject" in value) ||
+    !("mediaId" in value) ||
+    !("pageCount" in value) ||
+    !("createdAt" in value) ||
+    !("expiresAt" in value)
+  ) {
+    return false
+  }
+  return (
+    isString(value.token) &&
+    isString(value.requestedBy) &&
+    isDeliveryTarget(value.target) &&
+    isString(value.subject) &&
+    isString(value.mediaId) &&
+    typeof value.pageCount === "number" &&
+    typeof value.createdAt === "number" &&
+    typeof value.expiresAt === "number"
+  )
+}
+
 // JSON.stringify drops object keys whose value is `undefined`, so a persisted room with an
 // unset sessionId/sandboxId/artifactUrl/artifactReady round-trips with that key absent, not
 // present-as-undefined. These are the only optional fields on Room, so a missing key is
@@ -81,12 +115,14 @@ function isRoom(value: unknown): value is Room {
   const sandboxId = "sandboxId" in value ? value.sandboxId : undefined
   const artifactUrl = "artifactUrl" in value ? value.artifactUrl : undefined
   const artifactReady = "artifactReady" in value ? value.artifactReady : undefined
+  const pendingDeliveries = "pendingDeliveries" in value ? value.pendingDeliveries : undefined
   return (
     isString(value.code) &&
     isStringOrUndefined(sessionId) &&
     isStringOrUndefined(sandboxId) &&
     isStringOrUndefined(artifactUrl) &&
     isBooleanOrUndefined(artifactReady) &&
+    (pendingDeliveries === undefined || (Array.isArray(pendingDeliveries) && pendingDeliveries.every(isPendingDelivery))) &&
     Array.isArray(value.members) &&
     value.members.every(isMember) &&
     isString(value.createdAt) &&
@@ -263,7 +299,17 @@ export class RoomStore {
   async update(
     code: string,
     patch: Partial<
-      Pick<Room, "sessionId" | "sandboxId" | "artifactUrl" | "artifactReady" | "cursor" | "lastActivityAt" | "state">
+      Pick<
+        Room,
+        | "sessionId"
+        | "sandboxId"
+        | "artifactUrl"
+        | "artifactReady"
+        | "cursor"
+        | "lastActivityAt"
+        | "state"
+        | "pendingDeliveries"
+      >
     >,
   ): Promise<Room> {
     const normalized = normalizeCode(code)

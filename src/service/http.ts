@@ -17,6 +17,10 @@ import { MediaStore, type IngressMediaRecord } from "./media-store.ts"
  *  browser (architecture.md §9.3b; mirrors `RoomService`'s own
  *  `memberFacingArtifactUrl` for messenger/email replies). */
 function toPublicRoom(room: Room): Room {
+  // A box last confirmed dead (`artifactReady === false`, the idle sweep's
+  // probe) advertises no URL at all — the page shows its paused/self-heal
+  // state instead of a clickable dead link (the dead-artifact finding).
+  if (room.artifactReady === false) return { ...room, artifactUrl: undefined }
   if (room.artifactUrl === undefined) return room
   return { ...room, artifactUrl: publicArtifactUrl(room.code) }
 }

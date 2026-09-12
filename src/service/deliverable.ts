@@ -36,7 +36,9 @@ import type { DaemonClient } from "../daemon/client.ts"
 import { env } from "../env.ts"
 import type { OutboundMessage, Transport } from "../fanout/types.ts"
 import type { RoomStore } from "../rooms/store.ts"
-import type { Member, Room } from "../rooms/types.ts"
+import type { DeliveryTarget, Member, PendingDelivery, Room } from "../rooms/types.ts"
+
+export type { DeliveryTarget, PendingDelivery } from "../rooms/types.ts"
 import { AgentpushToolClient, isSendMessageResult, isUploadMediaResult } from "../channels/agentpush/tools-client.ts"
 import { renderArtifactPdf, type RenderedPdf } from "./pdf-render.ts"
 import type { MediaRecord, MediaStore } from "./media-store.ts"
@@ -155,11 +157,9 @@ export function parseDeliverableCommand(text: string): DeliverableCommand | unde
 
 // ---------------------------------------------------------------------------
 // Delivery targets: a member's own messenger, or an external email address.
+// The target union itself lives in src/rooms/types.ts so a pending delivery
+// can be persisted on the room record.
 // ---------------------------------------------------------------------------
-
-export type DeliveryTarget =
-  | { readonly kind: "messenger"; readonly member: Member }
-  | { readonly kind: "email"; readonly address: string }
 
 const SELF_PATTERN = /^(messenger\s+self|me|self|myself)$/i
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -173,6 +173,13 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
  * member's own address and requires their own tier to actually be
  * `messenger` — "send pdf to me" from the room-web view has no messenger
  * address to send to, and says so rather than silently doing nothing.
+ *
+ * A bare member display name (current member of the room, matched
+ * case-insensitively) resolves to that member's own address — their
+ * messenger contact, or their contact ref as an email target when their
+ * tier is `email`. A room-web member has no deliverable address and is
+ * told so; an ambiguous name (two current members share it) is refused
+ * with a visible line rather than guessed.
  */
 export function resolveDeliveryTargets(
   room: Room,
@@ -197,7 +204,18 @@ export function resolveDeliveryTargets(
     return [{ kind: "email", address: trimmed }]
   }
 
-  return { error: `not a valid delivery target: "${toRaw}"` }
+  const named = room.members.filter((member) => member.displayName.toLowerCase() === trimmed.toLowerCase())
+  if (named.length === 1) {
+    const target = named[0]
+    if (target === undefined) return { error: `no member named "${toRaw}" in this room` }
+    if (target.tier === "messenger") return [{ kind: "messenger", member: target }]
+    if (target.tier === "email") return [{ kind: "email", address: target.address.contactRef }]
+    return { error: `${target.displayName} is in the room on the web only — no messenger or email address to deliver to` }
+  }
+  if (named.length > 1) {
+    return { error: `"${trimmed}" matches ${named.length} members — use an exact address instead of a name` }
+  }
+  return { error: `no member named "${toRaw}" in this room — delivery targets are a member's name, an email address, or "me"` }
 }
 
 function describeTarget(target: DeliveryTarget): string {
@@ -303,20 +321,12 @@ async function sendToTarget(
 }
 
 // ---------------------------------------------------------------------------
-// The state machine.
+// The state machine. Pending deliveries are held in memory for the live
+// confirm/cancel path AND persisted on the room record (`Room.pendingDeliveries`,
+// src/rooms/types.ts) so they survive a service restart: the constructor
+// hydrates the map back from the store and sweeps expired entries with the
+// usual transcript line.
 // ---------------------------------------------------------------------------
-
-export interface PendingDelivery {
-  readonly token: string
-  readonly roomCode: string
-  readonly requestedBy: string
-  readonly targets: readonly DeliveryTarget[]
-  readonly subject: string
-  readonly mediaId: string
-  readonly pages: number
-  readonly createdAt: number
-  readonly expiresAt: number
-}
 
 export type RequestOutcome = { readonly previewText: string }
 export type CommandRequestOutcome = { readonly ok: true; readonly previewText: string } | { readonly ok: false; readonly error: string }
@@ -331,6 +341,16 @@ type RenderPdfFn = (html: string, title: string, outPath: string) => Promise<Ren
 export interface DeliverableServiceOptions {
   readonly mediaStore: MediaStore
   readonly client: DaemonClient
+  /** When given, pending deliveries are persisted on the room record and
+   *  hydrated back (expired ones swept) at construction — they survive a
+   *  service restart. `undefined` keeps the pre-persistence memory-only
+   *  behavior (tests that don't care). */
+  readonly store?: RoomStore
+  /** Operator hard limit (`RDV_DELIVERY_ALLOWLIST`, docs/STATE.md): a
+   *  resolved target whose address is not on this list is refused at
+   *  request time — before rendering, before a token exists. Defaults to
+   *  `env.deliveryAllowlist`; `undefined`/empty allows every target. */
+  readonly deliveryAllowlist?: readonly string[]
   /** `undefined` when `RDV_AGENTPUSH_URL`/`RDV_AGENTPUSH_KEY` aren't set —
    *  requests and previews still work (rendering needs no agentpush), only
    *  `confirm` reports a clear per-target failure instead of a silent no-op. */
@@ -352,6 +372,8 @@ function defaultFetchHtml(url: string): Promise<string> {
 export class DeliverableService {
   private readonly mediaStore: MediaStore
   private readonly client: DaemonClient
+  private readonly store: RoomStore | undefined
+  private readonly deliveryAllowlist: readonly string[] | undefined
   private readonly agentpush: AgentpushToolClient | undefined
   private readonly publicUrl: string
   private readonly fetchHtml: (url: string) => Promise<string>
@@ -363,12 +385,100 @@ export class DeliverableService {
   constructor(opts: DeliverableServiceOptions) {
     this.mediaStore = opts.mediaStore
     this.client = opts.client
+    this.store = opts.store
+    this.deliveryAllowlist = opts.deliveryAllowlist ?? env.deliveryAllowlist
     this.agentpush = opts.agentpush
     this.publicUrl = opts.publicUrl ?? env.publicUrl
     this.fetchHtml = opts.fetchHtml ?? defaultFetchHtml
     this.renderPdf = opts.renderPdf ?? ((html, title, outPath) => renderArtifactPdf(html, title, outPath))
     this.now = opts.now ?? Date.now
     this.expiryMs = opts.expiryMs ?? DEFAULT_EXPIRY_MS
+
+    if (opts.store !== undefined) {
+      const expired = this.hydrateFromStore(opts.store)
+      if (expired.length > 0) {
+        console.log(`[deliverable] sweeping ${expired.length} expired pending delivery(ies) left over from a previous run`)
+        void this.sweepExpired(opts.store, expired)
+      }
+    }
+  }
+
+  /** Reloads persisted pending deliveries into the in-memory map; returns the
+   *  expired ones for the startup sweep (they are NOT hydrated — a token
+   *  expired before the restart must not become confirmable again). */
+  private hydrateFromStore(store: RoomStore): { roomCode: string; pending: PendingDelivery }[] {
+    const expired: { roomCode: string; pending: PendingDelivery }[] = []
+    for (const room of store.list()) {
+      for (const pending of room.pendingDeliveries ?? []) {
+        if (this.now() > pending.expiresAt) {
+          expired.push({ roomCode: room.code, pending })
+          continue
+        }
+        this.pending.set(this.key(room.code, pending.token), pending)
+      }
+    }
+    return expired
+  }
+
+  private async sweepExpired(store: RoomStore, expired: readonly { roomCode: string; pending: PendingDelivery }[]): Promise<void> {
+    const byRoom = new Map<string, PendingDelivery[]>()
+    for (const entry of expired) {
+      const list = byRoom.get(entry.roomCode) ?? []
+      list.push(entry.pending)
+      byRoom.set(entry.roomCode, list)
+    }
+    for (const [code, expiredList] of byRoom) {
+      const room = store.get(code)
+      if (room === undefined) continue
+      const expiredTokens = new Set(expiredList.map((pending) => pending.token))
+      try {
+        await store.update(code, { pendingDeliveries: (room.pendingDeliveries ?? []).filter((pending) => !expiredTokens.has(pending.token)) })
+      } catch (error) {
+        console.error(`[deliverable] failed to sweep expired deliveries from room ${code}'s record: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      for (const pending of expiredList) {
+        await this.postSystemNote(room, `Delivery ${pending.token} ("${pending.subject}") expired before anyone confirmed it.`)
+      }
+    }
+  }
+
+  private async persistAdditions(roomCode: string, additions: readonly PendingDelivery[]): Promise<void> {
+    if (this.store === undefined) return
+    const room = this.store.get(roomCode)
+    if (room === undefined) return
+    try {
+      await this.store.update(roomCode, { pendingDeliveries: [...(room.pendingDeliveries ?? []), ...additions] })
+    } catch (error) {
+      console.error(`[deliverable] failed to persist pending deliveries on room ${roomCode}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  private async persistRemoval(roomCode: string, token: string): Promise<void> {
+    if (this.store === undefined) return
+    const room = this.store.get(roomCode)
+    if (room === undefined) return
+    const existing = room.pendingDeliveries ?? []
+    const next = existing.filter((pending) => pending.token !== token)
+    if (next.length === existing.length) return
+    try {
+      await this.store.update(roomCode, { pendingDeliveries: next })
+    } catch (error) {
+      console.error(`[deliverable] failed to persist the removal of ${token} from room ${roomCode}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** The operator's hard limit (docs/STATE.md): a target not on the delivery
+   *  allowlist is refused before any render, before any token exists. */
+  private allowlistRefusal(targets: readonly DeliveryTarget[]): string | undefined {
+    if (this.deliveryAllowlist === undefined || this.deliveryAllowlist.length === 0) return undefined
+    const allowed = new Set(this.deliveryAllowlist.map((entry) => entry.trim().toLowerCase()))
+    for (const target of targets) {
+      const address = target.kind === "email" ? target.address : target.member.address.contactRef
+      if (!allowed.has(address.toLowerCase())) {
+        return `delivery refused: ${describeTarget(target)} is not on the delivery allowlist — nothing rendered, nothing sent`
+      }
+    }
+    return undefined
   }
 
   private mediaUrl(roomCode: string, mediaId: string): string {
@@ -394,7 +504,7 @@ export class DeliverableService {
     }
   }
 
-  private async renderAndStore(room: Room, subject: string): Promise<{ ok: true; record: MediaRecord } | { ok: false; error: string }> {
+  private async renderAndStore(room: Room, subject: string): Promise<{ ok: true; record: MediaRecord; data: Buffer } | { ok: false; error: string }> {
     if (room.artifactUrl === undefined) {
       return { ok: false, error: "the room has no live artifact yet" }
     }
@@ -411,7 +521,7 @@ export class DeliverableService {
       const rendered = await this.renderPdf(html, subject, outPath)
       const data = await readFile(outPath)
       const record = await this.mediaStore.save(room.code, data, { contentType: "application/pdf", pages: rendered.pages })
-      return { ok: true, record }
+      return { ok: true, record, data }
     } catch (err) {
       return { ok: false, error: `could not render the PDF: ${err instanceof Error ? err.message : String(err)}` }
     } finally {
@@ -419,46 +529,60 @@ export class DeliverableService {
     }
   }
 
-  private async createPending(room: Room, requestedBy: string, targets: DeliveryTarget[], subject: string): Promise<RequestOutcome> {
+  private async createPending(
+    room: Room,
+    requestedBy: string,
+    targets: DeliveryTarget[],
+    subject: string,
+  ): Promise<RequestOutcome | { readonly refusal: string }> {
+    const refused = this.allowlistRefusal(targets)
+    if (refused !== undefined) {
+      await this.postSystemNote(room, `${requestedBy} asked to deliver "${subject}" to ${describeTargets(targets)}, refused: not on the delivery allowlist.`)
+      return { refusal: refused }
+    }
+
     const stored = await this.renderAndStore(room, subject)
     if (!stored.ok) {
       await this.postSystemNote(room, `${requestedBy} asked to deliver "${subject}" but it failed: ${stored.error}`)
       return { previewText: `(delivery request failed: ${stored.error})` }
     }
 
-    let token = generateToken()
-    while (this.pending.has(this.key(room.code, token))) token = generateToken()
-
     const createdAt = this.now()
-    const pending: PendingDelivery = {
-      token,
-      roomCode: room.code,
-      requestedBy,
-      targets,
-      subject,
-      mediaId: stored.record.id,
-      pages: stored.record.pages,
-      createdAt,
-      expiresAt: createdAt + this.expiryMs,
+    const pendings: PendingDelivery[] = []
+    for (const target of targets) {
+      let token = generateToken()
+      while (this.pending.has(this.key(room.code, token))) token = generateToken()
+      const pending: PendingDelivery = {
+        token,
+        requestedBy,
+        target,
+        subject,
+        mediaId: stored.record.id,
+        pageCount: stored.record.pages,
+        createdAt,
+        expiresAt: createdAt + this.expiryMs,
+      }
+      this.pending.set(this.key(room.code, token), pending)
+      pendings.push(pending)
     }
-    this.pending.set(this.key(room.code, token), pending)
+    await this.persistAdditions(room.code, pendings)
 
     const mediaUrl = this.mediaUrl(room.code, stored.record.id)
-    await this.postSystemNote(
-      room,
-      `${requestedBy} requested a delivery, token ${token}: "${subject}" (${pending.pages} page(s)) to ${describeTargets(targets)}.`,
-    )
-
-    return {
-      previewText: [
-        `Delivery request from ${requestedBy}:`,
-        `To: ${describeTargets(targets)}`,
-        `Subject: ${subject}`,
-        `Pages: ${pending.pages}`,
-        `PDF: ${mediaUrl}`,
-        `Confirm with \`confirm ${token}\` or cancel with \`cancel ${token}\`. Expires in 30 minutes.`,
-      ].join("\n"),
+    const lines: string[] = [`Delivery request from ${requestedBy}:`]
+    for (const pending of pendings) {
+      lines.push(`To: ${describeTarget(pending.target)}`)
+      lines.push(`Confirm with \`confirm ${pending.token}\` or cancel with \`cancel ${pending.token}\`.`)
+      await this.postSystemNote(
+        room,
+        `${requestedBy} requested a delivery, token ${pending.token}: "${subject}" (${pending.pageCount} page(s)) to ${describeTarget(pending.target)}.`,
+      )
     }
+    lines.push(`Subject: ${subject}`)
+    lines.push(`Pages: ${stored.record.pages}`)
+    lines.push(`PDF: ${mediaUrl}`)
+    lines.push("Expires in 30 minutes.")
+
+    return { previewText: lines.join("\n") }
   }
 
   /** The agent's own `[[deliver]]` block — `requestedBy` is always "agent":
@@ -472,7 +596,8 @@ export class DeliverableService {
     const targets = resolveDeliveryTargets(room, parsed.to, undefined)
     if ("error" in targets) return { previewText: `(delivery request invalid: ${targets.error})` }
 
-    return this.createPending(room, "agent", targets, parsed.subject)
+    const outcome = await this.createPending(room, "agent", targets, parsed.subject)
+    return "refusal" in outcome ? { previewText: `(${outcome.refusal})` } : outcome
   }
 
   /** A member typing `send pdf to <address>`. */
@@ -480,8 +605,9 @@ export class DeliverableService {
     const targets = resolveDeliveryTargets(room, toRaw, requester)
     if ("error" in targets) return { ok: false, error: targets.error }
 
-    const { previewText } = await this.createPending(room, requester.displayName, targets, `Room ${room.code} deliverable`)
-    return { ok: true, previewText }
+    const outcome = await this.createPending(room, requester.displayName, targets, `Room ${room.code} deliverable`)
+    if ("refusal" in outcome) return { ok: false, error: outcome.refusal }
+    return { ok: true, previewText: outcome.previewText }
   }
 
   /** Any current member (any tier) may confirm — enforced by the caller:
@@ -495,34 +621,44 @@ export class DeliverableService {
 
     if (this.now() > pending.expiresAt) {
       this.pending.delete(key)
+      await this.persistRemoval(room.code, token)
       await this.postSystemNote(room, `Delivery ${pending.token} ("${pending.subject}") expired before anyone confirmed it.`)
       return { kind: "expired" }
     }
     this.pending.delete(key)
+    await this.persistRemoval(room.code, token)
 
-    const data = await this.mediaStore.read(room.code, pending.mediaId)
+    // The in-memory MediaStore index dies with the process; the PDF file on
+    // disk and the room's raw artifact URL do not. When the stored record is
+    // no longer indexed (the restart case), re-render from the live artifact
+    // instead of failing the confirmed send.
+    let data = await this.mediaStore.read(room.code, pending.mediaId)
+    let mediaId = pending.mediaId
+    if (data === undefined && room.artifactUrl !== undefined) {
+      const again = await this.renderAndStore(room, pending.subject)
+      if (again.ok) {
+        data = again.data
+        mediaId = again.record.id
+      }
+    }
     if (data === undefined) {
       await this.postSystemNote(room, `${confirmedBy.displayName} confirmed delivery ${pending.token} but the rendered PDF was no longer available — nothing sent.`)
       return { kind: "sent", resultText: "Could not send: the rendered PDF is no longer available." }
     }
 
-    const mediaUrl = this.mediaUrl(room.code, pending.mediaId)
+    const mediaUrl = this.mediaUrl(room.code, mediaId)
     const filename = `${room.code}-deliverable.pdf`
-    const outcomes = await Promise.all(
-      pending.targets.map((target) => sendToTarget(this.agentpush, target, { mediaUrl, filename, subject: pending.subject, pdf: data })),
-    )
+    const outcome = await sendToTarget(this.agentpush, pending.target, { mediaUrl, filename, subject: pending.subject, pdf: data })
 
-    const lines = outcomes.map((outcome) =>
-      outcome.ok
-        ? `Sent to ${outcome.address} via ${outcome.channel} (message ${outcome.providerMessageId}).`
-        : `Failed to send to ${outcome.address} via ${outcome.channel}: ${outcome.error}`,
-    )
+    const line = outcome.ok
+      ? `Sent to ${outcome.address} via ${outcome.channel} (message ${outcome.providerMessageId}).`
+      : `Failed to send to ${outcome.address} via ${outcome.channel}: ${outcome.error}`
     await this.postSystemNote(
       room,
-      `${confirmedBy.displayName} confirmed delivery ${pending.token} ("${pending.subject}", ${pending.pages} page(s)): ${lines.join(" ")}`,
+      `${confirmedBy.displayName} confirmed delivery ${pending.token} ("${pending.subject}", ${pending.pageCount} page(s)): ${line}`,
     )
 
-    return { kind: "sent", resultText: [`Delivery ${pending.token} confirmed by ${confirmedBy.displayName}.`, ...lines].join("\n") }
+    return { kind: "sent", resultText: [`Delivery ${pending.token} confirmed by ${confirmedBy.displayName}.`, line].join("\n") }
   }
 
   async cancel(room: Room, cancelledBy: Member, token: string): Promise<CancelOutcome> {
@@ -532,6 +668,7 @@ export class DeliverableService {
 
     const expired = this.now() > pending.expiresAt
     this.pending.delete(key)
+    await this.persistRemoval(room.code, token)
     await this.postSystemNote(room, `${cancelledBy.displayName} cancelled delivery ${pending.token} ("${pending.subject}") — nothing sent.`)
     return { kind: expired ? "expired" : "cancelled" }
   }

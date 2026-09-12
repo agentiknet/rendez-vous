@@ -16,6 +16,30 @@ export interface Member {
 
 export type RoomState = "active" | "paused"
 
+/** Where a confirmed delivery would actually go (src/service/deliverable.ts
+ *  resolves member names and `messenger self` to these). Part of the room
+ *  record only so `PendingDelivery` is persistable — a member target keeps
+ *  the whole `Member` so the send path knows the provider/tier. */
+export type DeliveryTarget =
+  | { readonly kind: "messenger"; readonly member: Member }
+  | { readonly kind: "email"; readonly address: string }
+
+/** One requested-not-yet-confirmed deliverable send, persisted on the room
+ *  (docs/DELIVERABLE.md): survives a service restart, unlike the in-memory
+ *  pending map it is hydrated back from. One record per target — `messenger
+ *  self` with no requester (the agent's block) resolves to several members,
+ *  each getting its own token. */
+export interface PendingDelivery {
+  readonly token: string
+  readonly requestedBy: string
+  readonly target: DeliveryTarget
+  readonly subject: string
+  readonly mediaId: string
+  readonly pageCount: number
+  readonly createdAt: number
+  readonly expiresAt: number
+}
+
 export interface Room {
   code: string
   sessionId: string | undefined
@@ -37,4 +61,8 @@ export interface Room {
    *  box; local: just ends it). A message or `resume` brings it back to
    *  `"active"`. */
   state: RoomState
+  /** Deliveries requested but not yet confirmed/cancelled (docs/DELIVERABLE.md).
+   *  Persisted so they survive a service restart; absent on rooms that predate
+   *  the field (same JSON round-trip rule as `sessionId` below). */
+  pendingDeliveries?: PendingDelivery[]
 }

@@ -373,6 +373,35 @@ test("one turn addresses two different members plus a broadcast line: N addresse
   await fanout.stopAll()
 })
 
+test("artifactReady === false gates the artifact line: no URL at all until the room is ready again", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  await store.addMember(room.code, memberInput("Alice", "messenger", "+1"))
+  // The idle sweep marks a room whose box it confirmed gone like this.
+  await store.update(room.code, { sessionId: "sess-1", artifactUrl: "https://x.test", artifactReady: false })
+
+  const source = new FakeSource()
+  const transport = new FakeTransport()
+  const fanout = new RoomFanout({ store, transport, source: source.read() })
+
+  source.push({ seq: 1, kind: "text-delta", text: "still here" })
+  source.push({ seq: 2, kind: "turn-end" })
+  fanout.start(room.code)
+  await waitFor(() => transport.sends.length === 1)
+  assert.equal(transport.sends[0]?.text, "still here", "no artifact line while the box is confirmed dead")
+  assert.equal(transport.sends[0]?.artifactUrl, undefined, "no dead URL rides along on the message either")
+
+  // A revive re-marks the room ready; the next flush announces the URL again.
+  await store.update(room.code, { artifactReady: true })
+  source.push({ seq: 3, kind: "text-delta", text: "back" })
+  source.push({ seq: 4, kind: "turn-end" })
+  await waitFor(() => transport.sends.length === 2)
+  assert.equal(transport.sends[1]?.text, `back\n${publicArtifactUrl(room.code)}`)
+
+  await fanout.stopAll()
+})
+
 test("artifact url is not repeated on a later flush when it has not changed", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)
