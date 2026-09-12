@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { generateCode, normalizeCode } from "./code.ts"
-import type { Address, Ask, AskStatus, DeliveryTarget, Member, PendingDelivery, Room, RoomState, Tier } from "./types.ts"
+import type { Address, Ask, AskStatus, Delivery, DeliveryTarget, Member, PendingDelivery, Room, RoomState, Tier } from "./types.ts"
 
 interface RoomFile {
   rooms: Room[]
@@ -132,6 +132,41 @@ function isAsk(value: unknown): value is Ask {
   )
 }
 
+function isDeliveryStatus(value: unknown): value is Delivery["status"] {
+  return value === "pending" || value === "delivered" || value === "failed"
+}
+
+function isDelivery(value: unknown): value is Delivery {
+  if (!isObject(value)) return false
+  if (
+    !("id" in value) ||
+    !("memberId" in value) ||
+    !("kind" in value) ||
+    !("text" in value) ||
+    !("status" in value) ||
+    !("attempts" in value) ||
+    !("createdAt" in value)
+  ) {
+    return false
+  }
+  // lastError/deliveredAt are optional: JSON.stringify drops undefined values,
+  // so a persisted delivery round-trips with those keys absent (same rule as
+  // `isAsk` above).
+  const lastError = "lastError" in value ? value.lastError : undefined
+  const deliveredAt = "deliveredAt" in value ? value.deliveredAt : undefined
+  return (
+    isString(value.id) &&
+    isString(value.memberId) &&
+    (value.kind === "say" || value.kind === "whisper") &&
+    isString(value.text) &&
+    isDeliveryStatus(value.status) &&
+    typeof value.attempts === "number" &&
+    isStringOrUndefined(lastError) &&
+    isString(value.createdAt) &&
+    isStringOrUndefined(deliveredAt)
+  )
+}
+
 // JSON.stringify drops object keys whose value is `undefined`, so a persisted room with an
 // unset sessionId/sandboxId/artifactUrl/artifactReady round-trips with that key absent, not
 // present-as-undefined. These are the only optional fields on Room, so a missing key is
@@ -156,6 +191,7 @@ function isRoom(value: unknown): value is Room {
   const artifactReady = "artifactReady" in value ? value.artifactReady : undefined
   const pendingDeliveries = "pendingDeliveries" in value ? value.pendingDeliveries : undefined
   const asks = "asks" in value ? value.asks : undefined
+  const deliveries = "deliveries" in value ? value.deliveries : undefined
   const protocol = "protocol" in value ? value.protocol : undefined
   return (
     isString(value.code) &&
@@ -166,6 +202,7 @@ function isRoom(value: unknown): value is Room {
     isBooleanOrUndefined(artifactReady) &&
     (pendingDeliveries === undefined || (Array.isArray(pendingDeliveries) && pendingDeliveries.every(isPendingDelivery))) &&
     (asks === undefined || (Array.isArray(asks) && asks.every(isAsk))) &&
+    (deliveries === undefined || (Array.isArray(deliveries) && deliveries.every(isDelivery))) &&
     isProtocol(protocol) &&
     Array.isArray(value.members) &&
     value.members.every(isMember) &&
@@ -356,6 +393,7 @@ export class RoomStore {
         | "state"
         | "pendingDeliveries"
         | "asks"
+        | "deliveries"
         | "protocol"
       >
     >,

@@ -31,16 +31,22 @@ import { MediaStore, type IngressMediaRecord } from "./media-store.ts"
  *  browser (architecture.md §9.3b; mirrors `RoomService`'s own
  *  `memberFacingArtifactUrl` for messenger/email replies). */
 function toPublicRoom(room: Room, hasStoredRender: boolean): Room {
+  // `deliveries` carries the text of tool-addressed say/whisper messages,
+  // whispers included — this projection is handed to any GET /rooms/:code
+  // caller and server-side page embed, so it is stripped unconditionally
+  // here (PLAN §3.3: the leak the adversarial review caught).
+  const { deliveries: _stripped, ...publicRoom } = room
+  void _stripped
   // A box last confirmed dead (`artifactReady === false`, the idle sweep's
   // probe) advertises no URL at all — the page shows its paused/self-heal
   // state instead of a clickable dead link (the dead-artifact finding).
   // Exception: a STORED render is servable by this service itself, box or
   // no box, so the URL stays alive while the render exists.
-  if (room.artifactReady === false && !hasStoredRender) return { ...room, artifactUrl: undefined }
+  if (room.artifactReady === false && !hasStoredRender) return { ...publicRoom, artifactUrl: undefined }
   if (room.artifactUrl === undefined) {
-    return hasStoredRender ? { ...room, artifactUrl: publicArtifactUrl(room.code) } : room
+    return hasStoredRender ? { ...publicRoom, artifactUrl: publicArtifactUrl(room.code) } : publicRoom
   }
-  return { ...room, artifactUrl: publicArtifactUrl(room.code) }
+  return { ...publicRoom, artifactUrl: publicArtifactUrl(room.code) }
 }
 
 /** The only record kinds the room web transcript renders (architecture.md
@@ -820,7 +826,10 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
     ...defaultMcpCanvakitDeps(media.renders),
     roomExists: (code) => service.getRoom(code) !== undefined,
   })
-  const mcpRoom = createMcpRoomHandler({ rooms: () => service.listRooms() })
+  const mcpRoom = createMcpRoomHandler({
+    rooms: () => service.listRooms(),
+    deliveries: service.deliveryEngine,
+  })
   return createServer((req, res) => {
     handle(service, dedup, media, daemon, mcpCanvakit, mcpRoom, hasStoredRender, req, res).catch((error: unknown) => {
       if (!res.headersSent) {

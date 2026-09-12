@@ -63,6 +63,29 @@ export interface Ask {
   readonly mediaId: string | undefined
 }
 
+/** Retry cap for one `Delivery` (PLAN §3.3), mirroring Mastra's
+ *  `MAX_NOTIFICATION_DELIVERY_ATTEMPTS`. A deterministic failure must stop
+ *  being retried on every boot — at the cap the record goes `failed` and the
+ *  agent is told through the reactive channel instead. */
+export const MAX_DELIVERY_ATTEMPTS = 5
+
+/** One accepted-but-not-yet-confirmed outbound message to one member
+ *  (PLAN §3.3). Persisted so a process that dies between acceptance and
+ *  delivery re-attempts on boot: this, not a tool receipt, is the
+ *  at-least-once guarantee — the receipt travels over the same fallible
+ *  tunnel as the tool call itself. */
+export interface Delivery {
+  readonly id: string
+  readonly memberId: string
+  readonly kind: "say" | "whisper"
+  readonly text: string
+  readonly status: "pending" | "delivered" | "failed"
+  readonly attempts: number
+  readonly lastError: string | undefined
+  readonly createdAt: string
+  readonly deliveredAt: string | undefined
+}
+
 export interface Room {
   code: string
   sessionId: string | undefined
@@ -108,6 +131,14 @@ export interface Room {
    *  fresh rooms, absent on rooms that predate the field — same JSON
    *  round-trip rule as `pendingDeliveries` below. */
   asks?: Ask[]
+  /** Outbound `say`/`whisper` messages accepted for delivery (PLAN §3.3),
+   *  one record per target member. Persisted so a process that dies between
+   *  acceptance and delivery re-attempts on boot. Optional key, absent on
+   *  rooms that predate the field — same JSON round-trip rule as
+   *  `pendingDeliveries` and `asks`. Carries message text, so it is
+   *  deliberately stripped from every public projection (`toPublicRoom`,
+   *  src/service/http.ts). */
+  deliveries?: Delivery[]
   /** Which addressing protocol this room's agent was booted with. Absent on
    *  rooms that predate the field — same JSON round-trip rule as
    *  `pendingDeliveries` and `asks`. Never changed in place. */

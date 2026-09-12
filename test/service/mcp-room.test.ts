@@ -6,6 +6,7 @@ import { after, test } from "node:test"
 import { env } from "../../src/env.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import type { Member, Room } from "../../src/rooms/types.ts"
+import { DeliveryEngine } from "../../src/service/delivery.ts"
 import { roomRenderToken, type McpResponse } from "../../src/service/mcp-canvakit.ts"
 import {
   createMcpRoomHandler,
@@ -14,6 +15,7 @@ import {
   roomMcpServer,
   type McpRoomDeps,
 } from "../../src/service/mcp-room.ts"
+import { FakeTransport } from "../fanout/support.ts"
 
 async function freshDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "rdv-mcp-room-"))
@@ -188,17 +190,26 @@ test("roster reflects live membership (a member added after the handler was buil
   assert.equal(payload.count, 4)
 })
 
-test("tools/list advertises exactly the roster tool, with no required arguments", async () => {
-  const { handler } = harness([room(ROOM_A, MEMBERS_A)])
-  const res = asRpc(await handler({ jsonrpc: "2.0", id: "a", method: "tools/list" }, undefined))
+test("tools/list advertises roster alone until a delivery engine is wired, then all three audience tools", async () => {
+  const bare = harness([room(ROOM_A, MEMBERS_A)])
+  const bareRes = asRpc(await bare.handler({ jsonrpc: "2.0", id: "a", method: "tools/list" }, undefined))
+  const bareTools = bareRes.result?.tools
+  assert.ok(Array.isArray(bareTools) && bareTools.length === 1)
+  assert.equal((bareTools[0] as { name: string }).name, "roster")
 
+  const { handler } = harnessWithDeliveries([room(ROOM_A, MEMBERS_A)])
+  const res = asRpc(await handler({ jsonrpc: "2.0", id: "a", method: "tools/list" }, undefined))
   assert.equal(res.status, 200)
   const tools = res.result?.tools
-  assert.ok(Array.isArray(tools) && tools.length === 1)
-  const tool = tools[0]
-  assert.equal((tool as { name: string }).name, "roster")
-  const schema = (tool as { inputSchema: Record<string, unknown> }).inputSchema
-  assert.deepEqual(schema.required, undefined, "roster takes no arguments — the room is fixed by the token")
+  assert.ok(Array.isArray(tools))
+  assert.deepEqual(tools.map((tool) => (tool as { name: string }).name), ["roster", "say", "whisper"])
+  // `say`'s `to` is optional (omitted = every member); `whisper`'s is not.
+  const say = tools.find((tool) => (tool as { name: string }).name === "say") as { inputSchema: Record<string, unknown> }
+  assert.deepEqual(say.inputSchema.required, ["text"])
+  const whisper = tools.find((tool) => (tool as { name: string }).name === "whisper") as {
+    inputSchema: Record<string, unknown>
+  }
+  assert.deepEqual(whisper.inputSchema.required, ["text", "to"])
 })
 
 test("a notification (no id) gets 202 with no body", async () => {
@@ -211,9 +222,10 @@ test("a notification (no id) gets 202 with no body", async () => {
 test("an unknown tool or method is a JSON-RPC failure, not a roster call", async () => {
   const { handler } = harness([room(ROOM_A, MEMBERS_A)])
 
-  const unknownTool = asRpc(await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "say", arguments: {} } }, tokenFor(ROOM_A)))
+  // `ask` is step 4 — not advertised, not callable.
+  const unknownTool = asRpc(await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "ask", arguments: {} } }, tokenFor(ROOM_A)))
   assert.equal(unknownTool.status, 200)
-  assert.equal(unknownTool.error?.code, -32601, "say is step 2 — it must not appear advertised or callable")
+  assert.equal(unknownTool.error?.code, -32601, "ask is step 4 — it must not appear advertised or callable")
 
   const unknownMethod = asRpc(await handler({ jsonrpc: "2.0", id: 2, method: "resources/list" }, tokenFor(ROOM_A)))
   assert.equal(unknownMethod.error?.code, -32601)
@@ -277,4 +289,153 @@ test("a room persisted with a nonsense protocol value is rejected, not silently 
   void created
 
   await assert.rejects(() => RoomStore.open(dir), /corrupt room store/i)
+})
+
+// --- say / whisper: the tool surface (delivery behaviour itself lives in
+// test/service/delivery.test.ts) ---
+
+interface DeliveryHarness {
+  handler: (body: unknown, authorization: string | undefined) => Promise<McpResponse>
+  store: RoomStore
+  code: string
+  memberIds: string[]
+  transport: FakeTransport
+  engine: DeliveryEngine
+}
+
+async function deliveryHarness(members: Member[]): Promise<DeliveryHarness> {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const created = await store.create()
+  for (const member of members) {
+    await store.addMember(created.code, {
+      displayName: member.displayName,
+      tier: member.tier,
+      address: member.address,
+    })
+  }
+  const live = store.get(created.code)
+  assert.ok(live !== undefined)
+  const memberIds = live.members.map((member) => member.id)
+  const transport = new FakeTransport()
+  const engine = new DeliveryEngine({ store, transport })
+  const deps: McpRoomDeps = { rooms: () => [live], deliveries: engine }
+  return { store, code: created.code, memberIds, transport, engine, handler: createMcpRoomHandler(deps) }
+}
+
+function harnessWithDeliveries(rooms: readonly Room[]) {
+  // Placeholder for the tools/list shape test — schema assertions need no
+  // real engine, only any McpRoomDeliveries-shaped object.
+  const engine: McpRoomDeps["deliveries"] = {
+    accept: async () => ({ accepted: [], unknown: [] }),
+  }
+  const deps: McpRoomDeps = { rooms: () => rooms, deliveries: engine }
+  return { handler: createMcpRoomHandler(deps) }
+}
+
+function callTool(handler: DeliveryHarness["handler"] | ReturnType<typeof harnessWithDeliveries>["handler"], name: string, args: unknown, code: string): Promise<McpResponse> {
+  return handler(
+    { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } },
+    tokenFor(code),
+  )
+}
+
+const DELIVERY_MEMBERS: Member[] = [
+  member("m1", "Alice", "messenger", "telegram"),
+  member("m2", "Bob", "messenger", "whatsapp"),
+  member("m3", "Screen", "room-web", "room-web"),
+]
+
+test("say with no `to` accepts every member; the result carries ids only, never the text", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const res = asRpc(await callTool(h.handler, "say", { text: "the picnic moves to noon" }, h.code))
+
+  assert.equal(res.status, 200)
+  assert.equal(res.result?.isError, false)
+  const content = res.result?.content
+  assert.ok(Array.isArray(content) && content.length === 1)
+  const payload = JSON.parse(String((content[0] as { text: string }).text)) as {
+    accepted: { member_id: string; ok: boolean }[]
+    unknown: string[]
+  }
+  const [id1, id2, id3] = h.memberIds
+  assert.deepEqual(payload.accepted.map((entry) => [entry.member_id, entry.ok]), [
+    [id1, true],
+    [id2, true],
+    [id3, true],
+  ])
+  assert.deepEqual(payload.unknown, [])
+  const resultText = String((res.result?.content as { text: string }[] | undefined)?.[0]?.text)
+  assert.ok(!resultText.includes("picnic"), "the result must not echo the message text")
+  await h.engine.drain(h.code)
+  // room-web draws no transport call; the two messengers each got the text.
+  assert.deepEqual(
+    h.transport.sends.map((send) => send.memberId).sort(),
+    [id1, id2].sort(),
+  )
+})
+
+test("say with `to: [one]` accepts exactly that one", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const target = h.memberIds[1]!
+  const res = asRpc(await callTool(h.handler, "say", { text: "just for you", to: [target] }, h.code))
+  const content = res.result?.content
+  assert.ok(Array.isArray(content))
+  const payload = JSON.parse(String((content[0] as { text: string }).text)) as { accepted: unknown[]; unknown: string[] }
+  assert.equal(payload.accepted.length, 1)
+  assert.deepEqual(payload.unknown, [])
+  await h.engine.drain(h.code)
+  assert.deepEqual(
+    h.transport.sends.map((send) => send.memberId),
+    [target],
+  )
+})
+
+test("say with an unknown id accepts the known ones, reports the unknown, and delivers that text to nobody", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const first = h.memberIds[0]!
+  const res = asRpc(await callTool(h.handler, "say", { text: "hello both", to: [first, "ghost"] }, h.code))
+  const content = res.result?.content
+  assert.ok(Array.isArray(content))
+  const payload = JSON.parse(String((content[0] as { text: string }).text)) as { accepted: { member_id: string }[]; unknown: string[] }
+  assert.deepEqual(payload.accepted.map((entry) => entry.member_id), [first])
+  assert.deepEqual(payload.unknown, ["ghost"])
+  await h.engine.drain(h.code)
+  assert.deepEqual(h.transport.sends.map((send) => send.memberId), [first])
+})
+
+test("whisper returns one accepted entry; no result or error string contains any substring of the message", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const secret = "the vault code is 44-21"
+  const res = asRpc(await callTool(h.handler, "whisper", { text: secret, to: h.memberIds[1] }, h.code))
+  assert.equal(res.status, 200)
+  const content = res.result?.content
+  assert.ok(Array.isArray(content))
+  const payload = JSON.parse(String((content[0] as { text: string }).text)) as { accepted: unknown[]; unknown: string[] }
+  assert.equal(payload.accepted.length, 1)
+  assert.deepEqual(payload.unknown, [])
+  await h.engine.drain(h.code)
+  // Every byte the tool produced — result and error paths alike — is checked
+  // against the message and its fragments.
+  const allOutput = JSON.stringify(res)
+  assert.ok(!allOutput.includes(secret))
+  for (const fragment of ["vault code", "44-21", "the vault"]) {
+    assert.ok(!allOutput.includes(fragment), `result must not contain "${fragment}"`)
+  }
+})
+
+test("a malformed say/whisper call is rejected with an error that names the argument, not the value", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const secret = "sensitive payload xyz"
+  const noText = asRpc(await callTool(h.handler, "say", {}, h.code))
+  assert.equal(noText.error?.code, -32600)
+  assert.ok(!JSON.stringify(noText).includes(secret))
+
+  const whisperNoTo = asRpc(await callTool(h.handler, "whisper", { text: secret }, h.code))
+  assert.equal(whisperNoTo.error?.code, -32600)
+  assert.ok(!JSON.stringify(whisperNoTo).includes(secret))
+
+  const badTo = asRpc(await callTool(h.handler, "say", { text: secret, to: h.memberIds[0] }, h.code))
+  assert.equal(badTo.error?.code, -32600)
+  assert.ok(!JSON.stringify(badTo).includes(secret))
 })

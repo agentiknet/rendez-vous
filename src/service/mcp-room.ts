@@ -38,6 +38,20 @@ import { env } from "../env.ts"
 import type { Room } from "../rooms/types.ts"
 import type { McpResponse, McpServerMount } from "./mcp-canvakit.ts"
 
+/** The delivery half of the audience tools (PLAN §3.2): the `say`/`whisper`
+ *  handlers below only ACCEPT — validation, `pending` `Delivery` records and
+ *  the actual provider sends live in the engine, off the agent's turn.
+ *  Injectable so tests can run the tools against a real engine and a fake
+ *  transport. */
+export interface McpRoomDeliveries {
+  accept(
+    code: string,
+    kind: "say" | "whisper",
+    text: string,
+    memberIds: readonly string[],
+  ): Promise<{ accepted: readonly string[]; unknown: readonly string[] }>
+}
+
 /** The per-room bearer token for `POST /mcp/room`. Deterministic in the
  *  secret, so the booter can compute the mount's header at spawn time and
  *  the endpoint can recompute it per call with no shared mutable state.
@@ -79,6 +93,9 @@ export interface McpRoomDeps {
   /** All rooms this endpoint can serve, read fresh per call: membership
    *  changes between calls must be visible to the next `roster`. */
   readonly rooms: () => readonly Room[]
+  /** The delivery engine behind `say`/`whisper`. Omitting it leaves the
+   *  tools unadvertised and uncallable — the step-1 surface, unchanged. */
+  readonly deliveries?: McpRoomDeliveries
 }
 
 // --- JSON-RPC / MCP wire handling: same hand-rolled surface as canvakit's
@@ -89,14 +106,50 @@ const PARSE_ERROR = -32700
 const INVALID_REQUEST = -32600
 const METHOD_NOT_FOUND = -32601
 
-/** The one tool this server advertises in this step. NO arguments: the room
- *  is fixed by the bearer token, and an argument naming a room would be a
- *  way to address another room — exactly what the token exists to prevent. */
+/** The roster tool. NO arguments: the room is fixed by the bearer token,
+ *  and an argument naming a room would be a way to address another room —
+ *  exactly what the token exists to prevent. */
 const ROSTER_TOOL = {
   name: "roster",
   description:
     "List the members of THIS room (fixed by your credentials — no argument). One entry per member: member_id (use this to address them — display names can collide and change), display_name (for prose only), surface (the channel they are on: telegram, whatsapp, email, room-web), tier (messenger/email/room-web — a room-web member is a screen, not a phone), joined_at. Re-read it when you need to address someone; do not cache ids across turns — a member who leaves and rejoins gets a new id.",
   inputSchema: { type: "object", properties: {} },
+} as const
+
+/** `say` — address members BY ID (PLAN §3.1). `to` omitted means every
+ *  member, explicitly — never a default-by-omission that silently becomes
+ *  broadcast when the agent mangles an id. An id that matches nobody goes
+ *  into the result's `unknown` and the text is delivered to NOBODY — the
+ *  opposite of the old markers' fall-back-to-broadcast. */
+const SAY_TOOL = {
+  name: "say",
+  description:
+    "Send a message to one or more members of THIS room, addressed by member_id (from roster). Pass `to` as an array of member_id values, or omit `to` to send to every member. Returns immediately with {accepted, unknown}: accepted means accepted for delivery, not delivered; an unknown member_id is reported in `unknown` and receives nothing — re-read the roster and retry if an id came back unknown.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      text: { type: "string", description: "The message to send." },
+      to: { type: "array", items: { type: "string" }, description: "member_id values from roster. Omit for every member." },
+    },
+    required: ["text"],
+  },
+} as const
+
+/** `whisper` — confidential, so the room is TOLD it happened (the
+ *  content-free "(the agent whispered to X)" notice), exactly like the
+ *  `[[whisper]]` marker it starts to replace. */
+const WHISPER_TOOL = {
+  name: "whisper",
+  description:
+    "Send a private message to exactly ONE member of THIS room by member_id (from roster). Everyone else is told a whisper happened, but not its content. Returns {accepted, unknown}: an unknown member_id delivers nothing to nobody — re-read the roster and retry.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      text: { type: "string", description: "The private message to send." },
+      to: { type: "string", description: "The member_id to whisper to, from roster." },
+    },
+    required: ["text", "to"],
+  },
 } as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -167,6 +220,55 @@ function rosterResult(room: Room): Record<string, unknown> {
   }
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string")
+}
+
+/** The `say`/`whisper` result: member ids and counts ONLY (file-top HARD
+ *  RULE). `accepted` entries carry the id and `ok: true` — "accepted for
+ *  delivery", never the text, never a per-member delivery claim. */
+function acceptResult(accepted: readonly string[], unknown_: readonly string[]): Record<string, unknown> {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          accepted: accepted.map((memberId) => ({ member_id: memberId, ok: true })),
+          unknown: [...unknown_],
+        }),
+      },
+    ],
+    isError: false,
+  }
+}
+
+/** Validate `say`/`whisper` arguments. Error strings name the ARGUMENT, never
+ *  its value — a bad call must not project the message onto the shared
+ *  screen. Returns `undefined` (caller replies with `message`) or a parsed
+ *  shape. */
+function parseAudienceArgs(
+  args: Record<string, unknown>,
+  kind: "say" | "whisper",
+): { text: string; to: string[] | undefined } | { error: string } {
+  const text = args.text
+  if (typeof text !== "string" || text.trim().length === 0) {
+    return { error: `invalid arguments: ${kind} requires a non-empty text string` }
+  }
+  if (kind === "whisper") {
+    const to = args.to
+    if (typeof to !== "string" || to.trim().length === 0) {
+      return { error: "invalid arguments: whisper requires a `to` member_id string (from roster)" }
+    }
+    return { text, to: [to] }
+  }
+  const to = args.to
+  if (to === undefined) return { text, to: undefined }
+  if (!isStringArray(to) || to.some((id) => id.trim().length === 0)) {
+    return { error: "invalid arguments: say's `to` must be an array of member_id strings (from roster)" }
+  }
+  return { text, to: to.map((id) => id.trim()) }
+}
+
 /**
  * Handle one JSON-RPC 2.0 request body (already JSON.parse'd) with its
  * `Authorization` header value. Same method surface as canvakit's handler:
@@ -200,18 +302,38 @@ export function createMcpRoomHandler(
     }
 
     if (method === "tools/list") {
-      return ok(id, { tools: [ROSTER_TOOL] })
+      const tools = deps.deliveries === undefined ? [ROSTER_TOOL] : [ROSTER_TOOL, SAY_TOOL, WHISPER_TOOL]
+      return ok(id, { tools })
     }
 
     if (method === "tools/call") {
-      if (params.name !== ROSTER_TOOL.name) {
-        return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(params.name)}`)
-      }
       // Token checked before anything else: a rejected call must reveal
       // nothing, not even that a room exists.
       const room = resolveRoom(deps, authorization)
       if (room === undefined) return unauthorized(id)
-      return ok(id, rosterResult(room))
+
+      if (params.name === ROSTER_TOOL.name) {
+        return ok(id, rosterResult(room))
+      }
+
+      if (params.name === SAY_TOOL.name || params.name === WHISPER_TOOL.name) {
+        const deliveries = deps.deliveries
+        if (deliveries === undefined) {
+          return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(params.name)}`)
+        }
+        const kind = params.name === SAY_TOOL.name ? "say" : "whisper"
+        const args = isRecord(params.arguments) ? params.arguments : {}
+        const parsed = parseAudienceArgs(args, kind)
+        if ("error" in parsed) return fail(id, INVALID_REQUEST, parsed.error)
+        // `to` omitted = every current member, explicitly. Resolution against
+        // the roster happens inside the engine's accept — an unknown id is
+        // reported, never broadcast to.
+        const targets = parsed.to ?? room.members.map((member) => member.id)
+        const outcome = await deliveries.accept(room.code, kind, parsed.text, targets)
+        return ok(id, acceptResult(outcome.accepted, outcome.unknown))
+      }
+
+      return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(params.name)}`)
     }
 
     return fail(id, METHOD_NOT_FOUND, `unknown method: ${method}`)

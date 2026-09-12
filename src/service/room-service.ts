@@ -14,6 +14,7 @@ import type { SessionBooter } from "./booter.ts"
 import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
 import { DeliverableAwareTransport, DeliverableService, parseDeliverableCommand } from "./deliverable.ts"
+import { DeliveryEngine } from "./delivery.ts"
 import { OpenAiTtsProvider } from "../media/openai.ts"
 import { MediaStore } from "./media-store.ts"
 import { buildSessionRecap } from "./recap.ts"
@@ -147,6 +148,11 @@ export class RoomService {
   private readonly daemon: DaemonExtraOptions
   private readonly mediaStore: MediaStore
   private readonly deliverable: DeliverableService
+  /** The delivery half of the room audience tools (PLAN §3.2/§3.3): the
+   *  `say`/`whisper` MCP handlers accept into this, and it drains off the
+   *  agent's turn. Public because the room MCP endpoint (src/service/http.ts)
+   *  hands it to the handlers. Shares the fan-out's transport. */
+  readonly deliveryEngine: DeliveryEngine
   private readonly fanout: RoomFanout
   private readonly idlePauseMs: number
   private readonly idleSweepMs: number
@@ -228,9 +234,13 @@ export class RoomService {
     // TTS is optional: without a key, `[[say …]]` degrades to the sentence as
     // text rather than disappearing (src/fanout/reader.ts's `renderSpeech`).
     const openaiKey = env.openaiApiKey
+    // One transport instance shared by the reader AND the delivery engine:
+    // "the SAME transport RoomFanout uses" (PLAN §3.2) is literal, not
+    // structural — deliverable interception must apply to both paths alike.
+    const fanoutTransport = new DeliverableAwareTransport(this.transport, this.deliverable, this.store)
     this.fanout = new RoomFanout({
       store: this.store,
-      transport: new DeliverableAwareTransport(this.transport, this.deliverable, this.store),
+      transport: fanoutTransport,
       source: (sessionId, since, signal) => this.client.events(sessionId, since, signal),
       isAlive: (sessionId) => isSessionAlive(this.daemon, sessionId),
       // An attachment that probed dead is fed back into the room's session
@@ -240,16 +250,27 @@ export class RoomService {
       ...(opts.probeUrl !== undefined ? { probeUrl: opts.probeUrl } : {}),
       ...(openaiKey !== undefined ? { tts: new OpenAiTtsProvider(openaiKey), mediaStore: this.mediaStore } : {}),
     })
+    // Final delivery failures come back to the agent over the SAME reactive
+    // fan-in the unservable-artifact correction uses — one ingestion path
+    // stays the only path (PLAN §3.2).
+    this.deliveryEngine = new DeliveryEngine({
+      store: this.store,
+      transport: fanoutTransport,
+      reportFailure: (code, correction) => this.reportToSession(code, correction),
+    })
   }
 
   /** Fan an attachment-verification failure back into the room's session,
    *  the same way `DeliverableService.postSystemNote` records delivery
    *  events: an attributed system prompt with `queue: true`, so it lands on
    *  the transcript even when the agent is mid-turn. */
-  private async reportUnservableArtifact(code: string, correction: string): Promise<void> {
+  /** The one reactive fan-in path into a room's session (queue: true, so it
+   *  queues mid-turn instead of being lost) — shared by the unservable-
+   *  artifact correction and the delivery engine's final-failure report. */
+  private async reportToSession(code: string, correction: string): Promise<void> {
     const room = this.store.get(code)
     if (room === undefined || room.sessionId === undefined) {
-      console.warn(`[fanout] room ${code} has no live session — not reporting an unserved attachment: ${correction}`)
+      console.warn(`[fanout] room ${code} has no live session — not reporting: ${correction}`)
       return
     }
     const result = await this.client.prompt(room.sessionId, {
@@ -258,17 +279,32 @@ export class RoomService {
       origin: "rdv:system",
     })
     if (!result.ok) {
-      console.error(`[fanout] failed to report an unserved attachment in room ${code}'s transcript: ${result.message}`)
+      console.error(`[fanout] failed to report in room ${code}'s transcript: ${result.message}`)
     }
   }
 
-  /** Start fan-out for every active room with a live session, and the idle sweep. */
+  private async reportUnservableArtifact(code: string, correction: string): Promise<void> {
+    const room = this.store.get(code)
+    if (room === undefined || room.sessionId === undefined) {
+      console.warn(`[fanout] room ${code} has no live session — not reporting an unserved attachment: ${correction}`)
+      return
+    }
+    await this.reportToSession(code, correction)
+  }
+
+  /** Start fan-out for every active room with a live session, the boot-time
+   *  retry of `pending` deliveries, and the idle sweep. */
   start(): void {
     for (const room of this.store.list()) {
       if (room.sessionId !== undefined && room.state === "active") {
         this.fanout.start(room.code)
       }
     }
+    // PLAN §3.3: a process that died between accepting a say/whisper and
+    // delivering it left `pending` records — re-attempt them once, here.
+    void this.deliveryEngine.drainAll().catch((error: unknown) => {
+      console.error(`delivery retry on boot failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
     this.idleSweepTimer = setInterval(() => {
       this.sweepIdleRooms().catch((error: unknown) => {
         console.error(`idle sweep failed: ${error instanceof Error ? error.message : String(error)}`)
