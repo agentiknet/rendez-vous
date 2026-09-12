@@ -249,9 +249,21 @@ Demo status: run 3 on a real phone passed (attribution, fan-out, artifact
 edit). Resume-after-pause is now demo-safe too — proven live 2026-09-12
 07:54:11 UTC from Jeremy's phone: a real Telegram message into paused room
 `RDV-NG7F` flipped it active, 3 inbound / 3 outbound counted by agentpush,
-`cursor: 15` preserved, artifact ready on the proxy URL. Resume boots a
-FRESH box by design (`0af9580`), so transcript continuity holds but the old
-box's filesystem does not. See `docs/DEMO.md` §9.
+artifact ready on the proxy URL.
+
+**Correction, same day ~10:30 local:** the resume was reported here as
+carrying conversation continuity. It does not, and `cursor` never meant
+that — `cursor` is the fan-out reader's position in the daemon event stream
+and `performResume` resets it to 0 on a session change, by design. A resume
+boots a fresh box AND a fresh agent session with **no transcript replay**;
+the old `sessionId` is overwritten, so Rendez-vous cannot even fetch the
+prior transcript afterwards. Found live from Jeremy's phone: the room came
+back, replied, and had no idea what had been discussed. Nothing errored.
+`resumePrompt` had been instructing the context-free agent to say *"Where
+were we?"* — the code knew and told the model to perform otherwise. Fixed,
+with two silent regressions in the same function (resume had also been
+dropping the whisper protocol and the artifact `appDir` path). See
+`docs/DEMO.md` §9 and `test/service/booter.test.ts`.
 
 ## Executors running (session id, model, owns / fenced to)
 

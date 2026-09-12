@@ -47,16 +47,25 @@ export interface SessionBooter {
   resume(room: Room): Promise<BootedSession>
 }
 
-/** `opts.appDir` is the e2b-only artifact case: naming the exact served-page
+/** The capability half of both prompts — how attribution arrives, how to
+ *  whisper, where the served page lives.
+ *
+ *  `opts.appDir` is the e2b-only artifact case: naming the exact served-page
  *  path up front is what Rehearsal Run 1's Finding 1 needed a human for —
  *  without it, the agent reported "no index.html file exists anywhere" and
  *  asked whether to create one, instead of finding the real path at
  *  `<appDir>/.agentproto/ui/index.html` (`src/sandbox/app-seed.ts`). Omit
  *  `opts` for a booter with no artifact concept (`LocalBooter`) — there is
- *  nothing true to say about a page that doesn't exist. */
-export function openingPrompt(room: Room, opts?: { appDir: string }): string {
+ *  nothing true to say about a page that doesn't exist.
+ *
+ *  Shared between boot and resume because a RESUMED agent needs every one of
+ *  these just as much as a fresh one. The resume prompt used to inline its
+ *  own shorter copy and silently lacked both the whisper protocol and the
+ *  `appDir` line, so after any pause the room stopped being able to whisper
+ *  and the agent no longer knew which file backed the artifact — with no
+ *  error anywhere (the `docs/UPSTREAM.md` pattern, found live 2026-09-12). */
+function capabilityLines(opts?: { appDir: string }): string[] {
   const lines = [
-    `You are the shared agent for Rendez-vous room ${room.code}.`,
     "Several humans drive this one session together, each from their own device — a phone, email, or a laptop.",
     'Every message you receive is prefixed with its sender, like "[Alice · messenger] ...", so you always know who is speaking.',
     "People in the room may disagree or ask for different things. When that happens, pick a reasonable path forward and say in one short sentence what you chose and why, so everyone stays in sync — do not stall waiting for consensus.",
@@ -68,18 +77,39 @@ export function openingPrompt(room: Room, opts?: { appDir: string }): string {
       `The page members see at the artifact URL is served from ${opts.appDir}/.agentproto/ui/index.html — edit that file to change what they see, and the change is live immediately.`,
     )
   }
+  return lines
+}
+
+export function openingPrompt(room: Room, opts?: { appDir: string }): string {
+  const lines = [`You are the shared agent for Rendez-vous room ${room.code}.`, ...capabilityLines(opts)]
   lines.push(`Reply to this message with exactly one short line and nothing else: "Room ${room.code} is open. Say what you want built."`)
   return lines.join(" ")
 }
 
-function resumePrompt(room: Room): string {
-  return [
-    `You are the shared agent for Rendez-vous room ${room.code}, resuming after a pause.`,
-    "Several humans drive this one session together, each from their own device — a phone, email, or a laptop.",
-    'Every message you receive is prefixed with its sender, like "[Alice · messenger] ...", so you always know who is speaking.',
-    "Keep replies short: some members are reading you on a phone screen.",
-    `Reply to this message with exactly one short line and nothing else: "Room ${room.code} resumed. Where were we?"`,
-  ].join(" ")
+/** A resume boots a FRESH agent session — the prior session's transcript is
+ *  not replayed, and `Room` does not even retain the old `sessionId` to
+ *  fetch it with (`performResume` overwrites it). So this prompt must not
+ *  imply continuity it does not have.
+ *
+ *  It used to end with `"Room <code> resumed. Where were we?"`, which made
+ *  a context-free agent perform remembering: members got a warm greeting,
+ *  then watched it contradict itself two turns later when asked what had
+ *  been said. Nothing errored — the room was `active`, replies flowed, the
+ *  demo looked fine. Found live on a real phone, 2026-09-12.
+ *
+ *  Until a real transcript replay lands, the honest move is to say the
+ *  history is gone and ask for one line of re-grounding, which in a
+ *  multiplayer room is a natural thing to ask anyway. */
+export function resumePrompt(room: Room, opts?: { appDir: string }): string {
+  const lines = [
+    `You are the shared agent for Rendez-vous room ${room.code}, restarting on a fresh session after a pause.`,
+    "You do NOT have the earlier conversation: the previous session's transcript is not available to you. Never pretend otherwise, never guess at what was already agreed, and if someone asks what was said before, say plainly that you no longer have it and ask them to re-state what matters.",
+    ...capabilityLines(opts),
+  ]
+  lines.push(
+    `Reply to this message with exactly one short line and nothing else: "Room ${room.code} is back, on a fresh session — I've lost the earlier thread. Catch me up in a line?"`,
+  )
+  return lines.join(" ")
 }
 
 /** No sandbox: the box-less fallback of R9. `sandboxId`/`artifactUrl` stay
@@ -213,7 +243,7 @@ export class E2bBooter implements SessionBooter {
         label: `rdv-${room.code}`,
         adapter: env.agentAdapter,
         model: env.agentModel,
-        prompt: resumePrompt(room),
+        prompt: resumePrompt(room, { appDir: env.artifactAppDir }),
         appDir: env.artifactAppDir,
         port: env.artifactPort,
         sandboxId: room.sandboxId,

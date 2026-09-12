@@ -207,15 +207,44 @@ over the exchange. The room kept its place in the conversation
 stable proxy URL, not a raw e2b host.
 
 **What "resume" actually does — say this accurately on stage.** It boots a
-**fresh** box (`icc84uy0qdas650d1sntl` here, a new id), it does not
-reconnect to the paused one. That is the designed path since `0af9580`
-(*boot fresh when the reconnect itself reports the box gone*), after the
-reconnect-and-retry route failed in both simulated runs. So:
+**fresh** box (`icc84uy0qdas650d1sntl` here, a new id) AND a fresh agent
+session. It does not reconnect to the paused one. That is the designed
+path since `0af9580` (*boot fresh when the reconnect itself reports the box
+gone*), after the reconnect-and-retry route failed in both simulated runs.
 
-- **Transcript continuity holds** — the room resumes mid-conversation.
-- **Filesystem continuity does not** — anything the previous box had on
-  disk and never wrote into the artifact is gone. Don't promise "it picks
-  up exactly where it left off" in the file sense.
+**The room survives. The conversation does not.**
+
+- **Room identity holds** — same code, same members, same artifact URL.
+- **Conversation history is GONE.** The prior session's transcript is never
+  replayed into the new session, and `Room` does not even retain the old
+  `sessionId` to fetch it with: `performResume` overwrites it
+  (`src/service/room-service.ts`). The daemon may still hold that
+  transcript; Rendez-vous no longer knows its id.
+- **Filesystem continuity is gone too** — anything the previous box had on
+  disk and never wrote into the artifact.
+
+This was found live on a real phone, 2026-09-12, two hours after the resume
+above was recorded as a success. The room came back, replied warmly, and
+then — asked what had been discussed — listed only the four messages since
+the resume. Nothing errored. The `state` was `active`, the fan-out worked,
+the artifact served. **The success signal and the failure were the same
+signal**, which is this project's whole thesis, reproduced by accident on
+its own demo path.
+
+Root cause was not a lost pointer but a scripted one: `resumePrompt`
+(`src/service/booter.ts`) ended by instructing a context-free agent to reply
+*"Room <code> resumed. Where were we?"* — the code knew there was no history
+and told the model to perform having it. Fixed: the resume prompt now states
+outright that the earlier conversation is unavailable and asks members for
+one line of re-grounding. Two silent regressions in the same function were
+fixed alongside it — the resume prompt had also been quietly dropping the
+whisper protocol and the artifact `appDir` path, so after any pause the room
+could no longer whisper and the agent no longer knew which file backed the
+artifact. Regression tests: `test/service/booter.test.ts`.
+
+**On stage:** do not promise "it picks up where it left off." Say the room
+survives a dead box and the members never change link — which is the real,
+demonstrable claim — and that re-grounding the agent is one line.
 
 The earlier failure this replaces: `isSessionAlive` treated a `200`
 descriptor response with `status: "killed"` as alive, so the resume path
