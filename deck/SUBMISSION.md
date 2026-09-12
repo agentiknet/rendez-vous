@@ -2,8 +2,13 @@
 
 Companion to `rendez-vous.pdf` (6 pages) and `SCRIPT.md` (speaker read + video
 beat sheet). This file is the text a judge reads, written against the four
-scored criteria. Every factual claim here is anchored in `docs/REHEARSAL.md`,
-`docs/ARCHITECTURE.md`, `docs/STATE.md` or `docs/UPSTREAM.md`.
+scored criteria.
+
+Two kinds of claim appear below and they are kept apart on purpose. **Observed**
+means it ran on real infrastructure and the rehearsal log has the timestamp.
+**Shown** means it is built, tested, and demonstrated in the video. Nothing else
+is claimed. Anchors: `docs/REHEARSAL.md`, `docs/STATE.md`, `docs/UPSTREAM.md`,
+`docs/ARCHITECTURE.md`.
 
 ---
 
@@ -46,21 +51,29 @@ are not a wrapper around a chatbox; they are where the conversation already
 happens, and the room meets it there. The laptop web view is a third surface
 on the same session, not a separate product.
 
-**The core workflow runs end to end on live infrastructure.** Observed, not
-described:
+**The core workflow runs end to end on live infrastructure.** We separate what
+was observed on a real phone, with a timestamp in the rehearsal log, from what
+was built and is shown in the video. A submission that blurs the two is asking
+to be disbelieved about both.
 
-- A real phone texts `new` on real Telegram; 86.5 s later the agent session
-  and its shared artifact are both ready (cold boot, from nothing).
+*Observed on a real phone, logged with timestamps:*
+
+- A real phone texts `new` on real Telegram; 86.5 s later, cold boot, the agent
+  session and its shared artifact are both ready.
 - A second person joins from a laptop and sees the full transcript plus the
   live artifact; every message on every surface is attributed to its sender
-  and its surface.
-- A voice note sent from the phone is transcribed and attributed. A photo is
-  described by the agent and written into the artifact.
-- The agent edits the shared artifact unaided, and the edit is visible in the
-  laptop view while the phone conversation continues.
-- The deliverable leaves the room: previewed, confirmed by a member, delivered
-  as a real PDF to a messenger and to an inbox.
-- Killed mid-session, the room comes back and still knows what was discussed.
+  and its surface, and one agent reply reaches both surfaces.
+- The agent edits the shared artifact on request; the edit is confirmed live on
+  the proxied URL while the phone conversation continues.
+- A PDF is previewed, confirmed by a member with a token, rendered, and lands
+  in the inbox — byte-matched against the mailbox.
+- A sandbox deleted out from under the room through the e2b API is caught by
+  the liveness sweep and the room is revived by the next inbound message.
+
+*Built since, and shown in the video:* voice in (transcribed and attributed),
+photo in (described into the artifact), a private `@me` reply, a voice reply,
+real files attached, a local desktop agent joining as a member, and resume
+handing the prior transcript to the new session as a recap.
 
 **Known limits, stated plainly.** WhatsApp is not provisioned (no number, no
 key) — the room is channel-agnostic by construction, so adding it is
@@ -90,15 +103,21 @@ is the **room around it**.
 
 **The generalisation we did not expect to find.** The room does not model
 *humans*, it models *members* — anything that can speak and listen through two
-endpoints. So a **local desktop agent joins the room exactly the way a person
-does**, and the room solicits it with the same verb it uses to solicit Alice.
-The agent in the sandbox asks the desktop agent for something only a local
-machine has, and it answers into the shared transcript like any other member.
-Human and machine participants, symmetric, by construction rather than by
-special case. That is the pattern we would put forward as the surprising one:
-multiplayer is not a feature you add to an agent, it is a layer above one, and
-once it exists the distinction between a human member and an agent member
-stops mattering.
+HTTP endpoints. So a **local desktop agent joins the room exactly the way a
+person does**: the same two endpoints, the same cursor, the same queueing
+discipline, attributed in the transcript like anyone else. The room cannot
+tell the difference, because there is no difference to tell.
+
+In the video the room asks that machine member for the commit log on the
+laptop — something no sandbox can know — using the same `ask` it used thirty
+seconds earlier to ask Alice for the product shot. Same verb, same line in the
+transcript, no special case.
+
+That is the pattern we would put forward as the surprising one: multiplayer is
+not a feature you add to an agent, it is a layer above one — and once that
+layer exists, the distinction between a human member and an agent member stops
+mattering. Every sandbox provider is racing to be the best single-principal
+box. None of them has the room.
 
 ## Criterion 3 — Technical execution and integration
 
@@ -160,10 +179,25 @@ independent upstream bugs while building, all of the same shape: *silent*.
 | 5 | The agent proposes rebuilding a capability the workspace already brokered | a plausible plan |
 
 None crash. Four lost data quietly; one reported success while doing nothing.
-All five are fixed, each with a regression test, and each written up with a
-repro. This is also *why* the room records who asked, who confirmed, and what
-was sent: in a system whose failures are silent, the transcript is the only
-thing that can be checked afterwards.
+
+Each one is written up with a reproduction. Where the fix belongs in the room,
+it is fixed here with a regression test. Where it belongs in the runtime, we
+did not work around it locally and quietly move on — **we opened seven pull
+requests against our own open-source runtime**, each carrying a test that
+reproduces the silent failure before fixing it: queue-by-default on the prompt
+path, a session liveness signal, a sandbox liveness signal, the `app serve`
+UI-path fix, an auth gate on an ungated mutating route, reaping orphaned
+sandboxes, and pausing a box whose reconnect failed instead of leaving it
+running and billing.
+
+That is the real answer to "how does this handle failure": the constraint we
+set on day one was *never fork, never vendor, never patch* the runtime. Eight
+upstream findings later, that constraint held — the fixes went upstream, with
+repros, instead of into a private patch nobody else benefits from.
+
+This is also *why* the room records who asked, who confirmed, and what was
+sent: in a system whose failures are silent, the transcript is the only thing
+that can be checked afterwards.
 
 **Credentials are per-member, not per-room** — a deliberate design call. A
 shared room key is a key shared with everyone who has the room code, so there
@@ -172,12 +206,18 @@ unpair rather than a rotation.
 
 ## Criterion 4 — Usefulness and agentic experience
 
-**The use case.** Any piece of work that more than one person has an opinion
-about and that has to end in an artifact: a deck before a meeting, a spec
-between a founder and an engineer, a quote between an agency and a client, a
-plan between two people who are not at the same desk. Today that work is
-relayed by hand between private agent windows. Here it happens once, in front
-of everyone.
+**The use case, concretely.** Alice and Bob have twenty minutes before a client
+call and no one-page brief. Alice sends a voice note from a taxi. Bob drops the
+product shot from his laptop. The room asks Bob's own machine for the current
+version number. It writes the brief while all three watch it change. Alice says
+"send us the PDF", Bob confirms, and it is on her phone and in the inbox before
+the call starts. Nobody opened a new app and nobody relayed anything.
+
+That shape generalises to any work more than one person has an opinion about
+and that has to end in an artifact — a spec between a founder and an engineer,
+a quote between an agency and a client, a plan between two people who are not
+at the same desk. Today all of it is relayed by hand between private agent
+windows. Here it happens once, in front of everyone.
 
 **Native to the environment.** There is no app to open. You send a message
 where you already send messages. Joining is a code or a QR. A phone member

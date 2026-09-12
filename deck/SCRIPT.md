@@ -29,40 +29,58 @@ swappable layer and we show you exactly where the seam is.
 *Earns "primitive": a thing with membership and authority is not a feature of
 an agent, it's the layer above one.*
 
-## Page 4 — the stack
+## Page 4 — the stack, and what it cost to trust it
 
 > "One pipeline. **agentpush** is the ingress and the egress — Telegram,
 > WhatsApp, email, SMS behind one API, so the room never learns a single
-> provider's quirks. Rendez-vous is the room itself: members, attribution,
-> fan-out by tier. Under it, **agentproto** — our own open-source agent
-> runtime, unmodified, installed from npm. Under that, an **e2b** sandbox, one
-> per room, holding the shared artifact. OpenAI does the voice and the vision;
-> canvakit renders the PDF."
+> provider's quirks. Rendez-vous is the room. Under it, **agentproto**, our own
+> open-source agent runtime, unmodified from npm. Under that, an **e2b**
+> sandbox holding the artifact.
+>
+> Building this we found eight failures, and every one of them was silent. A
+> killed session still answers 200, so resume reported success in seven tenths
+> of a second having resumed nothing. Omit one flag and a message arriving
+> mid-turn is rejected and lost — the sender sees it sent. A paused sandbox
+> expires and the room keeps handing people its dead link.
+>
+> We set one rule on day one: never fork, never vendor, never patch the
+> runtime. Eight findings later it held — seven pull requests are open against
+> our own runtime, each carrying a test that reproduces the silent failure
+> before fixing it."
 
-*Earns "the runtime is a detail": you can see it is one layer with a clean
-seam above and below. Swap it and the room doesn't move.*
+*Earns "the runtime is a detail": the seam is real enough that every fix went
+under it, upstream, instead of into a private patch. And it is the page that
+answers the rubric's "thoughtful failure handling" with dated evidence rather
+than an adjective.*
 
 ## Page 3 — it works, live
 
 > "Someone typed `new` on a real phone. Eighty-six and a half seconds later,
-> cold boot, the session and the artifact were ready. A second person joined
-> from a laptop. Every message attributed, on every surface. A voice note goes
-> in and comes back transcribed and attributed to whoever sent it. A photo goes
-> in and the agent describes it into the artifact. Someone asks a question
-> privately and only they get the answer — the others see that a whisper
-> happened, not what it said. The agent edits the artifact unaided, and it can
-> reply with a voice note of its own."
+> cold boot, the session and the artifact were ready. A laptop joined; one
+> agent reply reached both surfaces, every message tagged with who sent it and
+> from where. The agent edited the shared artifact on request, confirmed on the
+> URL while the phone thread kept going. A PDF was previewed, confirmed with a
+> token, and byte-matched in the inbox. And when we deleted the sandbox out
+> from under the room through the e2b API, the sweep caught it and the next
+> message brought the room back.
+>
+> Everything I just said is in the rehearsal log with a timestamp. Everything
+> below the line — voice in, photo in, the private answer, the voice reply, the
+> files, the machine member, the transcript replayed on resume — is built and
+> tested, and you are about to watch it happen. We keep those two lists apart
+> on purpose."
 
-*Earns the whole deck: none of this is a mock.*
+*Earns the whole deck: none of it is a mock, and we are not asking to be taken
+on trust for the part we can show you instead.*
 
 ## Page 2 — the room, and who is in it
 
 > "Four members, four surfaces, one session. Alice is on Telegram. Bob is on a
 > laptop. There's an inbox. And Atlas is a **local desktop agent** — a machine
-> member, joined the same way, speaking and listening through the same two
-> endpoints as the humans. When the room needs something only a local machine
-> has, it asks Atlas exactly the way it asks Alice for a photo. Same verb. No
-> special case."
+> member, joined by running one script, speaking and listening through the same
+> two endpoints as the humans. When the room needs the commit log from Jeremy's
+> laptop, it asks Atlas with the same ask it used on Alice for the photo. Same
+> verb, same endpoints, same line in the transcript. No special case."
 
 *Earns "primitive": the room doesn't model humans, it models members. That's
 the generalisation every single-principal sandbox is missing.*
@@ -93,26 +111,60 @@ Three members contributing, one quadrant showing the shared result. Two of the
 members are human, one is a machine, and the room treats them identically —
 which is the point you cannot make with four human quadrants.
 
-## Beat sheet
+## The 45-second rule
 
-| t | Beat | What moves, and where |
+A judge scoring forty submissions stops watching at 45 seconds. **Everything
+that makes this project different has to be behind them by then.** The first
+draft of this sheet failed that badly: at 0:45 it had shown a room code, two
+joins and a transcribed voice note — the feature set of a competent Telegram
+bot, of which there will be forty. Setup is not content.
+
+Both independent reviews reordered it the same way. This is that order.
+
+## Beat sheet, ~85 s
+
+| t | Beat | What moves, and why it is here |
 | --- | --- | --- |
-| 0:00 | Alice types `new` on Telegram | room code appears; Bob's laptop opens it |
-| 0:15 | Bob joins by QR | he appears in the roster on all four |
-| 0:20 | Atlas joins | a **machine** lands in the same roster, same tier |
-| 0:25 | Alice sends a **voice note** | transcribed, attributed to Alice, visible to Bob and Atlas; a line appears in the artifact |
-| 0:40 | Bob sends a **photo** | the agent describes it; it lands in the artifact |
-| 0:50 | The room needs a local fact → **`[[ask Atlas]]`** | Atlas answers from the desktop; Alice and Bob see the answer arrive attributed |
-| 1:05 | Bob asks **`@me …`** | answer in Bob's quadrant only; Alice's shows *(the agent whispered to Bob)* |
-| 1:20 | Alice: "send us the PDF" | preview + confirm gate on the laptop, then the PDF lands on the phone and in the inbox |
-| 1:30 | The agent replies **with a voice note** | close on the artifact quadrant |
+| 0:00 | **Title card, 2 s:** *"Alice and Bob — a one-page brief, 20 minutes before a client call."* Room already exists, both already in it | Name the job or the artifact quadrant means nothing. Caption "Alice typed `new` 90 s ago" instead of filming her typing it |
+| 0:05 | **Atlas joins** — persistent caption in that quadrant: *"an agent running on Jeremy's Mac, joined through the same endpoints as Alice"* | The surprising thing, first. Without the caption a judge just sees a fourth name |
+| 0:12 | Alice sends a **voice note** from the taxi | transcribed, attributed to Alice, visible in every quadrant; a line appears in the artifact — attribution and the shared artifact proven in one beat |
+| 0:25 | The room **asks Alice** for the product shot; she answers from the phone | the first half of the symmetry. Without this beat, "same verb" at 0:35 refers to nothing |
+| 0:35 | **Same verb → `[[ask Atlas]]`** for the commit log on the laptop; the machine answers into the same transcript | the second half. A machine solicited exactly like a human, on the record — inside the 45 s window |
+| 0:50 | Bob asks **`@me …`** | the quadrants visibly diverge: Bob gets the answer, everyone else gets *(the agent whispered to Bob)* |
+| 1:05 | Alice: "send us the PDF" → preview on the laptop → Bob confirms with the token → it lands on the phone and in the inbox | the proven flow, and the only on-screen moment of human control |
+| 1:20 | Close on the artifact quadrant, finished; the transcript shows who asked and who confirmed | ends on the deliverable |
+
+**Cut from the first draft to get here:** filming `new` being typed (−8 s), the
+QR join (−8 s), Bob's photo as its own beat (−8 s — inbound media is already
+proven by the voice note), and the agent's voice reply as its own beat (−10 s;
+fold it under the close if it fits). Roughly 35 s of setup and commodity.
 
 ## The two moments that sell it
 
-**0:50 and 1:05.** At 0:50 the same verb solicits a machine that solicited a
-human thirty seconds earlier. At 1:05 the quadrants visibly diverge — one
-member gets a private answer and the others get the fact that a private answer
-happened. Neither can be shown in any format except this one.
+**0:35 and 0:50**, both now inside the 45-second window.
+
+At 0:35 the same verb solicits a machine that solicited a human ten seconds
+earlier — and the answer lands in the same transcript, attributed, with no
+special case anywhere in the code.
+
+At 0:50 the quadrants visibly diverge: one member gets a private answer, the
+others get the *fact* that a private answer happened. It explains itself with
+no narration, and it cannot be shown in any format except this one.
+
+## Risks to rehearse, not discover on the take
+
+- **The `[[ask Atlas]]` beat is the best idea and the highest risk.** Until the
+  agent is taught the `[[ask]]` syntax in its own prompt it will not emit one
+  unless prompted. Verify the marker appears in the boot prompt *and* both
+  resume branches before shooting — resume has silently dropped capability
+  lines before.
+- **Atlas must stay quiet unless addressed.** The bridge mirrors every room turn
+  into the desktop session and posts every desktop turn back. Prime that session
+  to answer only when asked, or Atlas will comment on Alice's voice note too and
+  the quadrant becomes noise that undercuts the whole point.
+- **Fallback if the ask does not hold:** Atlas joins, appears in the roster, and
+  answers one direct question. That still lands the machine-member point. Do not
+  improvise a rescue on camera.
 
 ## Shooting notes
 

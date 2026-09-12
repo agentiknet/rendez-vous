@@ -265,6 +265,31 @@ with two silent regressions in the same function (resume had also been
 dropping the whisper protocol and the artifact `appDir` path). See
 `docs/DEMO.md` §9 and `test/service/booter.test.ts`.
 
+**Resolved, same day ~13:00 local — resume now DOES carry continuity.** Read
+the paragraph above as history, not as current state. Three commits closed it:
+
+- `2b027f9` stopped the agent performing a continuity it did not have (the
+  honest "I've lost the earlier thread" branch).
+- `4c44e8c` added `src/service/recap.ts` — `buildSessionRecap` replays the
+  prior session's transcript into the resumed one, budget-bounded by racing
+  each `iterator.next()` against a timer rather than trusting an
+  `AbortSignal` the source may ignore.
+- `15724f6` made it actually run. The first version was **dead on arrival**:
+  pausing clears `room.sessionId` *before* `performResume` reads it, so the
+  lookup always found `undefined` and every resume silently took the
+  no-history branch. It hid behind the honest reply, which looks exactly
+  like the feature working. `Room.lastSessionId` keeps the id across the
+  pause.
+
+Proven live, not inferred: session `sess_16c7ebab` killed mid-conversation,
+Bob asked a follow-up, the room answered *"Room RDV-BS27 is back — I still
+have us at: Lisbon offsite in March, budget €12,000."* The 443-test suite had
+been green through the entire dead-on-arrival period — only the local harness
+caught it, which is itself finding-shaped and worth saying out loud.
+
+**Anything claiming resume continuity may be stated as observed.** It is
+sourced here, not from the pre-13:00 text above.
+
 ## Executors running (session id, model, owns / fenced to)
 
 - NONE. All executors are retired (scope closed by the operator, see top).
