@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, test } from "node:test"
 import { RoomStore } from "../../src/rooms/store.ts"
-import type { Address, Member, PendingDelivery } from "../../src/rooms/types.ts"
+import type { Address, Ask, Member, PendingDelivery } from "../../src/rooms/types.ts"
 
 async function freshDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "rdv-store-"))
@@ -327,6 +327,78 @@ test("open accepts a room without a pendingDeliveries key (predates the field)",
   await writeFile(join(dir, "rooms.json"), JSON.stringify({ rooms: [room] }), "utf8")
   const store = await RoomStore.open(dir)
   assert.equal(store.get("RDV-7F3K")?.pendingDeliveries, undefined)
+})
+
+test("asks update and round-trip through a reopen (docs/MIDDLEMAN.md step i)", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const alice = await store.addMember(room.code, aliceInput())
+  const ask: Ask = {
+    id: "a1",
+    toMemberId: alice.id,
+    what: "the product shot",
+    askedAt: "2026-09-12T04:00:00.000Z",
+    status: "open",
+    answeredBy: undefined,
+    answeredAt: undefined,
+    mediaId: undefined,
+  }
+  const updated = await store.update(room.code, { asks: [ask] })
+  assert.deepEqual(updated.asks, [ask])
+
+  const reopened = await RoomStore.open(dir)
+  const reloaded = reopened.get(room.code)
+  // JSON drops `undefined` values, so the reloaded ask has the keys absent
+  // rather than present-as-undefined — same rule as `pendingDeliveries`.
+  assert.deepEqual(reloaded?.asks, [JSON.parse(JSON.stringify(ask))])
+
+  // An answered ask persists its closure fields too.
+  const closed: Ask = { ...ask, status: "answered", answeredBy: alice.id, answeredAt: "2026-09-12T04:05:00.000Z" }
+  const updated2 = await reopened.update(room.code, { asks: [closed] })
+  assert.equal(updated2.asks?.[0]?.status, "answered")
+  const reopened2 = await RoomStore.open(dir)
+  assert.deepEqual(reopened2.get(room.code)?.asks, [JSON.parse(JSON.stringify(closed))])
+})
+
+test("create leaves a fresh room with an empty asks list, and an old room file without the key still loads", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  assert.deepEqual(room.asks, [])
+
+  const reopened = await RoomStore.open(dir)
+  assert.deepEqual(reopened.get(room.code)?.asks, [])
+
+  // A room persisted before the field existed loads with asks undefined.
+  const legacy = {
+    code: "RDV-OLD1",
+    members: [],
+    createdAt: "2026-09-11T00:00:00.000Z",
+    updatedAt: "2026-09-11T00:00:00.000Z",
+    cursor: 0,
+    lastActivityAt: "2026-09-11T00:00:00.000Z",
+    state: "active",
+  }
+  await writeFile(join(dir, "rooms.json"), JSON.stringify({ rooms: [legacy] }), "utf8")
+  const legacyStore = await RoomStore.open(dir)
+  assert.equal(legacyStore.get("RDV-OLD1")?.asks, undefined)
+})
+
+test("open rejects a room whose asks entry is not the right shape", async () => {
+  const dir = trackDir(await freshDir())
+  const room = {
+    code: "RDV-7F3K",
+    members: [],
+    createdAt: "2026-09-12T00:00:00.000Z",
+    updatedAt: "2026-09-12T00:00:00.000Z",
+    cursor: 0,
+    lastActivityAt: "2026-09-12T00:00:00.000Z",
+    state: "active",
+    asks: [{ id: 7 }],
+  }
+  await writeFile(join(dir, "rooms.json"), JSON.stringify({ rooms: [room] }), "utf8")
+  await assert.rejects(() => RoomStore.open(dir), /corrupt room store/i)
 })
 
 test("writes are atomic: no partial rooms.json is ever left behind", async () => {  const dir = trackDir(await freshDir())

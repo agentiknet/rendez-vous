@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { generateCode, normalizeCode } from "./code.ts"
-import type { Address, DeliveryTarget, Member, PendingDelivery, Room, RoomState, Tier } from "./types.ts"
+import type { Address, Ask, AskStatus, DeliveryTarget, Member, PendingDelivery, Room, RoomState, Tier } from "./types.ts"
 
 interface RoomFile {
   rooms: Room[]
@@ -94,6 +94,38 @@ function isPendingDelivery(value: unknown): value is PendingDelivery {
   )
 }
 
+function isAskStatus(value: unknown): value is AskStatus {
+  return value === "open" || value === "answered" || value === "nudged" || value === "expired" || value === "proceeded"
+}
+
+function isAsk(value: unknown): value is Ask {
+  if (!isObject(value)) return false
+  if (
+    !("id" in value) ||
+    !("toMemberId" in value) ||
+    !("what" in value) ||
+    !("askedAt" in value) ||
+    !("status" in value)
+  ) {
+    return false
+  }
+  // answeredBy/answeredAt/mediaId are optional: JSON.stringify drops undefined
+  // values, so a persisted ask round-trips with those keys absent.
+  const answeredBy = "answeredBy" in value ? value.answeredBy : undefined
+  const answeredAt = "answeredAt" in value ? value.answeredAt : undefined
+  const mediaId = "mediaId" in value ? value.mediaId : undefined
+  return (
+    isString(value.id) &&
+    isString(value.toMemberId) &&
+    isString(value.what) &&
+    isString(value.askedAt) &&
+    isAskStatus(value.status) &&
+    isStringOrUndefined(answeredBy) &&
+    isStringOrUndefined(answeredAt) &&
+    isStringOrUndefined(mediaId)
+  )
+}
+
 // JSON.stringify drops object keys whose value is `undefined`, so a persisted room with an
 // unset sessionId/sandboxId/artifactUrl/artifactReady round-trips with that key absent, not
 // present-as-undefined. These are the only optional fields on Room, so a missing key is
@@ -116,6 +148,7 @@ function isRoom(value: unknown): value is Room {
   const artifactUrl = "artifactUrl" in value ? value.artifactUrl : undefined
   const artifactReady = "artifactReady" in value ? value.artifactReady : undefined
   const pendingDeliveries = "pendingDeliveries" in value ? value.pendingDeliveries : undefined
+  const asks = "asks" in value ? value.asks : undefined
   return (
     isString(value.code) &&
     isStringOrUndefined(sessionId) &&
@@ -123,6 +156,7 @@ function isRoom(value: unknown): value is Room {
     isStringOrUndefined(artifactUrl) &&
     isBooleanOrUndefined(artifactReady) &&
     (pendingDeliveries === undefined || (Array.isArray(pendingDeliveries) && pendingDeliveries.every(isPendingDelivery))) &&
+    (asks === undefined || (Array.isArray(asks) && asks.every(isAsk))) &&
     Array.isArray(value.members) &&
     value.members.every(isMember) &&
     isString(value.createdAt) &&
@@ -225,6 +259,7 @@ export class RoomStore {
       cursor: 0,
       lastActivityAt: now,
       state: "active",
+      asks: [],
     }
     this.rooms.set(code, room)
     await this.enqueueWrite()
@@ -309,6 +344,7 @@ export class RoomStore {
         | "lastActivityAt"
         | "state"
         | "pendingDeliveries"
+        | "asks"
       >
     >,
   ): Promise<Room> {

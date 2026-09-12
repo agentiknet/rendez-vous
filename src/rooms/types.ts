@@ -40,6 +40,29 @@ export interface PendingDelivery {
   readonly expiresAt: number
 }
 
+/** Lifecycle of one solicitation (docs/MIDDLEMAN.md §3): `"open"` when the
+ *  agent asks a member for something, `"answered"` when their next message
+ *  closes it, `"nudged"`/`"proceeded"`/`"expired"` by the no-stall timers and
+ *  the `skip` reply. Steps iv (web panel) and v (timers) consume the same
+ *  union, so it is complete from the start. */
+export type AskStatus = "open" | "answered" | "nudged" | "expired" | "proceeded"
+
+/** One thing the room is waiting on from one member, recorded in the room
+ *  (docs/MIDDLEMAN.md §3) — not in the agent's head, which gets compacted.
+ *  `toMemberId` is `member.id`, never the display name: names collide. */
+export interface Ask {
+  readonly id: string
+  readonly toMemberId: string
+  readonly what: string
+  readonly askedAt: string
+  readonly status: AskStatus
+  readonly answeredBy: string | undefined
+  readonly answeredAt: string | undefined
+  /** Set when a multimodal ingress message (`media:<id>`, docs/MULTIMODAL.md)
+   *  answers the ask. */
+  readonly mediaId: string | undefined
+}
+
 export interface Room {
   code: string
   sessionId: string | undefined
@@ -65,4 +88,8 @@ export interface Room {
    *  Persisted so they survive a service restart; absent on rooms that predate
    *  the field (same JSON round-trip rule as `sessionId` below). */
   pendingDeliveries?: PendingDelivery[]
+  /** Outstanding/closed asks (docs/MIDDLEMAN.md §3). Optional key, `[]` on
+   *  fresh rooms, absent on rooms that predate the field — same JSON
+   *  round-trip rule as `pendingDeliveries` below. */
+  asks?: Ask[]
 }
