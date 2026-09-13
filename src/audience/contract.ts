@@ -20,8 +20,8 @@
  * `docs/OUTBOX.md`, and each rule cites the section it comes from rather
  * than restating it loosely. The governing invariant of that document —
  * ABSENCE MUST NEVER READ AS DELIVERY — is why several shapes below look
- * over-specified: nine separate defects in this series were that invariant
- * violated, and eight of them reached a green test suite (`docs/OUTBOX.md`
+ * over-specified: ten separate defects in this series were that invariant
+ * violated, and nine of them reached a green test suite (`docs/OUTBOX.md`
  * §1's table).
  *
  * Validation is hand-rolled in the style of `isRecord` (mcp-room.ts) — no

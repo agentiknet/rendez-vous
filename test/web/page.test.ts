@@ -157,6 +157,51 @@ test("planOutboxRender turns the pruned gap marker into visible text, never sile
   assert.equal(plan.items.length, 0)
 })
 
+test("planOutboxRender announces a gap once per gap, not once per poll — a genuinely new gap at a higher cursor still gets its own banner (brief 12, defect 3)", () => {
+  // Mirrors exactly what drainOutbox (src/web/page.ts) does with plan.gap:
+  // append a div for it, and nothing else. A fake transcript element, not a
+  // spy on planOutboxRender's return value, so the assertion is on what the
+  // DOM would actually end up containing.
+  function fakeTranscript(): { children: { className: string; textContent: string }[]; appendChild(el: { className: string; textContent: string }): void } {
+    const children: { className: string; textContent: string }[] = []
+    return {
+      children,
+      appendChild(el) {
+        children.push(el)
+      },
+    }
+  }
+  const transcript = fakeTranscript()
+  const seen: Record<string, boolean> = {}
+  const gapState: { lastReportedSince?: number } = {}
+
+  function tick(payload: { pruned?: boolean; deliveries?: { id: string; kind: string; text: string }[] }, since: number): void {
+    const plan = planOutboxRender(payload, seen, since, gapState)
+    if (plan.gap !== undefined) {
+      transcript.appendChild({ className: "outbox-gap", textContent: plan.gap })
+    }
+  }
+
+  // Tick 1: the server reports a genuine gap at since=0 (the client's first
+  // poll). One banner.
+  tick({ pruned: true, deliveries: [] }, 0)
+  assert.equal(transcript.children.length, 1, "the first gap is announced")
+  assert.equal(transcript.children[0]?.className, "outbox-gap")
+
+  // Tick 2: same cursor, the server still (correctly) reports pruned:true —
+  // this is the SAME unresolved gap, polled again 2s later. No second
+  // banner.
+  tick({ pruned: true, deliveries: [] }, 0)
+  assert.equal(transcript.children.length, 1, "a repeat poll at the same cursor renders no second banner for the same gap")
+
+  // Tick 3: a genuinely new gap — the cursor has moved forward (new mail was
+  // rendered) and the room reports a fresh loss above that higher cursor.
+  // This one must render.
+  tick({ pruned: true, deliveries: [{ id: "d5", kind: "say", text: "hi" }] }, 5)
+  assert.equal(transcript.children.length, 2, "a new gap at a higher cursor is a different gap, and IS rendered")
+  assert.equal(transcript.children[1]?.className, "outbox-gap")
+})
+
 test("renderRoomNotFoundPage mentions the code and a hint to create a room", () => {
   const html = renderRoomNotFoundPage("RDV-ZZZZ")
   assert.ok(html.includes("RDV-ZZZZ"))

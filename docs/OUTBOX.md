@@ -48,8 +48,9 @@ steps 1-4 was the same shape wearing a different costume:
 | the silent-turn detector, brief 08 | `system` records moved `deliverySeq` → a turn with no `say`/`whisper` read as a turn that spoke |
 | the detector's own tests, brief 08 | second turn never executed → "no warning" passed against the defect itself |
 | `away`, brief 10 | no test touched it → the roster projection would have passed marked always-away, never-away, or absent |
+| the gap marker's ownership fallback, brief 12 | a member's own oldest-OWNED seq read as a pruning signal → a member never addressed by the room's earliest records was told, on its first poll, that it had lost them |
 
-Nine defects; eight of them sat behind a green test suite. The last three are
+Ten defects; nine of them sat behind a green test suite. The last three are
 the same failure moved one layer out: **an absence of execution reading as a
 proof of passing.** Three separate executors, sent at the code, each found one
 by looking at the tests instead. When a rule below looks over-specified, this
@@ -228,9 +229,19 @@ the very mechanism written to protect it.
 - It is computed from the room's **low-water mark** — the highest seq ever
   pruned, monotonic, persisted. This is the only answer knowable when the room
   retains nothing at all, which is precisely the total-loss case.
-- Where a room's pruned history predates the mark, an implementation SHOULD
-  OR-in a second, weaker signal (the oldest retained seq). The marker MUST err
-  toward reporting a gap that did not happen. **Never the reverse.**
+- Where the mark is present, it is the exact and complete answer, and it is
+  the ONLY signal consulted — in particular, a member's own oldest-OWNED seq
+  MUST NOT be read as a pruning signal: ownership says who a record was for,
+  never whether anything was ever pruned, and a member who simply was not the
+  addressee of the room's earliest records has an oldest-owned seq above zero
+  having lost nothing.
+- Only where a room's pruned history predates the mark (`deliveryLowWater` is
+  **absent**, not merely zero) MAY an implementation OR-in a second, weaker
+  signal (the oldest retained seq, room-wide). This fallback is scoped to that
+  legacy case alone: an unconditional weak signal that fires on every poll
+  does not err on the safe side, it trains the reader to ignore the marker —
+  the original bug with extra steps. The marker MUST err toward reporting a
+  gap that did not happen. **Never the reverse.**
 - It fires only for an **explicitly presented** `since`. Omitting `since` means
   "everything retained", a request nothing can be lost from; firing there would
   tell every first-time client it had lost something that never existed.

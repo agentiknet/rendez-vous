@@ -411,6 +411,12 @@ export class RoomStore {
       lastActivityAt: now,
       state: "active",
       asks: [],
+      // Present and 0 from birth, so absent can mean only one thing: a room
+      // persisted before this field existed, whose pruned history is
+      // genuinely unknown (docs/OUTBOX.md §8). A room created with the field
+      // has a provable answer — nothing pruned yet — and MUST NOT fall back
+      // to the weaker legacy signal.
+      deliveryLowWater: 0,
     }
     this.rooms.set(code, room)
     await this.enqueueWrite()

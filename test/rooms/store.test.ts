@@ -486,13 +486,15 @@ test("open rejects a member whose ackedSeq is not a sane number", async () => {
   await assert.rejects(() => RoomStore.open(dir), /corrupt room store/i)
 })
 
-test("the delivery low-water mark is monotonic and round-trips; a room persisted without one loads as zero (brief B)", async () => {
+test("the delivery low-water mark is monotonic and round-trips; a freshly created room starts at zero, present (brief 12)", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)
   const room = await store.create()
 
-  // Absent means zero: a fresh room reports no pruned history.
-  assert.equal(store.get(room.code)?.deliveryLowWater, undefined)
+  // Present and zero from birth — a fresh room provably has never pruned
+  // anything. Only a room persisted before this field existed loads with it
+  // absent (the corrupt-store fixtures below cover that shape).
+  assert.equal(store.get(room.code)?.deliveryLowWater, 0)
 
   await store.update(room.code, { deliveryLowWater: 4 })
   // A stale snapshot reporting an older mark must never pull it down — a

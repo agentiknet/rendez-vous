@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { createServer as createHttpTestServer, type Server as HttpTestServer } from "node:http"
 import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
@@ -797,8 +797,11 @@ test("GET /rooms/:code/outbox fires the pruned gap marker when since predates wh
   const { store, baseUrl, code, alice, bob } = await outboxHarness()
   // Alice's d1..d4 were pruned; the oldest retained delivery FOR HER is d5.
   // Bob's record (d2) still sits in the tail, which must not mask her gap.
+  // The low-water mark is what a real prune would have set (brief 12: it is
+  // now the ONLY signal consulted for a room that has one).
   await store.update(code, {
     deliverySeq: 5,
+    deliveryLowWater: 4,
     deliveries: [
       outboxDelivery("d2", bob.id, "his phone got this one", "delivered"),
       outboxDelivery("d5", alice.id, "oldest she still has", "delivered"),
@@ -814,6 +817,62 @@ test("GET /rooms/:code/outbox fires the pruned gap marker when since predates wh
   // At the oldest retained id there is no gap to report.
   const sinceFive = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=5`, { headers: aliceHeaders(code, alice) }))
   assert.equal(sinceFive.pruned, false)
+})
+
+test("GET /rooms/:code/outbox: a member never addressed by the room's earliest records is not told it lost them, on its first poll ever (brief 12, defect 1)", async () => {
+  const { store, baseUrl, code, alice, bob } = await outboxHarness()
+  // alice owns d1/d2; bob owns d3..d5. Nothing has EVER been pruned — this
+  // room is fresh, so `deliveryLowWater` is the 0 it is born with
+  // (rooms/store.ts `create`). Bob's oldest-OWNED seq (3) is not evidence
+  // that anything of his was pruned: he simply was never addressed by d1/d2.
+  await store.update(code, {
+    deliverySeq: 5,
+    deliveries: [
+      outboxDelivery("d1", alice.id, "for alice"),
+      outboxDelivery("d2", alice.id, "for alice too"),
+      outboxDelivery("d3", bob.id, "for bob"),
+      outboxDelivery("d4", bob.id, "for bob too"),
+      outboxDelivery("d5", bob.id, "for bob thrice"),
+    ],
+  })
+
+  const bobsFirstPoll = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=0`, { headers: aliceHeaders(code, bob) }))
+  assert.equal(bobsFirstPoll.pruned, false, "an oldest-owned seq above zero is ownership, not a lost record")
+})
+
+test("GET /rooms/:code/outbox: a member whose own backlog is entirely pruned reports no gap once its cursor sits at or above the low-water mark (brief 12, defect 2)", async () => {
+  const { store, baseUrl, code, alice, bob } = await outboxHarness()
+  // Everything up through d11 is provably gone (the mark says so). Alice
+  // owns nothing surviving; bob is the only member with anything left
+  // (d12/d13, RDV-RZUF's live shape). Alice's cursor already sits at the
+  // mark — nothing has been dropped for her SINCE then.
+  await store.update(code, {
+    deliverySeq: 13,
+    deliveryLowWater: 11,
+    deliveries: [outboxDelivery("d12", bob.id, "for bob"), outboxDelivery("d13", bob.id, "for bob too")],
+  })
+
+  const body = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=11`, { headers: aliceHeaders(code, alice) }))
+  assert.equal(
+    body.pruned,
+    false,
+    "the room-wide oldest retained (bob's d12) must not stand in for alice's own history once a mark is present",
+  )
+})
+
+test("GET /rooms/:code/outbox: a real prune still reports pruned:true below the mark — the fix must not go quiet (brief 12)", async () => {
+  const { store, baseUrl, code, alice } = await outboxHarness()
+  await store.update(code, {
+    deliverySeq: 8,
+    deliveryLowWater: 6,
+    deliveries: [outboxDelivery("d7", alice.id, "oldest she still has"), outboxDelivery("d8", alice.id, "newest")],
+  })
+
+  const below = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=3`, { headers: aliceHeaders(code, alice) }))
+  assert.equal(below.pruned, true, "since sits below the mark — records were genuinely dropped")
+
+  const atMark = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=6`, { headers: aliceHeaders(code, alice) }))
+  assert.equal(atMark.pruned, false, "at the mark itself nothing below it was lost from here")
 })
 
 test("GET /rooms/:code/outbox answers Accept: text/event-stream with the same records, as a meta frame plus one frame per record", async () => {
@@ -839,29 +898,66 @@ test("GET /rooms/:code/outbox answers Accept: text/event-stream with the same re
 
 // --- POST /rooms/:code/outbox/cursor (PLAN-02 step 4: the ack) --------------
 
-test("GET /rooms/:code/outbox fires the gap marker from the room-wide oldest when the member's backlog was pruned ENTIRELY (brief E)", async () => {
-  const { store, baseUrl, code, alice, bob } = await outboxHarness()
-  // Alice has NO records of her own left — her backlog was pruned to nothing.
-  // Her own oldest-retained is undefined; without the room-wide fallback,
-  // `since=1` would read as "nothing new" while d1..d4 are gone.
-  await store.update(code, {
+test("GET /rooms/:code/outbox fires the gap marker from the room-wide oldest, but ONLY for a legacy room with no low-water mark (brief E; scope narrowed by brief 12)", async () => {
+  // brief 12: a room created after `deliveryLowWater` existed writes it 0 at
+  // birth, so it is never absent for a modern room — the room-wide-oldest
+  // fallback below is dead code for anything `store.create()` produces
+  // today. The only way to exercise it honestly is a room that predates the
+  // field, simulated here the same way test/rooms/store.test.ts's migration
+  // test simulates a pre-`delivery` member: write the field out, reopen.
+  const dir = await freshDir()
+  let store = await RoomStore.open(dir)
+  const room = await store.create()
+  const alice = await store.addMember(room.code, {
+    displayName: "Chloe",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+  })
+  const bob = await store.addMember(room.code, {
+    displayName: "Bob",
+    tier: "messenger",
+    address: { provider: "telegram", source: "agentpush", contactRef: "700" },
+  })
+  // Alice has NO records of her own left — her backlog was pruned to
+  // nothing. Her own oldest-owned seq is deleted code (brief 12); the
+  // room-wide oldest retained (bob's d2) is the only legacy signal left.
+  await store.update(room.code, {
     deliverySeq: 5,
     deliveries: [outboxDelivery("d2", bob.id, "his phone got this one", "delivered"), outboxDelivery("d5", bob.id, "newest", "delivered")],
   })
 
-  const sinceOne = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=1`, { headers: aliceHeaders(code, alice) }))
-  assert.equal(sinceOne.pruned, true, "total loss must not read as 'nothing new'")
+  const filePath = join(dir, "rooms.json")
+  const parsed = JSON.parse(await readFile(filePath, "utf8")) as { rooms: Record<string, unknown>[] }
+  delete parsed.rooms[0]!.deliveryLowWater
+  await writeFile(filePath, JSON.stringify(parsed), "utf8")
+  store = await RoomStore.open(dir)
+
+  const daemon = await freshDaemon()
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport: new MemoryTransport(),
+    daemon: { baseUrl: daemon.url, token: undefined },
+  })
+  services.push(service)
+  const baseUrl = await listenOnRandomPort(service)
+
+  const sinceOne = await readJson(await fetch(`${baseUrl}/rooms/${room.code}/outbox?since=1`, { headers: aliceHeaders(room.code, alice) }))
+  assert.equal(sinceOne.pruned, true, "total loss must not read as 'nothing new', even from the weaker legacy signal")
   assert.deepEqual(
     isArrayOf(sinceOne.deliveries, (v): v is Record<string, unknown> => isRecord(v)) ? sinceOne.deliveries : [],
     [],
   )
 
   // At the room-wide oldest there is no gap to report.
-  const sinceTwo = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=2`, { headers: aliceHeaders(code, alice) }))
+  const sinceTwo = await readJson(await fetch(`${baseUrl}/rooms/${room.code}/outbox?since=2`, { headers: aliceHeaders(room.code, alice) }))
   assert.equal(sinceTwo.pruned, false)
 
-  // A member with records of her own still reads the gap from her OWN oldest,
-  // not the room's (the earlier D6 test pins that; this is the contrast).
+  // A member with records of her own still reads the gap from the mark when
+  // one is present, not any oldest-owned proxy (the D6 test pins that).
 })
 
 test("GET /rooms/:code/outbox fires the gap marker from the low-water mark when NOTHING is retained (brief B)", async () => {

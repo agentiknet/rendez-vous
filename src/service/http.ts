@@ -644,32 +644,39 @@ export interface OutboxPayload {
 function outboxFor(room: Room, member: Member, since: number, sinceGiven: boolean): OutboxPayload {
   const all = room.deliveries ?? []
   const mine = all.filter((delivery) => delivery.memberId === member.id)
-  const oldestOf = (records: readonly Delivery[]): number | undefined => {
+  const oldestOfAll = (): number | undefined => {
     let oldest: number | undefined
-    for (const delivery of records) {
+    for (const delivery of all) {
       const seq = deliverySeqOf(delivery.id)
       if (oldest === undefined || seq < oldest) oldest = seq
     }
     return oldest
   }
-  // Brief E, then brief B: when a member's backlog was pruned ENTIRELY, `mine`
-  // is empty and its own oldest-retained is `undefined` — total loss would
-  // read as "nothing new". Two independent answers, both conservative (they
-  // may report a gap a client did not actually suffer, never hide one):
-  //  - the room's LOW-WATER MARK (brief B) — the highest seq ever pruned, a
-  //    monotonic fact that survives even when the room retains NOTHING at
-  //    all. `since` below it means records the client should have seen were
-  //    dropped, whoever owned them. This is the exact answer, and the only
-  //    one knowable when the array is empty.
-  //  - the room-wide oldest retained seq (step 4's fallback), kept for rooms
-  //    persisted before the mark existed, whose pruned history is not in any
-  //    field we can read.
-  const oldestRetained = oldestOf(mine) ?? oldestOf(all)
-  const lowWater = room.deliveryLowWater ?? 0
+  // brief 12: `deliveryLowWater` is present on every room created after this
+  // field existed — it is written 0 at birth (rooms/store.ts `create`) — so
+  // its presence is itself the signal. When present it is the EXACT and
+  // COMPLETE answer (docs/OUTBOX.md §8) and nothing else may override it:
+  // in particular, the per-member oldest-OWNED seq (`oldestOf(mine)`, now
+  // deleted) is not a pruning signal at all — a member simply never
+  // addressed by the room's earliest records has an oldest-owned seq above
+  // zero having lost nothing, and using it as evidence of a gap is what
+  // told every non-first room-web member it lost messages on its first
+  // poll ever.
+  //
+  // Only when the mark is ABSENT — a room persisted before it existed,
+  // whose pruned history genuinely cannot be read from any field — does the
+  // room-wide oldest retained seq (step 4's fallback) apply, as the weaker,
+  // over-triggering signal §8 accepts for that legacy case only.
+  const legacyOldestRetained = room.deliveryLowWater === undefined ? oldestOfAll() : undefined
+  const pruned =
+    sinceGiven &&
+    (room.deliveryLowWater !== undefined
+      ? since < room.deliveryLowWater
+      : legacyOldestRetained !== undefined && since < legacyOldestRetained)
   return {
     memberId: member.id,
     cursor: room.deliverySeq ?? 0,
-    pruned: sinceGiven && (since < lowWater || (oldestRetained !== undefined && since < oldestRetained)),
+    pruned,
     deliveries: mine.filter((delivery) => deliverySeqOf(delivery.id) > since),
   }
 }

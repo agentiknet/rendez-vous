@@ -367,6 +367,7 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     let memberTokenValue = null;
     let outboxSince = 0;
     const seenDeliveries = {};
+    const gapState = {};
 
     async function ensureClaimed() {
       const name = nameInput.value.trim();
@@ -432,7 +433,7 @@ function script(code: string, room: Room, agentBusy: boolean): string {
         if (res.status === 401) { memberTokenValue = null; return; }
         if (!res.ok) return;
         const payload = await res.json();
-        const plan = planOutboxRender(payload, seenDeliveries);
+        const plan = planOutboxRender(payload, seenDeliveries, outboxSince, gapState);
         if (plan.gap) {
           const el = document.createElement("div");
           el.className = "outbox-gap";
@@ -539,10 +540,23 @@ function script(code: string, room: Room, agentBusy: boolean): string {
  *  (at-least-once — a reconnect repeats records), and surface the `pruned`
  *  gap marker as text instead of silence (PLAN-02 §3-D6). Kept
  *  self-contained on purpose: it must survive `toString()` with no free
- *  references except OUTBOX_GAP_TEXT, which the script defines alongside. */
+ *  references except OUTBOX_GAP_TEXT, which the script defines alongside.
+ *
+ *  `since` and `gapState` are brief 12: the server re-reports `pruned: true`
+ *  on every poll until the cursor moves past the mark (defect 2's fix does
+ *  not change that — it is still correct on every one of those polls), so
+ *  without this the client re-announced the SAME gap once per tick forever.
+ *  A gap is identified by the `since` it was reported at; it is rendered
+ *  once for that `since` and re-rendered only when a NEW, higher `since`
+ *  still comes back pruned — a gap the client had not yet been told about.
+ *  `gapState` defaults to a fresh object per call so callers that do not
+ *  care about de-duplication (existing tests) see the old always-report
+ *  behaviour unchanged. */
 export const planOutboxRender = (
   payload: { pruned?: boolean; deliveries?: readonly { id: string; kind: string; text: string }[] },
   seenIds: Record<string, boolean>,
+  since = 0,
+  gapState: { lastReportedSince?: number } = {},
 ): { gap: string | undefined; items: { id: string; kind: string; text: string }[] } => {
   const items: { id: string; kind: string; text: string }[] = []
   const deliveries = payload.deliveries === undefined || payload.deliveries === null ? [] : payload.deliveries
@@ -561,7 +575,9 @@ export const planOutboxRender = (
       text: record.text === undefined ? "" : record.text,
     })
   }
-  return { gap: payload.pruned === true ? OUTBOX_GAP_TEXT : undefined, items }
+  const isNewGap = payload.pruned === true && (gapState.lastReportedSince === undefined || since > gapState.lastReportedSince)
+  if (isNewGap) gapState.lastReportedSince = since
+  return { gap: isNewGap ? OUTBOX_GAP_TEXT : undefined, items }
 }
 
 /** One button per configured surface, in the fidelity-ladder order
