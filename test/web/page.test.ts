@@ -416,3 +416,39 @@ test("the embedded page ships the AG-UI drain, not the JSON one — the transpor
   assert.ok(html.includes('"/agui"') || html.includes("/agui"), "the drain must target the AG-UI route")
   assert.ok(!html.includes("const outboxPayloadOf ="), "the superseded JSON parser must not still be shipped")
 })
+
+test("the embedded pure-function block EVALUATES and runs standalone — the free-variable trap this `.toString()` embed sets, which no test that imports the module can see", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks())
+
+  // Slice the two DOM-free declaration blocks out of the page's own script:
+  // the render plan, and the claim/drain/AG-UI block. Everything after
+  // `const outboxFailureVisible` touches `document`, so the slice stops there.
+  const planStart = html.indexOf("const OUTBOX_GAP_TEXT =")
+  const planEnd = html.indexOf("const transcriptEl")
+  const drainStart = html.indexOf("const CLAIM_RETRY_BASE_MS =")
+  const drainEnd = html.indexOf("const memberStatusEl")
+  for (const [name, index] of Object.entries({ planStart, planEnd, drainStart, drainEnd })) {
+    assert.ok(index > 0, `could not locate ${name} in the page — this test's slice is stale, not the page`)
+  }
+  const block = html.slice(planStart, planEnd) + "\n" + html.slice(drainStart, drainEnd)
+
+  // Evaluated in its own scope with NOTHING from this module in it. A
+  // function whose body reaches for a constant the page forgot to declare
+  // throws here, exactly as it would in the browser — and only when called,
+  // which is why this drives a real call rather than checking the source.
+  const run = new Function(
+    "frames",
+    `${block}\nreturn { payload: aguiPayloadOf(aguiSseFrames(frames)), failure: outboxFailureVisible({ drainFailureStreak: 99 }) };`,
+  )
+  const body =
+    'data: {"type":"RUN_STARTED"}\n\n' +
+    'data: {"type":"CUSTOM","name":"rdv.outbox.kind","value":{"messageId":"d7","kind":"tool"}}\n\n' +
+    'data: {"type":"TOOL_CALL_START","toolCallId":"d7","toolCallName":"render_artifact"}\n\n' +
+    'data: {"type":"TOOL_CALL_ARGS","toolCallId":"d7","delta":"{}"}\n\n' +
+    'data: {"type":"RUN_FINISHED"}\n\n'
+  const result: unknown = run(body)
+  assert.ok(result !== null && typeof result === "object" && "payload" in result)
+  const payload = result.payload
+  assert.ok(payload !== null && typeof payload === "object" && "deliveries" in payload)
+  assert.deepEqual(payload.deliveries, [{ id: "d7", kind: "tool", text: "{}", toolName: "render_artifact" }])
+})
