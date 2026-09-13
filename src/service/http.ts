@@ -667,12 +667,19 @@ function outboxFor(room: Room, member: Member, since: number, sinceGiven: boolea
   // whose pruned history genuinely cannot be read from any field — does the
   // room-wide oldest retained seq (step 4's fallback) apply, as the weaker,
   // over-triggering signal §8 accepts for that legacy case only.
+  //
+  // brief 16: within that legacy arm, retaining d1 is a proof, not a guess —
+  // seqs are minted monotonically from Room.deliverySeq and a pruned seq is
+  // never re-minted (docs/OUTBOX.md §2), so d1 surviving means nothing has
+  // EVER been pruned in this room, for anyone. Only when d1 is gone does the
+  // weaker room-wide-oldest fallback apply, per §8.
   const legacyOldestRetained = room.deliveryLowWater === undefined ? oldestOfAll() : undefined
+  const legacyProvablyUnpruned = legacyOldestRetained === 1
   const pruned =
     sinceGiven &&
     (room.deliveryLowWater !== undefined
       ? since < room.deliveryLowWater
-      : legacyOldestRetained !== undefined && since < legacyOldestRetained)
+      : !legacyProvablyUnpruned && legacyOldestRetained !== undefined && since < legacyOldestRetained)
   return {
     memberId: member.id,
     cursor: room.deliverySeq ?? 0,

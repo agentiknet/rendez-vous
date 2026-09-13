@@ -960,6 +960,99 @@ test("GET /rooms/:code/outbox fires the gap marker from the room-wide oldest, bu
   // one is present, not any oldest-owned proxy (the D6 test pins that).
 })
 
+test("GET /rooms/:code/outbox: a legacy room that still retains d1 has provably pruned nothing, even for a member owning none of it (brief 16)", async () => {
+  // Seqs are minted monotonically from Room.deliverySeq and a pruned seq is
+  // never re-minted (docs/OUTBOX.md §2), so d1 surviving proves nothing has
+  // ever been pruned here — regardless of what the weaker room-wide-oldest
+  // fallback would otherwise guess.
+  const dir = await freshDir()
+  let store = await RoomStore.open(dir)
+  const room = await store.create()
+  const alice = await store.addMember(room.code, {
+    displayName: "Chloe",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+  })
+  const bob = await store.addMember(room.code, {
+    displayName: "Bob",
+    tier: "messenger",
+    address: { provider: "telegram", source: "agentpush", contactRef: "700" },
+  })
+  await store.update(room.code, {
+    deliverySeq: 1,
+    deliveries: [outboxDelivery("d1", bob.id, "the very first record ever minted", "delivered")],
+  })
+
+  const filePath = join(dir, "rooms.json")
+  const parsed = JSON.parse(await readFile(filePath, "utf8")) as { rooms: Record<string, unknown>[] }
+  delete parsed.rooms[0]!.deliveryLowWater
+  await writeFile(filePath, JSON.stringify(parsed), "utf8")
+  store = await RoomStore.open(dir)
+
+  const daemon = await freshDaemon()
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport: new MemoryTransport(),
+    daemon: { baseUrl: daemon.url, token: undefined },
+  })
+  services.push(service)
+  const baseUrl = await listenOnRandomPort(service)
+
+  const sinceZero = await readJson(await fetch(`${baseUrl}/rooms/${room.code}/outbox?since=0`, { headers: aliceHeaders(room.code, alice) }))
+  assert.equal(sinceZero.pruned, false, "d1 is still here — nothing has ever been pruned in this room")
+})
+
+test("GET /rooms/:code/outbox: a legacy room that does NOT retain d1 keeps the weaker room-wide-oldest fallback (brief 16 pair)", async () => {
+  // The pair to the test above: without this, reporting pruned:false whenever
+  // a member owns nothing would pass trivially by hard-wiring the answer
+  // rather than actually reading d1's presence.
+  const dir = await freshDir()
+  let store = await RoomStore.open(dir)
+  const room = await store.create()
+  const alice = await store.addMember(room.code, {
+    displayName: "Chloe",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+  })
+  const bob = await store.addMember(room.code, {
+    displayName: "Bob",
+    tier: "messenger",
+    address: { provider: "telegram", source: "agentpush", contactRef: "700" },
+  })
+  // d1 is gone — the room genuinely may have pruned, so the weaker room-wide
+  // oldest-retained fallback (d2) still governs.
+  await store.update(room.code, {
+    deliverySeq: 2,
+    deliveries: [outboxDelivery("d2", bob.id, "oldest survivor", "delivered")],
+  })
+
+  const filePath = join(dir, "rooms.json")
+  const parsed = JSON.parse(await readFile(filePath, "utf8")) as { rooms: Record<string, unknown>[] }
+  delete parsed.rooms[0]!.deliveryLowWater
+  await writeFile(filePath, JSON.stringify(parsed), "utf8")
+  store = await RoomStore.open(dir)
+
+  const daemon = await freshDaemon()
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport: new MemoryTransport(),
+    daemon: { baseUrl: daemon.url, token: undefined },
+  })
+  services.push(service)
+  const baseUrl = await listenOnRandomPort(service)
+
+  const sinceZero = await readJson(await fetch(`${baseUrl}/rooms/${room.code}/outbox?since=0`, { headers: aliceHeaders(room.code, alice) }))
+  assert.equal(sinceZero.pruned, true, "d1 is gone — the room-wide oldest-retained fallback must still fire")
+})
+
 test("GET /rooms/:code/outbox fires the gap marker from the low-water mark when NOTHING is retained (brief B)", async () => {
   const { store, baseUrl, code, alice } = await outboxHarness()
   // The room pruned EVERYTHING it ever held — deliveries is empty, so there
