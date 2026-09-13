@@ -718,6 +718,38 @@ test("GET /r/:code/state carries artifact.renderedAt once a render is stored, so
   }
 })
 
+// The deliverable PDF has existed on disk since the first render and had no
+// URL, so "send me the PDF" meant rendering a second one. This serves the
+// bytes that are already there.
+test("GET /r/:code/artifact/deliverable.pdf serves the stored PDF, inline and room-named", async () => {
+  const renders = new ArtifactRenderStore(await freshDir())
+  const { baseUrl, code } = await newRoomHarness(renders)
+  const pdf = Buffer.from("%PDF-1.7 stored bytes")
+  await renders.save(code, Buffer.from("<html></html>"), pdf, 2)
+
+  const res = await fetch(`${baseUrl}/r/${code}/artifact/deliverable.pdf`)
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get("content-type"), "application/pdf")
+  assert.match(res.headers.get("content-disposition") ?? "", new RegExp(`${code}-deliverable\\.pdf`))
+  assert.equal(Buffer.from(await res.arrayBuffer()).toString("utf8"), pdf.toString("utf8"))
+  // Same public-CORS reading as the rest of this prefix: the room code is
+  // the capability, and a panel on another origin must be able to link it.
+  assert.equal(res.headers.get("access-control-allow-origin"), "*")
+})
+
+test("GET /r/:code/artifact/deliverable.pdf 404s when nothing is rendered, instead of the self-healing 503", async () => {
+  const { baseUrl, code } = await newRoomHarness(new ArtifactRenderStore(await freshDir()))
+
+  const res = await fetch(`${baseUrl}/r/${code}/artifact/deliverable.pdf`)
+  // The rest of this prefix answers a missing box with a refreshing 503 —
+  // "come back in a moment". There is no box that could ever produce this
+  // PDF: canvakit makes it on the service host. A delay standing in for an
+  // absence would have whoever was sent the link waiting forever.
+  assert.equal(res.status, 404)
+  const body = await readJson(res)
+  assert.equal(body.error, "no_render")
+})
+
 test("GET /r/:code/state returns 404 JSON for an unknown room", async () => {
   const { baseUrl } = await newRoomHarness()
   const res = await fetch(`${baseUrl}/r/RDV-ZZZZ/state`)

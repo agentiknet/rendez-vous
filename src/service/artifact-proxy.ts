@@ -48,6 +48,22 @@ export function publicArtifactUrl(code: string): string {
   return `${env.publicUrl}/r/${code}/artifact/`
 }
 
+/** The stable URL for the room's deliverable PDF — the same bytes
+ *  `render_artifact` already produced, served straight from the render
+ *  store.
+ *
+ *  Deliberately a SUBPATH of `publicArtifactUrl`, not a sibling route: it
+ *  inherits that prefix's CORS header and its "the room code is the
+ *  capability" reading, and a member handed one link can guess the other.
+ *  Unlike the rest of that prefix it never proxies to the box — the PDF is
+ *  produced by canvakit on this host and exists nowhere else, so a room with
+ *  no stored render 404s here instead of falling through to the self-healing
+ *  503 page (a "come back in a moment" answer for bytes that are not coming
+ *  is absence dressed as a delay). */
+export function publicArtifactPdfUrl(code: string): string {
+  return `${env.publicUrl}/r/${code}/artifact/deliverable.pdf`
+}
+
 /** The public, stable URL for one stored media record — `GET /r/:code/media/:id`.
  *
  *  This is not only a convenience for links in text. It is the ONLY way an

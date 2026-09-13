@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url"
 import { env } from "../env.ts"
 import type { Room } from "../rooms/types.ts"
 import { artifactViewHtml } from "./artifact-view.html.ts"
-import { publicArtifactUrl } from "./artifact-proxy.ts"
+import { publicArtifactPdfUrl, publicArtifactUrl } from "./artifact-proxy.ts"
 import { renderArtifactHtml, renderArtifactPdf } from "./artifact-render.ts"
 import type { ArtifactRenderStore } from "./artifact-renders.ts"
 
@@ -300,6 +300,29 @@ const RENDER_ARTIFACT_TOOL = {
  *  No `_meta.ui.resourceUri`: this is data for the model, not a panel. The
  *  panel is `render_artifact`'s, and pointing a host at it from a read would
  *  redraw the document on every question asked about it. */
+/** `export_artifact` — the document's two shareable URLs and nothing else.
+ *
+ *  Split from `read_artifact` on purpose: an agent that wants to SEND the
+ *  document should not have to pull the whole thing into its context first.
+ *  Read is for contents, export is for links.
+ *
+ *  Both URLs already existed as bytes: the live page has been served at
+ *  `publicArtifactUrl` since the first render, and the PDF has sat in the
+ *  render store with no URL at all. Nothing new is generated here — this
+ *  tool tells the agent the addresses of things it already made.
+ *
+ *  It does NOT send. Handing the links to members is `say`'s job, which is
+ *  already member-scoped; sending to somebody who is NOT in the room stays
+ *  behind the confirm-token gate in `deliverable.ts`, which exists precisely
+ *  so one member cannot email a stranger under the room owner's agentpush
+ *  identity. A tool that sent from here would route around that gate. */
+const EXPORT_ARTIFACT_TOOL = {
+  name: "export_artifact",
+  description:
+    "Get THIS room's shared document as shareable links: a live HTML page and a PDF. Use this when someone asks for the document, a copy, a PDF, or a link to send. Both URLs are stable and safe to paste into a message — pass them to `say`/`whisper` to deliver them. Returns {rendered:false} when nothing has been rendered yet: render it first, do not invent a URL. This tool does not send anything by itself.",
+  inputSchema: { type: "object", properties: {} },
+} as const
+
 const READ_ARTIFACT_TOOL = {
   name: "read_artifact",
   description:
@@ -548,6 +571,43 @@ async function callReadTool(
   })
 }
 
+/** `export_artifact`'s handler. Reports only what it can verify: the URLs
+ *  come back when a render is actually stored, and `{ rendered: false }`
+ *  otherwise — never a URL for a document that does not exist. A link that
+ *  404s reads as "the system is broken" to whoever was sent it, when the
+ *  truth is simply that nobody rendered anything yet. */
+async function callExportTool(
+  authorization: string | undefined,
+  id: string | number | null,
+  deps: McpCanvakitDeps,
+): Promise<McpResponse> {
+  const room = resolveRoom(deps, authorization)
+  if (room === undefined) return unauthorized(id)
+
+  const record = await deps.renders.getOrLoad(room.code)
+  const payload =
+    record === undefined
+      ? {
+          room_code: room.code,
+          rendered: false,
+          note: "Nothing has been rendered in this room yet, so there is no link to share. Call render_artifact first.",
+        }
+      : {
+          room_code: room.code,
+          rendered: true,
+          rendered_at: record.renderedAt,
+          html_url: publicArtifactUrl(room.code),
+          pdf_url: publicArtifactPdfUrl(room.code),
+          pdf_bytes: record.pdfBytes,
+          // `pages` is 0 for a record hydrated from disk after a restart —
+          // the store does not re-parse the PDF to recover it. Reported as
+          // absent rather than as zero pages, which would be a lie about a
+          // document that plainly has some.
+          ...(record.pages > 0 ? { pages: record.pages } : {}),
+        }
+  return ok(id, { content: [{ type: "text", text: JSON.stringify(payload) }], isError: false })
+}
+
 /**
  * Handle one JSON-RPC 2.0 request body (already JSON.parse'd) with its
  * `Authorization` header value: `initialize`, `notifications/initialized`,
@@ -587,7 +647,7 @@ export function createMcpCanvakitHandler(
     }
 
     if (method === "tools/list") {
-      return ok(id, { tools: [RENDER_ARTIFACT_TOOL, READ_ARTIFACT_TOOL] })
+      return ok(id, { tools: [RENDER_ARTIFACT_TOOL, READ_ARTIFACT_TOOL, EXPORT_ARTIFACT_TOOL] })
     }
 
     if (method === "resources/list") {
@@ -647,6 +707,9 @@ export function createMcpCanvakitHandler(
       const tool = params.name
       if (tool === READ_ARTIFACT_TOOL.name) {
         return callReadTool(authorization, id, deps)
+      }
+      if (tool === EXPORT_ARTIFACT_TOOL.name) {
+        return callExportTool(authorization, id, deps)
       }
       if (tool !== RENDER_ARTIFACT_TOOL.name) {
         return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(tool)}`)

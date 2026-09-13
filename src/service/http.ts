@@ -447,6 +447,35 @@ async function handleRoomArtifact(
     sendJson(res, 404, { error: "not_found" })
     return
   }
+
+  // The deliverable PDF is the one subpath under this prefix that NEVER
+  // proxies to the box: canvakit produced it on this host and it exists
+  // nowhere else. So "no stored render" is a definite 404 here, not the
+  // self-healing 503 the rest of the prefix answers with — that page means
+  // "the box is coming up", and for bytes that are not coming it would be a
+  // delay standing in for an absence.
+  if (subPath === "/deliverable.pdf") {
+    const pdf = await renders.readPdf(code)
+    if (pdf === undefined) {
+      sendJson(res, 404, { error: "no_render", message: `room ${code} has no rendered artifact yet` })
+      return
+    }
+    res.writeHead(200, {
+      "content-type": "application/pdf",
+      "content-length": String(pdf.length),
+      // `inline`, so a browser and a messenger preview it rather than
+      // forcing a download; the filename still carries the room code for
+      // whoever does save it.
+      "content-disposition": `inline; filename="${code}-deliverable.pdf"`,
+      // The bytes change only when a new render lands, and every link to
+      // them is the same stable URL — so revalidate rather than cache, or a
+      // re-render silently serves the old document.
+      "cache-control": "no-cache",
+    })
+    res.end(req.method === "HEAD" ? undefined : pdf)
+    return
+  }
+
   const renderedIndex = (await renders.hasOrLoad(code)) ? await renders.readHtml(code) : undefined
   await proxyArtifact(
     {

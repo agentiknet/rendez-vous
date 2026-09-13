@@ -161,4 +161,16 @@ export class ArtifactRenderStore {
       return undefined
     }
   }
+
+  /** The stored deliverable PDF, or `undefined` when this room has no
+   *  render. Served directly at `/r/:code/artifact/deliverable.pdf` — the
+   *  bytes have existed since the first `render_artifact` call and had no
+   *  URL until then, so "export the PDF" meant re-rendering one. */
+  async readPdf(roomCode: string): Promise<Buffer | undefined> {
+    try {
+      return await readFile(join(this.dirPath(roomCode), "deliverable.pdf"))
+    } catch {
+      return undefined
+    }
+  }
 }

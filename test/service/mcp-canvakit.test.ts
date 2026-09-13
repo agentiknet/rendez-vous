@@ -121,7 +121,7 @@ test("a notification (no id) gets 202 with no body", async () => {
   assert.equal(res.body, undefined)
 })
 
-test("tools/list advertises the render_artifact/read_artifact pair and nothing else", async () => {
+test("tools/list advertises write, read and export of the one document, and nothing else", async () => {
   const { handler } = harness()
   const res = asRpc(await handler({ jsonrpc: "2.0", id: "a", method: "tools/list" }, undefined))
   assert.equal(res.status, 200)
@@ -129,25 +129,27 @@ test("tools/list advertises the render_artifact/read_artifact pair and nothing e
   assert.ok(Array.isArray(tools))
   assert.deepEqual(
     tools.map((tool) => (tool as { name: string }).name),
-    ["render_artifact", "read_artifact"],
-    "a closed surface: the document can be written and read back, and nothing else",
+    ["render_artifact", "read_artifact", "export_artifact"],
+    "a closed surface: the document can be written, read back and linked to — and nothing else",
   )
   for (const tool of tools) {
     assert.ok(isRecord(tool))
     assert.ok(isRecord(tool.inputSchema), "every tool must describe its input so the agent fills it first try")
   }
 
-  // `read_artifact` takes NO arguments — the bearer is the room. A `roomCode`
-  // here would repeat the BRIEF-06 mistake: a value the agent cannot know,
-  // and a way to name somebody else's room.
-  const read = tools.find((tool) => (tool as { name: string }).name === "read_artifact")
-  assert.ok(isRecord(read) && isRecord(read.inputSchema))
-  assert.deepEqual((read.inputSchema as Record<string, unknown>).properties, {})
-
-  // And no UI resource on it: it returns data for the model, not a panel.
-  // Pointing a host at render_artifact's panel from a READ would redraw the
-  // document every time somebody asked a question about it.
-  assert.equal(read._meta, undefined)
+  // Neither read nor export takes arguments — the bearer is the room. A
+  // `roomCode` on either would repeat the BRIEF-06 mistake: a value the agent
+  // cannot know, and a way to name somebody else's room.
+  //
+  // And neither carries a UI resource: both return data for the model, not a
+  // panel. Pointing a host at render_artifact's panel from a READ would
+  // redraw the document every time somebody asked a question about it.
+  for (const name of ["read_artifact", "export_artifact"]) {
+    const found: unknown = tools.find((candidate) => (candidate as { name: string }).name === name)
+    assert.ok(isRecord(found) && isRecord(found.inputSchema))
+    assert.deepEqual((found.inputSchema as Record<string, unknown>).properties, {}, `${name} must take no arguments`)
+    assert.equal(found._meta, undefined, `${name} must not claim a UI panel`)
+  }
 })
 
 test("tools/list's data property carries an items schema (an array with none is uncallable from OpenAI function-calling)", async () => {
@@ -499,4 +501,61 @@ test("re-rendering replaces the readable source, so a read never returns a previ
   }
 
   assert.deepEqual(readPayload(asRpc(await handler(READ_CALL, VALID_TOKEN))).data, second)
+})
+
+// --- export_artifact (the document's two shareable links) -----------------
+
+const EXPORT_CALL = {
+  jsonrpc: "2.0",
+  id: "e",
+  method: "tools/call",
+  params: { name: "export_artifact", arguments: {} },
+}
+
+test("export_artifact on a room with no render offers no URL at all", async () => {
+  const { handler } = readHarness()
+  const payload = readPayload(asRpc(await handler(EXPORT_CALL, VALID_TOKEN)))
+  assert.equal(payload.rendered, false)
+  // The point: no link is better than a link that 404s. A dead URL in a
+  // WhatsApp message reads as "the system is broken" to whoever opens it,
+  // when the truth is only that nobody has rendered anything.
+  assert.equal(payload.html_url, undefined)
+  assert.equal(payload.pdf_url, undefined)
+})
+
+test("export_artifact returns both links and the PDF's size without returning the document", async () => {
+  const { handler } = readHarness()
+  const rendered = asRpc(
+    await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: callParamsNoRoomCode(VALID_DATA) }, VALID_TOKEN),
+  )
+  assert.equal(rendered.result?.isError, false)
+
+  const payload = readPayload(asRpc(await handler(EXPORT_CALL, VALID_TOKEN)))
+  assert.equal(payload.rendered, true)
+  assert.equal(payload.html_url, `${env.publicUrl}/r/${ROOM}/artifact/`)
+  assert.equal(payload.pdf_url, `${env.publicUrl}/r/${ROOM}/artifact/deliverable.pdf`)
+  assert.equal(payload.pdf_bytes, Buffer.from("%PDF-1.7 fake").length)
+
+  // Links, not contents — an agent that only wants to SEND the document
+  // must not have to pull the whole thing into its context to do it. That
+  // is read_artifact's job, and the split is the whole reason both exist.
+  assert.equal(payload.data, undefined)
+  assert.doesNotMatch(JSON.stringify(payload), /Seminar budget/)
+})
+
+test("export_artifact reports no page count rather than zero pages for a render hydrated from disk", async () => {
+  const { handler, renders } = readHarness()
+  // `pages: 0` is the store's "unknown" after a restart — it does not
+  // re-parse the PDF. Reporting it verbatim would tell the agent the
+  // document has no pages, which it can then repeat to a member.
+  await renders.save(ROOM, Buffer.from("<html>x</html>"), Buffer.from("%PDF-1.7 x"), 0)
+  const payload = readPayload(asRpc(await handler(EXPORT_CALL, VALID_TOKEN)))
+  assert.equal(payload.rendered, true)
+  assert.equal(payload.pages, undefined)
+})
+
+test("export_artifact is bound to the bearer's room", async () => {
+  const { handler } = readHarness()
+  assert.equal((await handler(EXPORT_CALL, undefined)).status, 401)
+  assert.equal((await handler(EXPORT_CALL, `Bearer ${roomRenderToken("RDV-ZZZZ", env.roomTokenSecret)}`)).status, 401)
 })
