@@ -48,7 +48,7 @@ test("flushes a turn to messenger members, skips room-web, and persists the curs
 
   await waitFor(() => transport.sends.length === 2)
   for (const send of transport.sends) {
-    assert.equal(send.text, `Hello world\n[${room.code}]`)
+    assert.equal(send.text, `Hello world\n[${room.slug}]`)
   }
   await waitFor(() => (store.get(room.code)?.cursor ?? 0) === 3)
 
@@ -70,12 +70,12 @@ test("two consecutive turns produce two flushes with no text bleed between them"
   source.push({ seq: 2, kind: "turn-end" })
   fanout.start(room.code)
   await waitFor(() => transport.sends.length === 1)
-  assert.equal(transport.sends[0]?.text, `first\n[${room.code}]`)
+  assert.equal(transport.sends[0]?.text, `first\n[${room.slug}]`)
 
   source.push({ seq: 3, kind: "text-delta", text: "second" })
   source.push({ seq: 4, kind: "turn-end" })
   await waitFor(() => transport.sends.length === 2)
-  assert.equal(transport.sends[1]?.text, `second\n[${room.code}]`)
+  assert.equal(transport.sends[1]?.text, `second\n[${room.slug}]`)
 
   await fanout.stopAll()
 })
@@ -98,7 +98,7 @@ test("a turn-end with no accumulated text is skipped: no send, next real turn st
   source.push({ seq: 3, kind: "turn-end" })
   await waitFor(() => transport.sends.length === 1)
   assert.equal(transport.sends.length, 1)
-  assert.equal(transport.sends[0]?.text, `now something\n[${room.code}]`)
+  assert.equal(transport.sends[0]?.text, `now something\n[${room.slug}]`)
 
   await fanout.stopAll()
 })
@@ -171,7 +171,7 @@ test("restart without duplicates: a fresh store and fanout on the same dir resum
   source.push({ seq: 3, kind: "text-delta", text: "turn two" })
   source.push({ seq: 4, kind: "turn-end" })
   await waitFor(() => transport2.sends.length === 1)
-  assert.equal(transport2.sends[0]?.text, `turn two\n[${room.code}]`)
+  assert.equal(transport2.sends[0]?.text, `turn two\n[${room.slug}]`)
   assert.equal(transport1.sends.length, 1, "the original transport never saw the second turn")
 
   await fanout2.stopAll()
@@ -219,7 +219,7 @@ test("source error then reconnect: delivery continues from the persisted cursor 
   source.push({ seq: 2, kind: "turn-end" })
 
   await waitFor(() => transport.sends.length === 1, 5000)
-  assert.equal(transport.sends[0]?.text, `after reconnect\n[${room.code}]`)
+  assert.equal(transport.sends[0]?.text, `after reconnect\n[${room.slug}]`)
   assert.equal(store.get(room.code)?.cursor, 2)
 
   await fanout.stopAll()
@@ -241,7 +241,7 @@ test("artifact url is announced on the first flush after boot when the room alre
   fanout.start(room.code)
 
   await waitFor(() => transport.sends.length === 1)
-  assert.equal(transport.sends[0]?.text, `live now\n${publicArtifactUrl(room.code)}`)
+  assert.equal(transport.sends[0]?.text, `live now\n${publicArtifactUrl(room.code)}\n[${room.slug}]`)
 
   await fanout.stopAll()
 })
@@ -277,7 +277,7 @@ test("a reader stops retrying and removes itself once isAlive reports the sessio
   source.push({ seq: 1, kind: "text-delta", text: "back online" })
   source.push({ seq: 2, kind: "turn-end" })
   await waitFor(() => transport.sends.length === 1)
-  assert.equal(transport.sends[0]?.text, `back online\n[${room.code}]`)
+  assert.equal(transport.sends[0]?.text, `back online\n[${room.slug}]`)
 
   await fanout.stopAll()
 })
@@ -298,7 +298,7 @@ test("a reader keeps retrying with backoff when isAlive still reports the sessio
   source.push({ seq: 1, kind: "text-delta", text: "after reconnect" })
   source.push({ seq: 2, kind: "turn-end" })
   await waitFor(() => transport.sends.length === 1, 5000)
-  assert.equal(transport.sends[0]?.text, `after reconnect\n[${room.code}]`)
+  assert.equal(transport.sends[0]?.text, `after reconnect\n[${room.slug}]`)
 
   await fanout.stopAll()
 })
@@ -329,8 +329,8 @@ test("a whisper reaches only its target with the private prefix; other members g
 
   const toAlice = transport.sends.find((send) => send.memberId === alice.id)
   const toBob = transport.sends.find((send) => send.memberId === bob.id)
-  assert.equal(toAlice?.text, `Hi both.\n(private) reconciled it your way\ndone.\n[${room.code}]`)
-  assert.equal(toBob?.text, `Hi both.\n(the agent whispered to Alice)\ndone.\n[${room.code}]`)
+  assert.equal(toAlice?.text, `Hi both.\n(private) reconciled it your way\ndone.\n[${room.slug}]`)
+  assert.equal(toBob?.text, `Hi both.\n(the agent whispered to Alice)\ndone.\n[${room.slug}]`)
 
   await fanout.stopAll()
 })
@@ -369,11 +369,11 @@ test("one turn addresses two different members plus a broadcast line: N addresse
   const toBob = transport.sends.find((send) => send.memberId === bob.id)
   assert.equal(
     toAlice?.text,
-    `Hi both.\n(private) went with your version\n(the agent whispered to Bob)\nmoving ahead.\n[${room.code}]`,
+    `Hi both.\n(private) went with your version\n(the agent whispered to Bob)\nmoving ahead.\n[${room.slug}]`,
   )
   assert.equal(
     toBob?.text,
-    `Hi both.\n(the agent whispered to Alice)\n(private) yours conflicted, sorry\nmoving ahead.\n[${room.code}]`,
+    `Hi both.\n(the agent whispered to Alice)\n(private) yours conflicted, sorry\nmoving ahead.\n[${room.slug}]`,
   )
 
   await fanout.stopAll()
@@ -395,7 +395,7 @@ test("artifactReady === false gates the artifact line: no URL at all until the r
   source.push({ seq: 2, kind: "turn-end" })
   fanout.start(room.code)
   await waitFor(() => transport.sends.length === 1)
-  assert.equal(transport.sends[0]?.text, `still here\n[${room.code}]`, "no artifact line while the box is confirmed dead")
+  assert.equal(transport.sends[0]?.text, `still here\n[${room.slug}]`, "no artifact line while the box is confirmed dead")
   assert.equal(transport.sends[0]?.artifactUrl, undefined, "no dead URL rides along on the message either")
 
   // A revive re-marks the room ready; the next flush announces the URL again.
@@ -403,7 +403,7 @@ test("artifactReady === false gates the artifact line: no URL at all until the r
   source.push({ seq: 3, kind: "text-delta", text: "back" })
   source.push({ seq: 4, kind: "turn-end" })
   await waitFor(() => transport.sends.length === 2)
-  assert.equal(transport.sends[1]?.text, `back\n${publicArtifactUrl(room.code)}`)
+  assert.equal(transport.sends[1]?.text, `back\n${publicArtifactUrl(room.code)}\n[${room.slug}]`)
 
   await fanout.stopAll()
 })
@@ -450,7 +450,7 @@ test("one turn with two asks, a whisper, and broadcast: N asks recorded as a1..a
       "(the room is waiting on you) the product shot",
       "(waiting on Bob: the one-line positioning)",
       "Anyone with anything else, say so.",
-      `[${room.code}]`,
+      `[${room.slug}]`,
     ].join("\n"),
   )
   assert.equal(
@@ -461,7 +461,7 @@ test("one turn with two asks, a whisper, and broadcast: N asks recorded as a1..a
       "(waiting on Alice: the product shot)",
       "(the room is waiting on you) the one-line positioning",
       "Anyone with anything else, say so.",
-      `[${room.code}]`,
+      `[${room.slug}]`,
     ].join("\n"),
   )
 
@@ -495,13 +495,13 @@ test("the open marker is emitted once, on open only: a later plain turn does not
   fanout.start(room.code)
   await waitFor(() => transport.sends.length === 1)
   assert.equal(transport.sends[0]?.memberId, alice.id)
-  assert.equal(transport.sends[0]?.text, `Working.\n(the room is waiting on you) the product shot\n[${room.code}]`)
+  assert.equal(transport.sends[0]?.text, `Working.\n(the room is waiting on you) the product shot\n[${room.slug}]`)
   await waitFor(() => (store.get(room.code)?.asks ?? []).length === 1)
 
   source.push({ seq: 3, kind: "text-delta", text: "Still collecting." })
   source.push({ seq: 4, kind: "turn-end" })
   await waitFor(() => transport.sends.length === 2)
-  assert.equal(transport.sends[1]?.text, `Still collecting.\n[${room.code}]`, "the marker must not repeat on later turns")
+  assert.equal(transport.sends[1]?.text, `Still collecting.\n[${room.slug}]`, "the marker must not repeat on later turns")
   assert.equal((store.get(room.code)?.asks ?? []).length, 1, "no second ask recorded either")
 
   await fanout.stopAll()
@@ -528,8 +528,8 @@ test("a malformed ask block records nothing and delivers plain broadcast text; a
   fanout.start(room.code)
   await waitFor(() => transport.sends.length === 2)
 
-  assert.equal(transport.sends[0]?.text, `${malformed}\n[${room.code}]`, "malformed block folds back into broadcast text untouched")
-  assert.equal(transport.sends[1]?.text, `Start.\n(ask target not found: Dave)\nthe thing\n[${room.code}]`)
+  assert.equal(transport.sends[0]?.text, `${malformed}\n[${room.slug}]`, "malformed block folds back into broadcast text untouched")
+  assert.equal(transport.sends[1]?.text, `Start.\n(ask target not found: Dave)\nthe thing\n[${room.slug}]`)
   assert.equal(store.get(room.code)?.asks?.length ?? 0, 0, "neither fallback records an ask")
 
   await fanout.stopAll()
@@ -550,12 +550,12 @@ test("artifact url is not repeated on a later flush when it has not changed", as
   source.push({ seq: 2, kind: "turn-end" })
   fanout.start(room.code)
   await waitFor(() => transport.sends.length === 1)
-  assert.equal(transport.sends[0]?.text, `first\n${publicArtifactUrl(room.code)}`)
+  assert.equal(transport.sends[0]?.text, `first\n${publicArtifactUrl(room.code)}\n[${room.slug}]`)
 
   source.push({ seq: 3, kind: "text-delta", text: "second" })
   source.push({ seq: 4, kind: "turn-end" })
   await waitFor(() => transport.sends.length === 2)
-  assert.equal(transport.sends[1]?.text, `second\n[${room.code}]`)
+  assert.equal(transport.sends[1]?.text, `second\n[${room.slug}]`)
 
   await fanout.stopAll()
 })
@@ -575,7 +575,7 @@ test("a box replacement (a new raw artifactUrl behind the same code) does not re
   source.push({ seq: 2, kind: "turn-end" })
   fanout.start(room.code)
   await waitFor(() => transport.sends.length === 1)
-  assert.equal(transport.sends[0]?.text, `first\n${publicArtifactUrl(room.code)}`)
+  assert.equal(transport.sends[0]?.text, `first\n${publicArtifactUrl(room.code)}\n[${room.slug}]`)
 
   // Simulate a resume that cold-booted onto a different box (architecture.md
   // §9.3b) — a new raw URL for the same room code.
@@ -585,7 +585,7 @@ test("a box replacement (a new raw artifactUrl behind the same code) does not re
   await waitFor(() => transport.sends.length === 2)
   assert.equal(
     transport.sends[1]?.text,
-    `second\n[${room.code}]`,
+    `second\n[${room.slug}]`,
     "no artifact line: the public URL the member sees is unchanged",
   )
 

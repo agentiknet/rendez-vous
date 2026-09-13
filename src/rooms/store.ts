@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { generateCode, normalizeCode } from "./code.ts"
+import { generateSlug, normalizeSlug } from "./words.ts"
 import {
   deliveryFromAddress,
   type Address,
@@ -258,10 +259,39 @@ function migrateRoomRaw(room: unknown): unknown {
   }
 }
 
+/** BRIEF-20: every room in the file gets a `slug`, globally unique within
+ *  it, before `isRoom` ever sees the raw shape — `slug` is a required field
+ *  on `Room`, so a legacy file (all 19 rooms live today) must already carry
+ *  one by the time validation runs. Assigning an identifier here is not the
+ *  "never backfill a guess" violation brief 12's `deliveryLowWater` warns
+ *  against: a slug is not an inference about the room's past (which this
+ *  project will not guess), it is a fresh identity being minted for
+ *  something that never had one — the same operation `RoomStore.create`
+ *  performs for a brand new room, just run once over the existing rooster.
+ *  Returns whether anything was actually assigned, so `open` knows whether
+ *  the in-memory backfill needs writing back to disk at all. */
+function backfillSlugs(rooms: readonly unknown[]): { rooms: unknown[]; assigned: boolean } {
+  const used = new Set<string>()
+  for (const room of rooms) {
+    if (isObject(room) && typeof room.slug === "string" && room.slug.length > 0) used.add(room.slug)
+  }
+  let assigned = false
+  const withSlugs = rooms.map((room) => {
+    if (!isObject(room) || (typeof room.slug === "string" && room.slug.length > 0)) return room
+    let slug = generateSlug()
+    while (used.has(slug)) slug = generateSlug()
+    used.add(slug)
+    assigned = true
+    return { ...room, slug }
+  })
+  return { rooms: withSlugs, assigned }
+}
+
 /** Read-time migration for the whole file. */
-function migrateRoomFile(value: unknown): unknown {
-  if (!isObject(value) || !Array.isArray(value.rooms)) return value
-  return { ...value, rooms: value.rooms.map(migrateRoomRaw) }
+function migrateRoomFile(value: unknown): { migrated: unknown; slugsAssigned: boolean } {
+  if (!isObject(value) || !Array.isArray(value.rooms)) return { migrated: value, slugsAssigned: false }
+  const { rooms, assigned } = backfillSlugs(value.rooms.map(migrateRoomRaw))
+  return { migrated: { ...value, rooms }, slugsAssigned: assigned }
 }
 
 // JSON.stringify drops object keys whose value is `undefined`, so a persisted room with an
@@ -272,6 +302,7 @@ function isRoom(value: unknown): value is Room {
   if (!isObject(value)) return false
   if (
     !("code" in value) ||
+    !("slug" in value) ||
     !("members" in value) ||
     !("createdAt" in value) ||
     !("updatedAt" in value) ||
@@ -295,6 +326,7 @@ function isRoom(value: unknown): value is Room {
   const protocol = "protocol" in value ? value.protocol : undefined
   return (
     isString(value.code) &&
+    isString(value.slug) &&
     isStringOrUndefined(sessionId) &&
     isStringOrUndefined(lastSessionId) &&
     isStringOrUndefined(sandboxId) &&
@@ -352,11 +384,16 @@ export type AddressLookup =
 export class RoomStore {
   private readonly filePath: string
   private readonly rooms: Map<string, Room>
+  /** `slug → code` (BRIEF-20): a slug never changes once minted, so unlike
+   *  `rooms` this index is never invalidated by `update`'s copy-on-write —
+   *  it only ever grows, in `create` and in the one-time backfill below. */
+  private readonly slugs: Map<string, string>
   private writeChain: Promise<void>
 
   private constructor(filePath: string, rooms: Map<string, Room>) {
     this.filePath = filePath
     this.rooms = rooms
+    this.slugs = new Map(Array.from(rooms.values(), (room) => [room.slug, room.code]))
     this.writeChain = Promise.resolve()
   }
 
@@ -364,6 +401,7 @@ export class RoomStore {
     await mkdir(dir, { recursive: true })
     const filePath = join(dir, "rooms.json")
     const rooms = new Map<string, Room>()
+    let slugsAssigned = false
 
     let raw: string | undefined
     try {
@@ -384,16 +422,25 @@ export class RoomStore {
         const message = error instanceof Error ? error.message : String(error)
         throw new Error(`corrupt room store at ${filePath}: invalid JSON (${message})`)
       }
-      const migrated = migrateRoomFile(parsed)
+      const { migrated, slugsAssigned: assigned } = migrateRoomFile(parsed)
       if (!isRoomFile(migrated)) {
         throw new Error(`corrupt room store at ${filePath}: unexpected shape`)
       }
+      slugsAssigned = assigned
       for (const room of migrated.rooms) {
         rooms.set(room.code, room)
       }
     }
 
-    return new RoomStore(filePath, rooms)
+    const store = new RoomStore(filePath, rooms)
+    // BRIEF-20: at least one pre-existing room had no slug — persist the
+    // backfill now, through the store's own write path, so a second boot
+    // reads the same slugs back from disk instead of minting fresh ones
+    // (idempotent, not re-minted per boot). Never touches `.rdv/` directly.
+    if (slugsAssigned) {
+      await store.persist()
+    }
+    return store
   }
 
   private async persist(): Promise<void> {
@@ -415,9 +462,14 @@ export class RoomStore {
     while (this.rooms.has(code)) {
       code = generateCode()
     }
+    let slug = generateSlug()
+    while (this.slugs.has(slug)) {
+      slug = generateSlug()
+    }
     const now = new Date().toISOString()
     const room: Room = {
       code,
+      slug,
       sessionId: undefined,
       sandboxId: undefined,
       artifactUrl: undefined,
@@ -437,6 +489,7 @@ export class RoomStore {
       deliveryLowWater: 0,
     }
     this.rooms.set(code, room)
+    this.slugs.set(slug, code)
     await this.enqueueWrite()
     return room
   }
@@ -445,6 +498,17 @@ export class RoomStore {
     const normalized = normalizeCode(code)
     if (normalized === undefined) return undefined
     return this.rooms.get(normalized)
+  }
+
+  /** BRIEF-20: the slug's OWN lookup — kept a separate method from `get`
+   *  rather than accepting either shape in one call, so every call site has
+   *  to say out loud which security posture it wants (`get`: this identifier
+   *  admits; `getBySlug`: this identifier only ever identifies — see
+   *  `commands.ts`'s `joinBySlug`/`resumeBySlug` for the membership check
+   *  that makes that real). */
+  getBySlug(slug: string): Room | undefined {
+    const code = this.slugs.get(normalizeSlug(slug))
+    return code === undefined ? undefined : this.rooms.get(code)
   }
 
   list(): Room[] {

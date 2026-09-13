@@ -4,17 +4,22 @@ import type { RoomStore } from "../rooms/store.ts"
 import type { DeliveryEngine } from "./delivery.ts"
 import { attachmentFallbackText, hasSendAttachment, hasSendMedia, type OutboundAttachment } from "./transports.ts"
 
-/** R6: every outbound push message carries its room code — the one
- *  affordance that makes the active room legible on a surface (Telegram,
+/** R6/BRIEF-20: every outbound push message carries its room's SLUG — the
+ *  one affordance that makes the active room legible on a surface (Telegram,
  *  WhatsApp) with no other way to tell which room a reply came from. A short
  *  suffix, not a banner, and skipped when the text already names the room
- *  (the join/resume/QR notices already open with it, and an artifact link
- *  already carries it in its path) so it never doubles up. `code === ""` is
- *  the "sender in no room at all" placeholder send (`RoomService.replyGuidance`)
- *  — nothing to name, so nothing is appended. */
-function withRoomCodeSuffix(code: string, message: OutboundMessage): OutboundMessage {
-  if (code === "" || message.text.includes(code)) return message
-  return { ...message, text: `${message.text}\n[${code}]` }
+ *  (the join/resume/QR notices already open with it) so it never doubles up.
+ *
+ *  This used to append the room CODE — the actual join capability — to
+ *  every single push message, unconditionally. Forwarding or screenshotting
+ *  any ordinary reply handed the room's access away with it (BRIEF-20). The
+ *  slug identifies the room just as legibly and is not secret: safe to
+ *  print, forward, screenshot, log. `slug === ""` is the "sender in no room
+ *  at all" placeholder send (`RoomService.replyGuidance`) — nothing to name,
+ *  so nothing is appended. */
+function withRoomSlugSuffix(slug: string, message: OutboundMessage): OutboundMessage {
+  if (slug === "" || message.text.includes(slug)) return message
+  return { ...message, text: `${message.text}\n[${slug}]` }
 }
 
 /** The ONE way anything outside `DeliveryEngine` sends to a member
@@ -64,7 +69,12 @@ export class MemberSender {
       await this.acceptSystemRecord(code, member, text)
       return
     }
-    await this.transport.send(member, withRoomCodeSuffix(code, message))
+    // `code` is the room's own key into the store (always resolvable here —
+    // BRIEF-20's backfill guarantees every room has a `slug` by the time it
+    // is ever loaded); `""` is the no-room placeholder, which resolves to no
+    // room and so appends nothing, same as before.
+    const slug = code === "" ? "" : (this.store.get(code)?.slug ?? "")
+    await this.transport.send(member, withRoomSlugSuffix(slug, message))
   }
 
   /** An agent- or room-authored attachment. A push transport with no

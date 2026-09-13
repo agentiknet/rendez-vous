@@ -48,6 +48,7 @@ const VALID_TOKEN = `Bearer ${roomRenderToken(ROOM, env.roomTokenSecret)}`
 function room(code: string): Room {
   return {
     code,
+    slug: `slug-${code}`.toLowerCase(),
     sessionId: undefined,
     sandboxId: undefined,
     artifactUrl: undefined,

@@ -25,6 +25,7 @@ function member(id: string, displayName: string, tier: Member["tier"], provider:
 function room(code: string, members: Member[]): Room {
   return {
     code,
+    slug: `slug-${code}`.toLowerCase(),
     sessionId: undefined,
     sandboxId: undefined,
     artifactUrl: undefined,

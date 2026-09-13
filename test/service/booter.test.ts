@@ -3,9 +3,12 @@ import { test } from "node:test"
 import { openingPrompt, resumePrompt } from "../../src/service/booter.ts"
 import type { Room } from "../../src/rooms/types.ts"
 
+const FAKE_SLUG = "amber-cedar-harbor"
+
 function fakeRoom(code: string): Room {
   return {
     code,
+    slug: FAKE_SLUG,
     sessionId: undefined,
     sandboxId: undefined,
     artifactUrl: undefined,
@@ -25,8 +28,8 @@ test("openingPrompt names the room code, explains the [Name · tier] prefix, and
   assert.ok(prompt.includes("RDV-7F3K"), "should mention the room code")
   assert.match(prompt, /\[[^\]]+ · [^\]]+\]/, "should explain the [Name · tier] message prefix")
   assert.ok(
-    prompt.includes('Room RDV-7F3K is open. Say what you want built.'),
-    "should instruct the agent to greet with the room code in the required one-line form",
+    prompt.includes(`Room ${FAKE_SLUG} is open. Say what you want built.`),
+    "should instruct the agent to greet with the room's slug (BRIEF-20: a default broadcast must not name the code) in the required one-line form",
   )
 })
 
@@ -116,7 +119,7 @@ test("the forced boot and resume replies are delivered by a say call, not bare t
     assert.ok(!prompt.includes("Reply to this message"), `${label} must not ask for a bare-text reply`)
   }
   assert.ok(
-    openingPrompt(room).includes('Room RDV-7F3K is open. Say what you want built.'),
+    openingPrompt(room).includes(`Room ${FAKE_SLUG} is open. Say what you want built.`),
     "the greeting sentence itself is unchanged",
   )
 })

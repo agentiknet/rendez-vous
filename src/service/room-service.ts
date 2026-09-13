@@ -7,7 +7,7 @@ import { fanIn } from "../fanin/index.ts"
 import { RoomFanout, type ArtifactProbe } from "../fanout/reader.ts"
 import type { Transport } from "../fanout/types.ts"
 import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
-import { ensureMembership, handleCommand, parseCommand } from "../rooms/commands.ts"
+import { ensureMembership, handleCommand, parseCommand, type CommandResult } from "../rooms/commands.ts"
 import type { AddressLookup, RoomStore } from "../rooms/store.ts"
 import { UnroutedDeliveryError, deliveryModeOf, type Address, type Member, type Room, type Tier } from "../rooms/types.ts"
 import { memberToken, tokensMatch } from "./mcp-room.ts"
@@ -51,6 +51,10 @@ export type InboundOutcome =
   | { kind: "not-in-room" }
   | { kind: "unknown-code" }
   | { kind: "unknown-sender" }
+  /** BRIEF-20: a slug named a real room, but the sender is not a member of
+   *  it — refused plainly, never a silent admission the way a code would
+   *  give one. */
+  | { kind: "not-a-member" }
   /** R5: `findByAddress` found the sender in more than one room — a broken
    *  invariant (R1), surfaced rather than silently resolved to whichever
    *  room happened to be inserted first. Only reachable from `where` today:
@@ -101,7 +105,9 @@ const AUDIENCE_HINT =
   "Everything you send goes to the whole room. Just ask if you want something kept between you and the agent — no commands, say it in your own words."
 
 function welcomeText(prefix: string, room: Room): string {
-  const lines = [`${prefix}: ${room.code}`]
+  // BRIEF-20: identifies the room by its slug, never its code — this fires
+  // on `resume`, an ordinary conversational reply, not a deliberate reveal.
+  const lines = [`${prefix}: ${room.slug}`]
   const artifactUrl = memberFacingArtifactUrl(room)
   if (artifactUrl !== undefined) {
     lines.push(artifactUrl)
@@ -111,7 +117,7 @@ function welcomeText(prefix: string, room: Room): string {
 }
 
 function activeRoomStatusText(room: Room): string {
-  const lines = [`Room ${room.code} is already active.`]
+  const lines = [`Room ${room.slug} is already active.`]
   const artifactUrl = memberFacingArtifactUrl(room)
   if (artifactUrl !== undefined) {
     lines.push(artifactUrl)
@@ -129,6 +135,11 @@ function currentJoinLinks(code: string): JoinLinks {
 }
 
 function newRoomReplyText(room: Room, links: JoinLinks): string {
+  // BRIEF-20: `new` is the founder's own deliberate admission moment — the
+  // join links right below already carry the code (that is the point of
+  // them), so stating it plainly here hands out nothing the rest of this
+  // message doesn't already. Every OTHER reply in this file names the room
+  // by its slug instead.
   const lines = [`Room created: ${room.code}`]
   const artifactUrl = memberFacingArtifactUrl(room)
   if (artifactUrl !== undefined) {
@@ -143,7 +154,10 @@ function newRoomReplyText(room: Room, links: JoinLinks): string {
 }
 
 function joinRoomReplyText(room: Room): string {
-  const lines = [`Joined room: ${room.code}`]
+  // BRIEF-20: the joiner already typed the code to get here — this line
+  // just names the room they're now in, and does so by slug like every
+  // other identifying reply.
+  const lines = [`Joined room: ${room.slug}`]
   const roster = room.members.map((member) => member.displayName).join(", ")
   if (roster.length > 0) {
     lines.push(`With: ${roster}`)
@@ -632,8 +646,12 @@ export class RoomService {
           return this.handleNew(sender)
         case "join":
           return this.handleJoin(command.code, sender, input)
+        case "join-by-slug":
+          return this.handleJoinBySlug(command.slug, sender, input)
         case "resume":
           return this.handleResume(command.code, sender, input)
+        case "resume-by-slug":
+          return this.handleResumeBySlug(command.slug, sender, input)
         case "leave":
           return this.handleLeave(sender, input)
         case "where":
@@ -685,13 +703,47 @@ export class RoomService {
     await this.touchActivity(result.room.code)
 
     if (result.movedFrom !== undefined) {
+      // BRIEF-20: identifies both rooms by slug — the destination code was
+      // just typed by the sender themselves (an explicit admission act), but
+      // an ordinary "here's where you ended up" confirmation is not that,
+      // and neither is naming the room they came from.
+      const fromSlug = this.store.get(result.movedFrom)?.slug ?? result.movedFrom
       await this.sender.send(result.room.code, result.member, {
-        text: `Moved from ${result.movedFrom} to ${result.room.code}.`,
+        text: `Moved from ${fromSlug} to ${result.room.slug}.`,
         artifactUrl: memberFacingArtifactUrl(result.room),
       })
       return { kind: "moved", room: result.room, member: result.member, from: result.movedFrom }
     }
 
+    await this.sender.send(result.room.code, result.member, {
+      text: joinRoomReplyText(result.room),
+      artifactUrl: memberFacingArtifactUrl(result.room),
+    })
+    return { kind: "joined", room: result.room, member: result.member }
+  }
+
+  /** BRIEF-20 §3: `join <slug>` — identifies, never admits. Refused plainly
+   *  (never silently, never as an auth-shaped error) for anyone `enterBySlug`
+   *  doesn't already find on the named room's roster. */
+  private async handleJoinBySlug(
+    slug: string,
+    sender: Omit<Member, "id" | "joinedAt">,
+    input: InboundInput,
+  ): Promise<InboundOutcome> {
+    const result = await handleCommand(this.store, { kind: "join-by-slug", slug }, sender)
+    if (!result.ok) {
+      if (result.reason === "not-a-member") {
+        await this.replyGuidance(
+          input,
+          "You're not a member of that room — naming it isn't enough to get in. Ask someone already there, or use the room's code.",
+        )
+        return { kind: "not-a-member" }
+      }
+      await this.replyGuidance(input, "That room name isn't known. Send `new` to start one.")
+      return { kind: "unknown-code" }
+    }
+    this.fanout.start(result.room.code)
+    await this.touchActivity(result.room.code)
     await this.sender.send(result.room.code, result.member, {
       text: joinRoomReplyText(result.room),
       artifactUrl: memberFacingArtifactUrl(result.room),
@@ -706,7 +758,7 @@ export class RoomService {
       return { kind: "not-in-room" }
     }
     await this.sender.send(result.room.code, result.member, {
-      text: `You left ${result.room.code}. Send \`new\` or \`join RDV-XXXX\`.`,
+      text: `You left ${result.room.slug}. Send \`new\` or \`join RDV-XXXX\`.`,
       artifactUrl: undefined,
     })
     return { kind: "left", room: result.room, member: result.member }
@@ -714,14 +766,15 @@ export class RoomService {
 
   /** R6: the one affordance that makes the active room legible from a surface
    *  (Telegram, WhatsApp) that otherwise gives no clue which room a member is
-   *  speaking into — answers the room code and who else is there, and answers
-   *  just as plainly when there is no active room, rather than an error or
-   *  silence. */
+   *  speaking into — answers the room's slug and who else is there, and
+   *  answers just as plainly when there is no active room, rather than an
+   *  error or silence. BRIEF-20: names the slug, never the code — the code
+   *  is the join capability, and `where` is not a deliberate reveal of it. */
   private async handleWhere(sender: Omit<Member, "id" | "joinedAt">, input: InboundInput): Promise<InboundOutcome> {
     const found = this.store.findByAddress(sender.address)
     if (found.kind === "one") {
       const roster = found.room.members.map((member) => member.displayName).join(", ")
-      const text = roster.length > 0 ? `You are in room ${found.room.code}. With: ${roster}.` : `You are in room ${found.room.code}.`
+      const text = roster.length > 0 ? `You are in room ${found.room.slug}. With: ${roster}.` : `You are in room ${found.room.slug}.`
       await this.sender.send(found.room.code, found.member, { text, artifactUrl: undefined })
       return { kind: "where", room: found.room, member: found.member }
     }
@@ -778,7 +831,36 @@ export class RoomService {
       await this.replyGuidance(input, "That room code isn't known. Send `new` to start one.")
       return { kind: "unknown-code" }
     }
+    return this.finishResume(result)
+  }
 
+  /** BRIEF-20 §3: `resume <slug>` — same identify-not-admit posture as
+   *  `join <slug>` (`handleJoinBySlug`); only a sender `enterBySlug` already
+   *  finds on the named room's roster reaches the actual resume. */
+  private async handleResumeBySlug(
+    slug: string,
+    sender: Omit<Member, "id" | "joinedAt">,
+    input: InboundInput,
+  ): Promise<InboundOutcome> {
+    const result = await handleCommand(this.store, { kind: "resume-by-slug", slug }, sender)
+    if (!result.ok) {
+      if (result.reason === "not-a-member") {
+        await this.replyGuidance(
+          input,
+          "You're not a member of that room — naming it isn't enough to get in. Ask someone already there, or use the room's code.",
+        )
+        return { kind: "not-a-member" }
+      }
+      await this.replyGuidance(input, "That room name isn't known. Send `new` to start one.")
+      return { kind: "unknown-code" }
+    }
+    return this.finishResume(result)
+  }
+
+  /** Shared by `handleResume` and `handleResumeBySlug`: once a `CommandResult`
+   *  has resolved a room the sender may actually resume, reviving/replying is
+   *  identical regardless of whether they named it by code or slug. */
+  private async finishResume(result: Extract<CommandResult, { ok: true }>): Promise<InboundOutcome> {
     const room = await this.reviveIfSessionDied(result.room)
     if (room.state === "active") {
       await this.sender.send(result.room.code, result.member, {
@@ -824,8 +906,12 @@ export class RoomService {
     }
 
     if (room.sessionId === undefined) {
+      // BRIEF-20: names the room by slug — `resume` accepts it too (the
+      // sender is a member of this exact room by construction, having just
+      // been found by address), so the hint stays actionable without
+      // printing the code in an otherwise ordinary chat message.
       await this.sender.send(room.code, member, {
-        text: `This room has no live session yet — try \`resume ${room.code}\`.`,
+        text: `This room has no live session yet — try \`resume ${room.slug}\`.`,
         artifactUrl: memberFacingArtifactUrl(room),
       })
       return { kind: "message", room, member }

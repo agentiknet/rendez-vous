@@ -187,7 +187,7 @@ test("resume <code> on an active room is a no-op that replies with room status",
   assert.equal(outcome.room.state, "active")
 
   const reply = transport.sends[sendsBefore]
-  assert.ok(reply?.message.text.includes(code))
+  assert.ok(reply?.message.text.includes(created.room.slug), "the room-status reply should name the room by its slug")
 
   const spawnCallsAfter = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent").length
   assert.equal(spawnCallsAfter, spawnCallsBefore, "resuming an already-active room must not boot anything")

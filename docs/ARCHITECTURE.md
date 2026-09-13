@@ -96,7 +96,11 @@ Point 3 is the demo. Points 1 and 2 are the primitive.
 
 ```
 Room {
-  code         RDV-7F3K          durable handle, the thing humans type
+  code         RDV-7F3K          the JOIN CAPABILITY — handed over
+                                  deliberately (join link, QR, invitation),
+                                  never printed by default (BRIEF-20)
+  slug         quiet-harbor-42   the room's NAME — unique, not secret, what
+                                  a member sees and types (BRIEF-20)
   sessionId    <agentproto id>   the one agent turn-loop
   sandboxId    <e2b id>          the one filesystem + the one served URL
   members      Member[]          many humans, many surfaces
@@ -120,7 +124,19 @@ stack does *not* have:
 - **Fan-out by tier.** Every agent turn reaches every member, rendered at the
   fidelity their surface supports.
 - **Durability by code.** The room outlives the sandbox, the daemon restart,
-  and the conversation. `resume RDV-7F3K` works tomorrow.
+  and the conversation. `resume RDV-7F3K` works tomorrow — and, for someone
+  already a member, so does naming the room by its slug (`resume
+  quiet-harbor-42`); a non-member naming the slug is refused, never admitted
+  (BRIEF-20 §3 — a slug identifies, only a code admits).
+
+> **BRIEF-20 amendment (2026-09-13).** Earlier in this doc and elsewhere,
+> "the code" is described as the room's one durable, everyday handle — the
+> thing a member sees, types, and has echoed back in every reply. That was
+> true through brief 13 and is only half true now: R6's outbound suffix, the
+> `where` command, and the agent's own default broadcasts now name the room
+> by its **slug**. The code still does everything admission-related (`new`'s
+> reply, the join links/QR, `join <code>`) exactly as before — it just isn't
+> the thing printed by default anymore.
 
 ### 2.1 Presence tiers (the fidelity ladder)
 

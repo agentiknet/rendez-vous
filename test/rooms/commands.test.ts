@@ -224,6 +224,37 @@ test("BRIEF-13 R1: 'new' from an address already in a room leaves that address i
   assert.deepEqual(memberships, [second.room.code], "alice must hold exactly one membership store-wide, in the room she just created")
 })
 
+test("BRIEF-20 boundary: a non-member naming a room's slug is refused as a membership problem; the same person naming its code is admitted", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+
+  const created = await handleCommand(store, { kind: "new" }, alice())
+  assert.ok(created.ok)
+  if (!created.ok) return
+  const slug = created.room.slug
+
+  // Bob has never been a member of alice's room — naming its slug must
+  // refuse him plainly, never admit him the way the code would. This is the
+  // security boundary of the whole brief: a slug that admits anyone is just
+  // a longer code.
+  const refused = await handleCommand(store, { kind: "join-by-slug", slug }, bob())
+  assert.deepEqual(refused, { ok: false, reason: "not-a-member" })
+  assert.equal(store.get(created.room.code)?.members.length, 1, "naming the slug must never add a non-member to the roster")
+
+  // The code admits him — unchanged behaviour (BRIEF-20 §3: "Routing/joining
+  // by code keeps today's behaviour exactly").
+  const admitted = await handleCommand(store, { kind: "join", code: created.room.code }, bob())
+  assert.equal(admitted.ok, true)
+  if (!admitted.ok) return
+  assert.equal(admitted.room.members.length, 2)
+  assert.ok(admitted.room.members.some((m) => m.displayName === "Bob"))
+
+  // Now that Bob really is a member, naming the SAME slug resolves cleanly
+  // for him too — the boundary is about membership, not about who asked.
+  const confirmed = await handleCommand(store, { kind: "join-by-slug", slug }, bob())
+  assert.equal(confirmed.ok, true)
+})
+
 test("BRIEF-13 R1: 'resume' on a different room than the one the address is already in leaves that address in exactly one room store-wide", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)

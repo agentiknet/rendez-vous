@@ -37,6 +37,7 @@ function member(id: string): Member {
 function room(code: string): Room {
   return {
     code,
+    slug: `slug-${code}`.toLowerCase(),
     sessionId: undefined,
     sandboxId: undefined,
     artifactUrl: undefined,

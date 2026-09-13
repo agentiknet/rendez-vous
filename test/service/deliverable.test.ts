@@ -153,6 +153,7 @@ function room(overrides: Partial<Room> = {}): Room {
   const now = new Date().toISOString()
   return {
     code: "RDV-TEST",
+    slug: "test-room-slug",
     sessionId: "sess_test",
     sandboxId: undefined,
     artifactUrl: "https://artifact.example.com",

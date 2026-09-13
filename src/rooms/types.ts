@@ -291,7 +291,22 @@ function warnIfNeverAcked(roomCode: string, member: Member): void {
 }
 
 export interface Room {
+  /** The join capability (BRIEF-20): handed over deliberately — a join link,
+   *  a QR, an explicit `code`/`invite` ask — never printed by default. Never
+   *  rotated or reassigned for an existing room (people are in it right
+   *  now); `slug` is what identifies the room everywhere else. */
   code: string
+  /** The room's NAME (BRIEF-20): unique, stable, not secret — safe to print,
+   *  forward, screenshot, log. Everything that answers "which room is this"
+   *  for a member already in it uses this, never `code`. Minted once at
+   *  creation (`RoomStore.create`) and never reassigned; a room persisted
+   *  before this field existed is backfilled with one, in memory, the first
+   *  time `RoomStore.open` loads it — idempotently, so a second boot reads
+   *  the same slug back rather than minting a new one. Required (not an
+   *  optional, JSON-round-trip-tolerant field like `pendingDeliveries`
+   *  below) because the backfill runs as part of loading the file, before
+   *  validation — every `Room` a caller ever sees already has one. */
+  slug: string
   sessionId: string | undefined
   /** The session id this room had before it was paused or its session died.
    *

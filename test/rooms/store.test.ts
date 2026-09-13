@@ -66,6 +66,62 @@ test("create mints codes that never collide even under a tiny alphabet pressure 
   assert.equal(codes.size, rooms.length)
 })
 
+test("BRIEF-20: create mints slugs that never collide, checked across the WHOLE store, not pairwise", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const rooms = await Promise.all(Array.from({ length: 30 }, () => store.create()))
+  const slugs = new Set(rooms.map((r) => r.slug))
+  assert.equal(slugs.size, rooms.length, "every room's slug must be unique across the entire store")
+  for (const room of rooms) {
+    assert.match(room.slug, /^[a-z]+-[a-z]+-[a-z]+$/, "a slug is three words joined by hyphens")
+  }
+})
+
+test("BRIEF-20: getBySlug resolves the same room get(code) does (case-insensitive), and get(code) still works", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+
+  assert.deepEqual(store.getBySlug(room.slug), room)
+  assert.deepEqual(store.getBySlug(room.slug.toUpperCase()), room, "slug lookup tolerates case the way code lookup does")
+  assert.equal(store.getBySlug("not-a-real-slug"), undefined)
+  // The security boundary of BRIEF-20 starts here: `get` is unaffected by
+  // any of the above — an existing room's code still resolves exactly as it
+  // did before this brief.
+  assert.deepEqual(store.get(room.code), room)
+})
+
+test("BRIEF-20: a room persisted before `slug` existed is backfilled with one on load, and gets the SAME one on a second load", async () => {
+  const dir = trackDir(await freshDir())
+  const legacy = {
+    code: "RDV-9LD2",
+    members: [],
+    createdAt: "2026-09-11T00:00:00.000Z",
+    updatedAt: "2026-09-11T00:00:00.000Z",
+    cursor: 0,
+    lastActivityAt: "2026-09-11T00:00:00.000Z",
+    state: "active",
+    // `slug` deliberately absent — this is the shape of the 19 rooms already
+    // live in `.rdv/rooms.json` before BRIEF-20.
+  }
+  await writeFile(join(dir, "rooms.json"), JSON.stringify({ rooms: [legacy] }), "utf8")
+
+  const first = await RoomStore.open(dir)
+  const room = first.get("RDV-9LD2")
+  assert.ok(room !== undefined)
+  assert.equal(typeof room.slug, "string")
+  assert.ok(room.slug.length > 0, "a pre-existing room must be assigned a slug on load, not left blank")
+
+  // Idempotent: re-opening the same dir must NOT mint a second, different
+  // slug — the backfill above must have persisted through the store's own
+  // write path already.
+  const second = await RoomStore.open(dir)
+  assert.equal(second.get("RDV-9LD2")?.slug, room.slug)
+
+  const raw = JSON.parse(await readFile(join(dir, "rooms.json"), "utf8")) as { rooms: { code: string; slug: string }[] }
+  assert.equal(raw.rooms[0]?.slug, room.slug, "the backfilled slug must be written to disk, not kept in memory only")
+})
+
 test("addMember is idempotent on the address triple and updates displayName", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)

@@ -17,6 +17,7 @@ function fakeLinks(overrides: Partial<JoinLinks> = {}): JoinLinks {
 function fakeRoom(overrides: Partial<Room> = {}): Room {
   return {
     code: "RDV-7F3K",
+    slug: "amber-cedar-harbor",
     sessionId: "sess-1",
     sandboxId: undefined,
     artifactUrl: undefined,

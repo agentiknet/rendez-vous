@@ -53,7 +53,7 @@ after(async () => {
   await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
 })
 
-test("BRIEF-13 R6: an outbound to a push member carries the room code; a pull member's outbox record does not", async () => {
+test("BRIEF-20: an outbound to a push member carries the room's slug and not its code; a pull member's outbox record carries neither", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rdv-member-send-"))
   dirs.push(dir)
   const store = await RoomStore.open(dir)
@@ -83,7 +83,8 @@ test("BRIEF-13 R6: an outbound to a push member carries the room code; a pull me
   await sender.send(room.code, push, { text: "hello room", artifactUrl: undefined })
   await sender.send(room.code, pull, { text: "hello room", artifactUrl: undefined })
 
-  assert.equal(transport.sends[0]?.message.text, `hello room\n[${room.code}]`, "a push send must carry the room code")
+  assert.equal(transport.sends[0]?.message.text, `hello room\n[${room.slug}]`, "a push send must carry the room's slug")
+  assert.ok(!transport.sends[0]?.message.text.includes(room.code), "a push send must NOT carry the room's join code (BRIEF-20)")
 
   const record = store.get(room.code)?.deliveries?.find((delivery) => delivery.memberId === pull.id)
   assert.ok(record !== undefined)

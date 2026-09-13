@@ -5,19 +5,33 @@ import type { Member, Room } from "./types.ts"
 export type Command =
   | { kind: "new" }
   | { kind: "join"; code: string }
+  /** BRIEF-20 §3: naming a room by its SLUG never admits — it only resolves
+   *  for someone the store already lists as a member of that exact room. A
+   *  separate command kind (rather than teaching `join` to accept either
+   *  shape) so the two admission postures stay visible at the type, not
+   *  just in a branch inside one handler. */
+  | { kind: "join-by-slug"; slug: string }
   | { kind: "resume"; code: string }
+  | { kind: "resume-by-slug"; slug: string }
   | { kind: "leave" }
   | { kind: "where" }
 
 export type CommandResult =
   | { ok: true; room: Room; member: Member; created: boolean; movedFrom: string | undefined }
-  | { ok: false; reason: "unknown-code" | "not-in-room" }
+  /** `"not-a-member"` (BRIEF-20): the slug named a real room, but the sender
+   *  is not in it — a membership problem, never an "unknown" one (the room
+   *  is not unknown at all) and never a silent admission. */
+  | { ok: false; reason: "unknown-code" | "not-in-room" | "not-a-member" }
 
 const NEW_PATTERN = /^new$/i
 const JOIN_PATTERN = /^join\s+(.+)$/i
 const RESUME_PATTERN = /^resume\s+(.+)$/i
 const LEAVE_PATTERN = /^leave$/i
 const WHERE_PATTERN = /^where$/i
+/** Three lowercase words joined by hyphens (`words.ts`'s `generateSlug`
+ *  shape) — checked against the lowercased, trimmed argument, so a member
+ *  typing a slug back with different case still parses. */
+const SLUG_PATTERN = /^[a-z]+(?:-[a-z]+){2}$/
 
 export function parseCommand(text: string): Command | undefined {
   const trimmed = text.trim()
@@ -36,14 +50,20 @@ export function parseCommand(text: string): Command | undefined {
 
   const joinMatch = JOIN_PATTERN.exec(trimmed)
   if (joinMatch !== null) {
-    const code = normalizeCode(joinMatch[1] ?? "")
-    return code === undefined ? undefined : { kind: "join", code }
+    const arg = joinMatch[1] ?? ""
+    const code = normalizeCode(arg)
+    if (code !== undefined) return { kind: "join", code }
+    const slug = arg.trim().toLowerCase()
+    return SLUG_PATTERN.test(slug) ? { kind: "join-by-slug", slug } : undefined
   }
 
   const resumeMatch = RESUME_PATTERN.exec(trimmed)
   if (resumeMatch !== null) {
-    const code = normalizeCode(resumeMatch[1] ?? "")
-    return code === undefined ? undefined : { kind: "resume", code }
+    const arg = resumeMatch[1] ?? ""
+    const code = normalizeCode(arg)
+    if (code !== undefined) return { kind: "resume", code }
+    const slug = arg.trim().toLowerCase()
+    return SLUG_PATTERN.test(slug) ? { kind: "resume-by-slug", slug } : undefined
   }
 
   return undefined
@@ -92,6 +112,31 @@ async function moveIntoRoom(
   return { ok: true, room: updated, member, created: false, movedFrom }
 }
 
+/** BRIEF-20 §3, the security boundary of the whole brief: a slug IDENTIFIES,
+ *  it does not ADMIT. This only ever succeeds when `store.findByAddress`
+ *  already lists `sender` as a member of the room the slug names — it never
+ *  calls `store.addMember` for anyone who isn't already on that roster, so a
+ *  slug can never become an accepted join credential the way a code is. A
+ *  member confirming their own room this way is a no-op refresh through the
+ *  same `ensureMembership` path `join`/`resume` use, not a new mechanism. */
+async function enterBySlug(
+  store: RoomStore,
+  slug: string,
+  sender: Omit<Member, "id" | "joinedAt">,
+): Promise<CommandResult> {
+  const room = store.getBySlug(slug)
+  if (room === undefined) {
+    return { ok: false, reason: "unknown-code" }
+  }
+  const current = store.findByAddress(sender.address)
+  if (current.kind !== "one" || current.room.code !== room.code) {
+    return { ok: false, reason: "not-a-member" }
+  }
+  const { member } = await ensureMembership(store, room.code, sender)
+  const updated = store.get(room.code) ?? room
+  return { ok: true, room: updated, member, created: false, movedFrom: undefined }
+}
+
 async function leaveCurrent(
   store: RoomStore,
   sender: Omit<Member, "id" | "joinedAt">,
@@ -132,8 +177,12 @@ export async function handleCommand(
     }
     case "join":
       return moveIntoRoom(store, command.code, sender)
+    case "join-by-slug":
+      return enterBySlug(store, command.slug, sender)
     case "resume":
       return moveIntoRoom(store, command.code, sender)
+    case "resume-by-slug":
+      return enterBySlug(store, command.slug, sender)
     case "leave":
       return leaveCurrent(store, sender)
   }

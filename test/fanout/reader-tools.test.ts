@@ -50,6 +50,7 @@ class RecordingTransport implements Transport {
 interface Harness {
   store: RoomStore
   code: string
+  slug: string
   source: FakeSource
   transport: RecordingTransport
   aliceId: string
@@ -76,7 +77,7 @@ async function harness(protocol: "tools" | "markers" | undefined): Promise<Harne
   })
   const source = new FakeSource()
   const transport = new RecordingTransport()
-  return { store, code: room.code, source, transport, aliceId: alice.id, bobId: bob.id }
+  return { store, code: room.code, slug: room.slug, source, transport, aliceId: alice.id, bobId: bob.id }
 }
 
 async function flushTurn(h: Harness, text: string, firstSeq = 1): Promise<void> {
@@ -143,7 +144,7 @@ test("a tools room: a [[say …]] voice note still delivers (caption fallback wh
 
   assert.equal(h.transport.sends.length, 2, "the spoken sentence is not agent text — it goes out")
   for (const send of h.transport.sends) {
-    assert.equal(send.message.text, `hello, the room is ready\n[${h.code}]`)
+    assert.equal(send.message.text, `hello, the room is ready\n[${h.slug}]`)
   }
 })
 
@@ -161,7 +162,7 @@ test("a tools room: an artifact-URL change goes out as its own standalone messag
 
   assert.equal(h.transport.sends.length, 2, "exactly one notice per member, despite the gated text")
   for (const send of h.transport.sends) {
-    assert.equal(send.message.text, publicArtifactUrl(h.code))
+    assert.equal(send.message.text, `${publicArtifactUrl(h.code)}\n[${h.slug}]`)
     assert.equal(send.message.artifactUrl, publicArtifactUrl(h.code))
   }
 
@@ -412,7 +413,7 @@ test("a markers room behaves exactly as today: bare text, artifact line appended
 
   assert.equal(h.transport.sends.length, 2)
   const alice = h.transport.sends.find((send) => send.member.id === h.aliceId)
-  assert.equal(alice?.message.text, `hello both\n${publicArtifactUrl(h.code)}`)
+  assert.equal(alice?.message.text, `hello both\n${publicArtifactUrl(h.code)}\n[${h.slug}]`)
 })
 
 test("a room with no protocol key at all behaves exactly as today", async () => {
@@ -420,5 +421,5 @@ test("a room with no protocol key at all behaves exactly as today", async () => 
   await flushTurn(h, "plain broadcast")
 
   assert.equal(h.transport.sends.length, 2)
-  assert.equal(h.transport.sends[0]?.message.text, `plain broadcast\n[${h.code}]`)
+  assert.equal(h.transport.sends[0]?.message.text, `plain broadcast\n[${h.slug}]`)
 })

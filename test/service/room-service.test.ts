@@ -215,8 +215,8 @@ test("join moves a member already in another room, updating both rosters and rep
 
   const lastSend = transport.sends[transport.sends.length - 1]
   assert.equal(lastSend?.member.displayName, "Alice")
-  assert.ok(lastSend?.message.text.includes(createdA.room.code))
-  assert.ok(lastSend?.message.text.includes(createdB.room.code))
+  assert.ok(lastSend?.message.text.includes(createdA.room.slug), "should name the room moved FROM by its slug")
+  assert.ok(lastSend?.message.text.includes(createdB.room.slug), "should name the room moved TO by its slug")
 })
 
 test("join on the room a member is already in is a no-op, replying with the roster rather than a move", async () => {
@@ -232,7 +232,7 @@ test("join on the room a member is already in is a no-op, replying with the rost
   assert.equal(rejoined.room.members.length, 1)
 
   const lastSend = transport.sends[transport.sends.length - 1]
-  assert.ok(lastSend?.message.text.includes(created.room.code))
+  assert.ok(lastSend?.message.text.includes(created.room.slug))
 })
 
 test("leave removes the sender from their room and replies confirming it, without killing the session", async () => {
@@ -252,7 +252,7 @@ test("leave removes the sender from their room and replies confirming it, withou
 
   const lastSend = transport.sends[transport.sends.length - 1]
   assert.equal(lastSend?.member.displayName, "Alice")
-  assert.ok(lastSend?.message.text.includes(created.room.code))
+  assert.ok(lastSend?.message.text.includes(created.room.slug))
   assert.match(lastSend?.message.text ?? "", /left/i)
 
   const killCalls = daemon.requestsReceived.filter((r) => r.path.includes("/kill"))
@@ -338,7 +338,7 @@ test("BRIEF-13 R4: after 'leave', an inbound from that address is an unknown sen
   assert.equal(service.getRoom(target.room.code)?.members.length, 1, "only bob remains")
 })
 
-test("BRIEF-13 R6: 'where' answers the room code and the roster for a sender with an active room", async () => {
+test("BRIEF-20/BRIEF-13 R6: 'where' answers the room's slug (never its code) and the roster for a sender with an active room", async () => {
   const { service, transport } = await buildHarness()
 
   const created = await service.handleInbound(alice("new"))
@@ -352,8 +352,33 @@ test("BRIEF-13 R6: 'where' answers the room code and the roster for a sender wit
   assert.equal(outcome.room.code, created.room.code)
 
   const lastSend = transport.sends[transport.sends.length - 1]
-  assert.ok(lastSend?.message.text.includes(created.room.code))
+  assert.ok(lastSend?.message.text.includes(created.room.slug), "the where reply should name the room by its slug")
+  assert.ok(!lastSend?.message.text.includes(created.room.code), "the where reply must not leak the room's join code")
   assert.ok(lastSend?.message.text.includes("Bob"), "the roster names the other member")
+})
+
+test("BRIEF-20: 'join <slug>' refuses a stranger, resolves for an existing member, and 'resume <slug>' revives a paused room for that member", async () => {
+  const { service } = await buildHarness()
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+  const slug = created.room.slug
+
+  // Bob has never been in this room — naming its slug must refuse him, not
+  // silently add him the way `join <code>` would.
+  const refused = await service.handleInbound(bob(`join ${slug}`))
+  assert.equal(refused.kind, "not-a-member")
+  assert.equal(service.getRoom(created.room.code)?.members.length, 1)
+
+  // Alice IS a member of the room the slug names — it resolves cleanly for her.
+  const confirmed = await service.handleInbound(alice(`join ${slug}`))
+  assert.equal(confirmed.kind, "joined")
+
+  await service.pauseRoom(created.room.code)
+  const resumed = await service.handleInbound(alice(`resume ${slug}`))
+  assert.equal(resumed.kind, "resumed")
+  assert.equal(service.getRoom(created.room.code)?.state, "active")
 })
 
 test("BRIEF-13 R6: 'where' answers plainly that a sender with no active room is in no room — not an error, not silence", async () => {
@@ -529,7 +554,7 @@ test("resuming onto a replaced box notifies every member once, in addition to th
 
   const notices = transport.sends
     .slice(sendsBeforeResume)
-    .filter((send) => send.message.text === `Artifact restored on a new box, same link.\n[${code}]`)
+    .filter((send) => send.message.text === `Artifact restored on a new box, same link.\n[${created.room.slug}]`)
   assert.equal(notices.length, 2, "both current members should get the notice, not just whoever typed resume")
   assert.deepEqual(
     notices.map((send) => send.member.displayName).sort(),
@@ -876,7 +901,7 @@ test("a box confirmed gone during resume gets the precise 'previous box expired'
 
   const notice = transport.sends.slice(sendsBefore).find((send) => send.message.text.includes("previous box expired"))
   assert.ok(notice !== undefined, "should send the precise box-expired notice")
-  assert.equal(notice?.message.text, `The previous box expired; artifact restored on a new box.\n[${code}]`)
+  assert.equal(notice?.message.text, `The previous box expired; artifact restored on a new box.\n[${created.room.slug}]`)
 
   const generic = transport.sends.slice(sendsBefore).find((send) => send.message.text.startsWith("Artifact restored on a new box, same link."))
   assert.equal(generic, undefined, "must not ALSO send the generic notice")
@@ -1090,7 +1115,7 @@ test("a push member's path is byte-for-byte unchanged while a room-web member in
   const webRecords = (store.get(created.room.code)?.deliveries ?? []).filter((record) => record.memberId === webMember.id)
   assert.ok(webRecords.length >= 1)
   assert.ok(webRecords.every((record) => record.kind === "system"))
-  assert.ok(webRecords.some((record) => record.text.includes(`Joined room: ${created.room.code}`)))
+  assert.ok(webRecords.some((record) => record.text.includes(`Joined room: ${created.room.slug}`)))
 })
 
 test("an unroutable member is answered as an undeliverable outcome, not an uncaught throw (brief D)", async () => {

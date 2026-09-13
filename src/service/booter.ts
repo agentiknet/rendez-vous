@@ -148,7 +148,11 @@ function capabilityLines(code: string, opts?: { appDir: string }): string[] {
 
 export function openingPrompt(room: Room, opts?: { appDir: string }): string {
   const lines = [`You are the shared agent for Rendez-vous room ${room.code}.`, ...capabilityLines(room.code, opts)]
-  lines.push(`Deliver this by calling \`say\` with no \`to\` — a broadcast, because the room opening concerns everyone — with exactly one short line and nothing else: "Room ${room.code} is open. Say what you want built."`)
+  // BRIEF-20: this is a broadcast every member gets by default the moment
+  // the room opens — the room's NAME belongs in it, not its join capability.
+  // `capabilityLines`/`invitationLines` above already gave the agent the
+  // code for when a member actually asks how to invite someone.
+  lines.push(`Deliver this by calling \`say\` with no \`to\` — a broadcast, because the room opening concerns everyone — with exactly one short line and nothing else: "Room ${room.slug} is open. Say what you want built."`)
   return lines.join(" ")
 }
 
@@ -192,7 +196,9 @@ export function resumePrompt(room: Room, opts?: { appDir?: string; recap?: strin
 
   if (recap === undefined) {
     lines.push(
-      `Deliver this by calling \`say\` with no \`to\` — a broadcast, because the room coming back concerns everyone — with exactly one short line and nothing else: "Room ${room.code} is back, on a fresh session — I've lost the earlier thread. Catch me up in a line?"`,
+      // BRIEF-20: same posture as `openingPrompt` — a default broadcast, so
+      // it names the room's slug, not its code.
+      `Deliver this by calling \`say\` with no \`to\` — a broadcast, because the room coming back concerns everyone — with exactly one short line and nothing else: "Room ${room.slug} is back, on a fresh session — I've lost the earlier thread. Catch me up in a line?"`,
     )
     return lines.join(" ")
   }
@@ -208,7 +214,7 @@ export function resumePrompt(room: Room, opts?: { appDir?: string; recap?: strin
     recap,
     "--- end of transcript ---",
     "",
-    `Deliver this by calling \`say\` with no \`to\` — a broadcast, because the room coming back concerns everyone — with exactly one short line and nothing else, picking up where the transcript leaves off: "Room ${room.code} is back — I still have us at: <one clause naming the last thing in the transcript>."`,
+    `Deliver this by calling \`say\` with no \`to\` — a broadcast, because the room coming back concerns everyone — with exactly one short line and nothing else, picking up where the transcript leaves off: "Room ${room.slug} is back — I still have us at: <one clause naming the last thing in the transcript>."`,
   ].join("\n")
 }
 

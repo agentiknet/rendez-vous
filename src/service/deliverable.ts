@@ -605,7 +605,11 @@ export class DeliverableService {
     const targets = resolveDeliveryTargets(room, toRaw, requester)
     if ("error" in targets) return { ok: false, error: targets.error }
 
-    const outcome = await this.createPending(room, requester.displayName, targets, `Room ${room.code} deliverable`)
+    // BRIEF-20: this default subject becomes the actual text/caption a
+    // delivery target sees, and a target can be an external, non-member
+    // email address (`resolveDeliveryTargets`) — a genuinely ordinary send
+    // that must not hand the room's join capability to someone outside it.
+    const outcome = await this.createPending(room, requester.displayName, targets, `Room ${room.slug} deliverable`)
     if ("refusal" in outcome) return { ok: false, error: outcome.refusal }
     return { ok: true, previewText: outcome.previewText }
   }
