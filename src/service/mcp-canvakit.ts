@@ -329,8 +329,14 @@ async function callRenderTool(
               text: error instanceof Error ? error.message : String(error),
             },
           ],
+          // NO `_meta.ui.resourceUri` here, deliberately — unlike the success
+          // branch above. A failed render produced nothing, but the panel
+          // polls `/r/:code/state` on its own and would happily show the LAST
+          // SUCCESSFUL artifact: pointing a host at it from an error result
+          // makes a render that produced nothing present as a render that
+          // produced something. Absence reading as delivery, in panel form.
+          // The verbatim canvakit error in `content` is the whole result.
           isError: true,
-          _meta: { ui: { resourceUri: RENDER_ARTIFACT_RESOURCE_URI } },
         },
       },
     }

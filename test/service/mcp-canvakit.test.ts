@@ -193,6 +193,15 @@ test("a canvakit failure surfaces its error text verbatim as an errored tool res
     "the canvakit text must arrive verbatim, not paraphrased or generic",
   )
   assert.equal(renderCalls.length, 0, "neither render completes; nothing is stored on failure")
+  // The panel polls `/r/:code/state` on its own and would show the LAST
+  // SUCCESSFUL artifact. Pointing a host at it from a FAILED render is
+  // absence reading as delivery in panel form — the success branch carries
+  // `_meta.ui.resourceUri`, this one must not.
+  assert.equal(
+    res.result?._meta,
+    undefined,
+    "a failed render must not point a host at the artifact panel",
+  )
 })
 
 test("an unknown tool is a JSON-RPC method-level failure, not a render attempt", async () => {
