@@ -373,6 +373,50 @@ test("BRIEF-20/BRIEF-13 R6: 'where' answers the room's slug (never its code) and
   assert.ok(lastSend?.message.text.includes("Bob"), "the roster names the other member")
 })
 
+// --- assertion 3 (BRIEF-15, post-turn-assertions): an ordinary inbound
+// message from an address that is (illegally) a member of more than one
+// room, naming no room code. The pair is the point: the SAME ambiguous
+// address sending an explicit `join <code>` must not report anything — R3
+// says a message naming a room wins, for that message only. ---
+
+test("BRIEF-15: an ordinary message from an address ambiguously in two rooms reports assertion 3 into both; the same address sending 'join <code>' does not", async () => {
+  const { service, store, transport } = await buildHarness()
+
+  const roomA = await service.handleInbound(alice("new"))
+  assert.ok(roomA.kind === "created")
+  if (roomA.kind !== "created") return
+  const roomB = await service.handleInbound(bob("new"))
+  assert.ok(roomB.kind === "created")
+  if (roomB.kind !== "created") return
+
+  // Seed the broken invariant directly (BRIEF-13): alice becomes a member of
+  // B too, WITHOUT going through `ensureMembership` — every live join path
+  // now prevents exactly this, so the only way it happens is the legacy
+  // defect brief 13 describes (a stray duplicate left over from before the
+  // fix). `store.addMember` is the bypass on purpose, to reproduce that
+  // pre-existing state rather than a state this code could still create.
+  await store.addMember(roomB.room.code, { displayName: "Alice", tier: "messenger", address: alice("").address })
+
+  transport.sends.length = 0
+  const inbound = await service.handleInbound(alice("hello, anyone there?"))
+  assert.equal(inbound.kind, "unknown-sender", "an ambiguous address degrades to unknown-sender, never a silent pick")
+
+  const assertionSends = transport.sends.filter((send) => send.message.text.includes("[system · assertion]"))
+  // Broadcast to EVERY member of EVERY candidate room (roomA: alice alone;
+  // roomB: bob and alice both) — the notice must be visible wherever the
+  // failure could have happened, not just to the ambiguous member.
+  assert.equal(assertionSends.length, 3)
+  for (const send of assertionSends) {
+    assert.ok(send.message.text.includes(roomA.room.code) && send.message.text.includes(roomB.room.code), "each notice names both candidate rooms")
+  }
+
+  transport.sends.length = 0
+  const joined = await service.handleInbound(alice(`join ${roomA.room.code}`))
+  assert.ok(joined.kind === "joined" || joined.kind === "moved")
+  const assertionSendsAfterJoin = transport.sends.filter((send) => send.message.text.includes("[system · assertion]"))
+  assert.deepEqual(assertionSendsAfterJoin, [], "naming the room by code resolves this message outside the ambiguity check (R3)")
+})
+
 test("BRIEF-20: 'join <slug>' refuses a stranger, resolves for an existing member, and 'resume <slug>' revives a paused room for that member", async () => {
   const { service } = await buildHarness()
 

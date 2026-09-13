@@ -424,6 +424,41 @@ async function deliveryHarness(members: Member[]): Promise<DeliveryHarness> {
   return { store, code: created.code, memberIds, transport, engine, handler: createMcpRoomHandler(deps) }
 }
 
+interface AssertionReport {
+  readonly room: Room
+  readonly assertion: string
+  readonly detail: string
+}
+
+/** BRIEF-15 (post-turn-assertions): same shape as `deliveryHarness`, plus a
+ *  `reportAssertion` spy so assertion 2 (`send-reached-nobody`) can be
+ *  observed at the exact seam it fires from — the `tools/call` handler,
+ *  never a re-derivation of `sendAudience`'s own outcome. */
+async function deliveryHarnessWithAssertionSpy(
+  members: Member[],
+): Promise<DeliveryHarness & { reports: AssertionReport[] }> {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const created = await store.create()
+  for (const m of members) {
+    await store.addMember(created.code, { displayName: m.displayName, tier: m.tier, address: m.address })
+  }
+  const live = store.get(created.code)
+  assert.ok(live !== undefined)
+  const memberIds = live.members.map((m) => m.id)
+  const transport = new FakeTransport()
+  const engine = new DeliveryEngine({ store, transport })
+  const reports: AssertionReport[] = []
+  const deps: McpRoomDeps = {
+    rooms: () => [live],
+    deliveries: engine,
+    reportAssertion: async (room, assertion, detail) => {
+      reports.push({ room, assertion, detail })
+    },
+  }
+  return { store, code: created.code, memberIds, transport, engine, handler: createMcpRoomHandler(deps), reports }
+}
+
 function harnessWithDeliveries(rooms: readonly Room[]) {
   // Placeholder for the tools/list shape test — schema assertions need no
   // real engine, only any McpRoomDeliveries-shaped object.
@@ -503,6 +538,40 @@ test("say with an unknown id accepts the known ones, reports the unknown, and de
   assert.deepEqual(payload.unknown, ["ghost"])
   await h.engine.drain(h.code)
   assert.deepEqual(h.transport.sends.map((send) => send.memberId), [first])
+})
+
+// --- assertion 2 (BRIEF-15, post-turn-assertions): a send that reached
+// nobody because every id it named was unknown. The pair is the point: a
+// send with a MIX of known and unknown ids (the test just above) is a
+// perfectly ordinary partial send and must not report anything. ---
+
+test("BRIEF-15: say naming ONLY unknown ids reports assertion 2 (send-reached-nobody)", async () => {
+  const h = await deliveryHarnessWithAssertionSpy(DELIVERY_MEMBERS)
+  const res = asRpc(await callTool(h.handler, "say", { text: "hello", to: ["ghost1", "ghost2"] }, h.code))
+  const content = res.result?.content
+  assert.ok(Array.isArray(content))
+  const payload = JSON.parse(String((content[0] as { text: string }).text)) as { accepted: unknown[]; unknown: string[] }
+  assert.deepEqual(payload.accepted, [])
+  assert.deepEqual(payload.unknown, ["ghost1", "ghost2"])
+
+  assert.equal(h.reports.length, 1)
+  assert.equal(h.reports[0]?.assertion, "send-reached-nobody")
+  assert.equal(h.reports[0]?.room.code, h.code)
+  assert.ok(h.reports[0]?.detail.includes("ghost1"))
+  assert.ok(h.reports[0]?.detail.includes("ghost2"))
+})
+
+test("BRIEF-15: say naming one known id alongside an unknown one does NOT report assertion 2 — a partial send is ordinary", async () => {
+  const h = await deliveryHarnessWithAssertionSpy(DELIVERY_MEMBERS)
+  const first = h.memberIds[0]!
+  const res = asRpc(await callTool(h.handler, "say", { text: "hello", to: [first, "ghost"] }, h.code))
+  const content = res.result?.content
+  assert.ok(Array.isArray(content))
+  const payload = JSON.parse(String((content[0] as { text: string }).text)) as { accepted: { member_id: string }[]; unknown: string[] }
+  assert.deepEqual(payload.accepted.map((entry) => entry.member_id), [first])
+  assert.deepEqual(payload.unknown, ["ghost"])
+
+  assert.deepEqual(h.reports, [], "at least one recipient was reached — nothing to report")
 })
 
 test("whisper returns one accepted entry; no result or error string contains any substring of the message", async () => {

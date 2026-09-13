@@ -1487,6 +1487,8 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
     // agent's `room_view` and the members' page must never disagree about
     // whether a document exists.
     storedRender: getStoredRender,
+    // Assertion 2 (BRIEF-15, post-turn-assertions).
+    reportAssertion: (room, assertion, detail) => service.reportAssertion(room, assertion, detail),
   })
   const mcpPersonal = createMcpPersonalHandler({
     rooms: () => service.listRooms(),

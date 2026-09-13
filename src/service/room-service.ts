@@ -20,6 +20,7 @@ import { DeliveryEngine } from "./delivery.ts"
 import { MemberSender } from "./member-send.ts"
 import { OpenAiTtsProvider } from "../media/openai.ts"
 import { MediaStore } from "./media-store.ts"
+import { reportAssertionViolation, type PostTurnAssertion } from "./post-turn-assertions.ts"
 import { buildSessionRecap } from "./recap.ts"
 import { hasSendMedia } from "./transports.ts"
 
@@ -227,6 +228,13 @@ export class RoomService {
    *  pull members as `kind: "system"` outbox records. */
   private readonly sender: MemberSender
   private readonly fanout: RoomFanout
+  /** Assertion 4's fact (BRIEF-15, post-turn-assertions): the member whose
+   *  inbound message most recently started this room's turn, set right
+   *  before `handleMessage` fans it into the session and read back by the
+   *  fan-out's post-turn check via `triggeredBy`. In-process only, like
+   *  `lastSeenCursor` below — a restart loses the fact, which just means the
+   *  first turn after a restart skips the assertion rather than guessing. */
+  private readonly lastInboundMemberId = new Map<string, string>()
   private readonly idlePauseMs: number
   private readonly idleSweepMs: number
   private readonly boxProbeMs: number
@@ -339,6 +347,9 @@ export class RoomService {
       // over the ordinary fan-in path (queue: true — the agent may be
       // mid-turn; omitting it loses the message, STATE.md finding #1).
       reportUnservable: (code, correction) => this.reportUnservableArtifact(code, correction),
+      // Assertion 4 (BRIEF-15, post-turn-assertions): who started the turn
+      // the fan-out is about to flush, if it was an ordinary inbound message.
+      triggeredBy: (code) => this.lastInboundMemberId.get(code),
       ...(opts.probeUrl !== undefined ? { probeUrl: opts.probeUrl } : {}),
       ...(openaiKey !== undefined ? { tts: new OpenAiTtsProvider(openaiKey), mediaStore: this.mediaStore } : {}),
     })
@@ -424,6 +435,15 @@ export class RoomService {
    *  — never a second scan over `this.store.list()`. */
   findByAddress(address: Address): AddressLookup {
     return this.store.findByAddress(address)
+  }
+
+  /** The post-turn assertion set's report sink for facts computed OUTSIDE
+   *  this class (BRIEF-15, post-turn-assertions) — today, assertion 2's
+   *  `sendReachedNobody` check in the room MCP handler
+   *  (`src/service/mcp-room.ts`), which has no `MemberSender` of its own to
+   *  broadcast with. */
+  async reportAssertion(room: Room, assertion: PostTurnAssertion, detail: string): Promise<void> {
+    await reportAssertionViolation(this.sender, room, assertion, detail)
   }
 
   /** Whether some room already has a member at this provider+contactRef,
@@ -918,6 +938,29 @@ export class RoomService {
 
   private async handleMessage(input: InboundInput): Promise<InboundOutcome> {
     const found = this.store.findByAddress(input.address)
+    // Assertion 3 (BRIEF-15, post-turn-assertions): the fact `findByAddress`
+    // already computed — this address is a member of more than one room —
+    // reaching an ORDINARY chat message (never a `join <code>`/`resume
+    // <code>`, which are parsed and routed before `handleMessage` is ever
+    // called, R3's "a message naming a room wins, for that message only")
+    // means the message named no room code either. Reported into EVERY
+    // candidate room: nothing here knows which one the sender meant, so
+    // whichever room a human eventually opens up should already carry the
+    // notice.
+    if (found.kind === "ambiguous") {
+      const codes = found.matches.map((match) => match.room.code).join(", ")
+      await Promise.allSettled(
+        found.matches.map((match) =>
+          reportAssertionViolation(
+            this.sender,
+            match.room,
+            "ambiguous-sender",
+            `an inbound message from ${input.address.provider}/${input.address.contactRef} named no room code, ` +
+              `and that address is a member of more than one room (${codes})`,
+          ),
+        ),
+      )
+    }
     // A "none" lookup is a genuine stranger; "ambiguous" is a broken
     // invariant (R1) that already logged loudly in `findByAddress` — routing
     // an ordinary chat message into ONE of several rooms would be exactly
@@ -955,6 +998,10 @@ export class RoomService {
       return { kind: "message", room, member }
     }
 
+    // Assertion 4's fact (BRIEF-15, post-turn-assertions): recorded right
+    // before the fan-in that starts the turn, so the fan-out's post-turn
+    // check has someone to compare its deliveries against.
+    this.lastInboundMemberId.set(room.code, member.id)
     const result = await fanIn(this.client, room.sessionId, { ...member, channel: member.address.provider }, input.text)
     await this.touchActivity(room.code)
     if (!result.ok) {

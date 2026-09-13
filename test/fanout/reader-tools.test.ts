@@ -356,6 +356,77 @@ test("a tools room whose say records have all been pruned still does not warn on
   assert.equal(warnings.length, 0, "pruning must never manufacture a warning")
 })
 
+// --- assertion 4 (BRIEF-15, post-turn-assertions): an inbound message
+// triggered this turn, and no accepted say/whisper delivery this turn
+// targeted its sender. The pair is the point: a turn that whispers a THIRD
+// party while ignoring the sender must fire; a turn that actually answers
+// the sender (by name) must not. `triggeredBy` is the fact `RoomService`
+// wires in production (right before it fans an inbound into the session) —
+// these tests wire it directly, since nothing here goes through
+// `RoomService`. ---
+
+test("BRIEF-15: a turn that whispers a third party but never the triggering member reports assertion 4 (turn-answered-nobody)", async () => {
+  const h = await harness("tools")
+  const fanout = new RoomFanout({
+    store: h.store,
+    transport: h.transport,
+    source: h.source.read(),
+    triggeredBy: () => h.aliceId,
+  })
+  fanout.start(h.code)
+  await runTurn(h, fanout, "first turn, establishes the baseline", 1)
+
+  const engine = new DeliveryEngine({ store: h.store, transport: h.transport, autoDrain: false })
+  await engine.accept(h.code, "whisper", "a secret for bob", [h.bobId])
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "))
+  }
+  try {
+    await runTurn(h, fanout, "whispering to bob, never answering alice", 3)
+  } finally {
+    console.warn = original
+    await fanout.stopAll()
+  }
+
+  const fired = warnings.filter((w) => w.includes("turn-answered-nobody"))
+  assert.equal(fired.length, 1)
+  assert.ok(fired[0]?.includes(h.code))
+  assert.ok(fired[0]?.includes(h.aliceId), "the warning must name the member who was never answered")
+})
+
+test("BRIEF-15: a turn that says/whispers to the triggering member does NOT report assertion 4", async () => {
+  const h = await harness("tools")
+  const fanout = new RoomFanout({
+    store: h.store,
+    transport: h.transport,
+    source: h.source.read(),
+    triggeredBy: () => h.aliceId,
+  })
+  fanout.start(h.code)
+  await runTurn(h, fanout, "first turn, establishes the baseline", 1)
+
+  const engine = new DeliveryEngine({ store: h.store, transport: h.transport, autoDrain: false })
+  await engine.accept(h.code, "say", "answering alice's question", [h.aliceId])
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "))
+  }
+  try {
+    await runTurn(h, fanout, "answering alice, plus the say above", 3)
+  } finally {
+    console.warn = original
+    await fanout.stopAll()
+  }
+
+  const fired = warnings.filter((w) => w.includes("turn-answered-nobody"))
+  assert.equal(fired.length, 0, "the say above named the triggering member — the turn did answer them")
+})
+
 test("a pre-upgrade room (no spokenSeq in the persisted JSON) round-trips and warns on a silent turn", async () => {
   const dir = await freshDir()
   const room = {

@@ -1,5 +1,5 @@
 import type { RoomStore } from "../rooms/store.ts"
-import { deliveryModeOf, type Ask, type Member, type Room } from "../rooms/types.ts"
+import { deliveryModeOf, deliverySeqOf, type Ask, type Delivery, type Member, type Room } from "../rooms/types.ts"
 import type { TtsProvider } from "../media/openai.ts"
 import { env } from "../env.ts"
 import { publicArtifactUrl, publicMediaUrl } from "../service/artifact-proxy.ts"
@@ -18,6 +18,7 @@ import { renderForTier } from "./render.ts"
 import type { FanoutRecord, Transport } from "./types.ts"
 import { DeliveryEngine } from "../service/delivery.ts"
 import { MemberSender } from "../service/member-send.ts"
+import { reportAssertionViolation, turnAnsweredNobody } from "../service/post-turn-assertions.ts"
 import { askMarkerForOthers, askTextForTarget, resolveAskSegments, type ResolvedTurnSegment } from "./ask.ts"
 import { renderWhisperForMember, resolveWhisperSegments, type ResolvedSegment } from "./whisper.ts"
 
@@ -167,6 +168,23 @@ export class RoomFanout {
    *  `spokenSeq` is monotonic, persisted, and absent reads as 0. */
   private readonly lastSpokenSeq: Map<string, number> = new Map()
 
+  /** Per-room, in-process only: `room.deliverySeq` as of the last flush —
+   *  the post-turn assertion set's own baseline (BRIEF-15, post-turn-
+   *  assertions) for "which deliveries were minted THIS turn", the same
+   *  seeded-on-start/updated-on-flush shape as `lastSpokenSeq` just above.
+   *  Read alongside `deliverySeqOf` to slice `room.deliveries` down to the
+   *  records this turn actually minted, for assertion 4. */
+  private readonly lastDeliverySeq: Map<string, number> = new Map()
+
+  /** Assertion 4's fact (BRIEF-15, post-turn-assertions): which member's
+   *  inbound message started the room's CURRENT/most recent turn, if any —
+   *  wired by `RoomService` to the sender it already resolves in
+   *  `handleMessage`, right before it fans the message into the session.
+   *  `undefined` (the default: no wiring, or no inbound has triggered a turn
+   *  yet) means the fact does not exist, so the assertion is skipped — never
+   *  guessed. */
+  private readonly triggeredBy: (code: string) => string | undefined
+
   /** Both undefined unless TTS is configured. `[[say …]]` needs somewhere to
    *  put the rendered audio (the media store, which the artifact-independent
    *  `/r/:code/media/:id` route serves) as well as something to render it. */
@@ -195,6 +213,10 @@ export class RoomFanout {
     mediaStore?: SpeechMediaStore
     probeUrl?: ArtifactProbe
     reportUnservable?: (code: string, correction: string) => Promise<void>
+    /** Assertion 4's fact (BRIEF-15, post-turn-assertions) — see
+     *  `triggeredBy`'s doc. Omitted in every existing harness that never
+     *  wires it, which is exactly "no fact, skip the assertion". */
+    triggeredBy?: (code: string) => string | undefined
   }) {
     this.store = opts.store
     this.sender =
@@ -210,6 +232,7 @@ export class RoomFanout {
     this.mediaStore = opts.mediaStore
     this.probeUrl = opts.probeUrl ?? probeArtifactUrl
     this.reportUnservable = opts.reportUnservable
+    this.triggeredBy = opts.triggeredBy ?? (() => undefined)
   }
 
   start(code: string): void {
@@ -225,6 +248,8 @@ export class RoomFanout {
     // pre-upgrade room) seeds as 0: "has not spoken", which errs toward the
     // warning.
     this.lastSpokenSeq.set(code, room.spokenSeq ?? 0)
+    // Same seeding reasoning, for assertion 4's own baseline.
+    this.lastDeliverySeq.set(code, room.deliverySeq ?? 0)
 
     const controller = new AbortController()
     const done = this.runLoop(code, controller.signal).catch(() => undefined)
@@ -565,14 +590,50 @@ export class RoomFanout {
     // (brief 08). A turn that leaves it where it was addressed no member of
     // any kind, while the web page looks healthy; say so.
     if (textGated) {
-      const seq = room.spokenSeq ?? 0
-      if (seq === (this.lastSpokenSeq.get(code) ?? 0)) {
+      // Assertion 1 (BRIEF-15, post-turn-assertions): the pre-existing
+      // silent-turn detector, moved into the set UNCHANGED — same
+      // comparison, same log line, byte for byte. It stays log-only
+      // (console.warn, no system broadcast) deliberately: this check is
+      // seeded from the room's OWN prior baseline turn (`start`'s seeding
+      // comment above), so a broadcast here would fire on ordinary quiet
+      // turns that establish that baseline, not just on a genuine defect —
+      // exactly the "quietly changes behaviour" trap this brief warns
+      // against for a moved assertion. Assertions 2-4 are new; they get the
+      // full system-delivery report from the first line they were written.
+      const spoken = room.spokenSeq ?? 0
+      if (spoken === (this.lastSpokenSeq.get(code) ?? 0)) {
         console.warn(
           `room ${code}: turn ended with zero say/whisper tool calls — the agent called neither, ` +
             `so no member of any kind was addressed this turn`,
         )
       }
-      this.lastSpokenSeq.set(code, seq)
+      this.lastSpokenSeq.set(code, spoken)
+
+      // Assertion 4 (BRIEF-15, post-turn-assertions): only checked when a
+      // fact names WHO started this turn — an unwired/idle-sweep/resume-
+      // triggered turn has no such fact, so it is skipped rather than
+      // guessed. `deliverySeqOf` slices `room.deliveries` down to exactly
+      // what THIS turn minted, the same way `deliverySeq` bounds work
+      // everywhere else in the store (`Room.deliverySeq`'s doc).
+      const triggerMemberId = this.triggeredBy(code)
+      if (triggerMemberId !== undefined) {
+        const deliverySeqBefore = this.lastDeliverySeq.get(code) ?? 0
+        const deliverySeqAfter = room.deliverySeq ?? 0
+        const mintedThisTurn: Delivery[] = (room.deliveries ?? []).filter((delivery) => {
+          const deliverySeq = deliverySeqOf(delivery.id)
+          return deliverySeq > deliverySeqBefore && deliverySeq <= deliverySeqAfter
+        })
+        if (turnAnsweredNobody(triggerMemberId, mintedThisTurn)) {
+          await reportAssertionViolation(
+            this.sender,
+            room,
+            "turn-answered-nobody",
+            `room ${code}: an inbound message from member ${triggerMemberId} started this turn, ` +
+              `but no accepted say/whisper delivery this turn was addressed to them`,
+          )
+        }
+      }
+      this.lastDeliverySeq.set(code, room.deliverySeq ?? 0)
     }
 
     // Cursor is persisted only after the flush attempt: a crash between send and
