@@ -280,6 +280,33 @@ const RENDER_ARTIFACT_TOOL = {
   _meta: { ui: { resourceUri: RENDER_ARTIFACT_RESOURCE_URI } },
 } as const
 
+/** `read_artifact` — the missing half of `render_artifact`.
+ *
+ *  Until this existed the agent could WRITE the room's shared document and
+ *  never read it back: asked what was on the screen it answered from an
+ *  empty context while the members looked at the render. `room_view` now
+ *  reports that a document EXISTS; this reports what is in it.
+ *
+ *  NO ARGUMENTS, deliberately — the BRIEF-06 lesson, not re-learned: the
+ *  bearer token already names exactly one room, and a `roomCode` argument
+ *  would be both a way to name another room and a value the agent has no
+ *  reliable way to know.
+ *
+ *  Returns the typed BLOCKS, not the rendered HTML: an agent asked to fix a
+ *  heading needs the thing it would pass back to `render_artifact`, and the
+ *  page is mostly stylesheet. Feed the result straight back to
+ *  `render_artifact` with the edits applied — the round trip is the point.
+ *
+ *  No `_meta.ui.resourceUri`: this is data for the model, not a panel. The
+ *  panel is `render_artifact`'s, and pointing a host at it from a read would
+ *  redraw the document on every question asked about it. */
+const READ_ARTIFACT_TOOL = {
+  name: "read_artifact",
+  description:
+    "Read back THIS room's shared document as the same typed blocks render_artifact takes. Call it before answering any question about what the document says, and before editing it — edit the blocks you get back and pass them to render_artifact. Returns {rendered:false} when nothing has been rendered. Returns {rendered:true, source_available:false} when a document exists but its source was not kept: the document IS on screen, you simply cannot read it — say that, never that nothing has been rendered.",
+  inputSchema: { type: "object", properties: {} },
+} as const
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
@@ -410,7 +437,9 @@ async function callRenderTool(
     // the agent must be able to read it either way.
     const html = await deps.renderHtml(dataPath, join(workDir, "index.html"))
     const pdf = await deps.renderPdf(dataPath, join(workDir, "deliverable.pdf"))
-    const record = await deps.renders.save(roomCode, html, pdf.bytes, pdf.pages)
+    // `data` is stored alongside the render so `read_artifact` can hand the
+    // document back in the shape it was written in.
+    const record = await deps.renders.save(roomCode, html, pdf.bytes, pdf.pages, data)
     return {
       status: 200,
       body: {
@@ -464,6 +493,61 @@ async function callRenderTool(
   }
 }
 
+/** `read_artifact`'s handler. Three outcomes, kept distinct on purpose —
+ *  collapsing any two of them is how a tool starts lying:
+ *
+ *    1. no render at all          → `{ rendered: false }`
+ *    2. render, source kept       → `{ rendered: true, rendered_at, data }`
+ *    3. render, source NOT kept   → `{ rendered: true, rendered_at,
+ *                                      source_available: false, … }`
+ *
+ *  (3) is real: every render that landed before `source.json` existed is in
+ *  it, including the one currently on the live RDV-EGCK room's screen. It
+ *  MUST NOT come back as (1) — that is precisely the bug this tool was added
+ *  to fix, reintroduced one layer down.
+ *
+ *  `isError` stays false in all three: "nothing is rendered" is an answer,
+ *  not a failure, and an agent that sees `isError: true` retries instead of
+ *  reporting. */
+async function callReadTool(
+  authorization: string | undefined,
+  id: string | number | null,
+  deps: McpCanvakitDeps,
+): Promise<McpResponse> {
+  const room = resolveRoom(deps, authorization)
+  if (room === undefined) return unauthorized(id)
+
+  const record = await deps.renders.getOrLoad(room.code)
+  if (record === undefined) {
+    return ok(id, {
+      content: [{ type: "text", text: JSON.stringify({ room_code: room.code, rendered: false }) }],
+      isError: false,
+    })
+  }
+
+  const source = await deps.renders.readSource(room.code)
+  const payload =
+    source === undefined
+      ? {
+          room_code: room.code,
+          rendered: true,
+          rendered_at: record.renderedAt,
+          source_available: false,
+          note: "A document IS rendered and members can see it, but its source was not stored (it predates source capture). Do not describe its contents, and do not say nothing has been rendered. Rendering again through render_artifact replaces it and makes it readable.",
+        }
+      : {
+          room_code: room.code,
+          rendered: true,
+          rendered_at: record.renderedAt,
+          source_available: true,
+          data: source,
+        }
+  return ok(id, {
+    content: [{ type: "text", text: JSON.stringify(payload) }],
+    isError: false,
+  })
+}
+
 /**
  * Handle one JSON-RPC 2.0 request body (already JSON.parse'd) with its
  * `Authorization` header value: `initialize`, `notifications/initialized`,
@@ -503,7 +587,7 @@ export function createMcpCanvakitHandler(
     }
 
     if (method === "tools/list") {
-      return ok(id, { tools: [RENDER_ARTIFACT_TOOL] })
+      return ok(id, { tools: [RENDER_ARTIFACT_TOOL, READ_ARTIFACT_TOOL] })
     }
 
     if (method === "resources/list") {
@@ -561,6 +645,9 @@ export function createMcpCanvakitHandler(
 
     if (method === "tools/call") {
       const tool = params.name
+      if (tool === READ_ARTIFACT_TOOL.name) {
+        return callReadTool(authorization, id, deps)
+      }
       if (tool !== RENDER_ARTIFACT_TOOL.name) {
         return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(tool)}`)
       }

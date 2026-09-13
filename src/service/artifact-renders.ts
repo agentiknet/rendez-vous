@@ -8,6 +8,11 @@
  *     index instead of proxying to the box).
  *   - `deliverable.pdf` — the same document as a PDF, stored next to it so
  *     the deliverable flow can hand it on later without a re-render.
+ *   - `source.json` — the typed blocks `render_artifact` was CALLED with,
+ *     kept so `read_artifact` can hand the document back to an agent in the
+ *     shape it would edit it in. Deliberately not the HTML: the rendered
+ *     page is a design artifact full of CSS, and an agent asked to change
+ *     one bullet needs the blocks, not the stylesheet.
  *
  * Same room-keying discipline as `MediaStore`: a render landed under one
  * room code is never served under another. The in-memory record exists only
@@ -16,9 +21,14 @@
  * restart (the proxy path reads from disk, and the in-memory index is
  * rebuilt lazily on first touch).
  *
- * Writes are atomic across the pair: both files are written to temp names
- * first and renamed only once both renders succeeded, so a crash mid-save
- * leaves the OLD pair intact, never a mixed one (new HTML, old PDF).
+ * Writes are atomic across the set: every file is written to a temp name
+ * first and renamed only once ALL of them succeeded, so a crash mid-save
+ * leaves the OLD set intact, never a mixed one (new HTML, old PDF).
+ *
+ * `source.json` is OPTIONAL on read and never synthesised. A render that
+ * landed before this file started keeping it has HTML and a PDF and no
+ * source, and `readSource` returns `undefined` for it — which the caller
+ * must report as "I cannot read it", never as "there is nothing there".
  */
 
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
@@ -72,15 +82,30 @@ export class ArtifactRenderStore {
     }
   }
 
-  async save(roomCode: string, html: Buffer, pdf: Buffer, pages: number): Promise<ArtifactRenderRecord> {
+  /** `source` is the typed blocks the render was produced FROM. Optional so
+   *  every existing caller and test keeps compiling, but production passes
+   *  it — omitting it stores a render `read_artifact` can see and cannot
+   *  read. */
+  async save(
+    roomCode: string,
+    html: Buffer,
+    pdf: Buffer,
+    pages: number,
+    source?: readonly unknown[],
+  ): Promise<ArtifactRenderRecord> {
     const dir = this.dirPath(roomCode)
     await mkdir(dir, { recursive: true })
     const tmpHtml = join(dir, `.index.${randomUUID()}.tmp`)
     const tmpPdf = join(dir, `.deliverable.${randomUUID()}.pdf.tmp`)
     await writeFile(tmpHtml, html)
     await writeFile(tmpPdf, pdf)
+    // Written before ANY rename, so a failure here leaves the whole old set
+    // untouched rather than a new page beside its old source.
+    const tmpSource = source === undefined ? undefined : join(dir, `.source.${randomUUID()}.json.tmp`)
+    if (tmpSource !== undefined) await writeFile(tmpSource, JSON.stringify(source, null, 2), "utf8")
     await rename(tmpHtml, join(dir, "index.html"))
     await rename(tmpPdf, join(dir, "deliverable.pdf"))
+    if (tmpSource !== undefined) await rename(tmpSource, join(dir, "source.json"))
     const record: ArtifactRenderRecord = {
       roomCode,
       htmlBytes: html.length,
@@ -111,6 +136,22 @@ export class ArtifactRenderStore {
    *  the fact, not the record. */
   async hasOrLoad(roomCode: string): Promise<boolean> {
     return (await this.getOrLoad(roomCode)) !== undefined
+  }
+
+  /** The typed blocks the stored render was produced from, or `undefined`
+   *  when this room's render predates source capture (or the file is
+   *  unreadable/corrupt). NEVER an empty array as a stand-in: `[]` is a
+   *  legitimate document — an agent that rendered nothing — and returning it
+   *  for "I don't have the source" is the absence-reads-as-fact mistake in
+   *  its smallest possible form. */
+  async readSource(roomCode: string): Promise<readonly unknown[] | undefined> {
+    try {
+      const raw = await readFile(join(this.dirPath(roomCode), "source.json"), "utf8")
+      const parsed: unknown = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed : undefined
+    } catch {
+      return undefined
+    }
   }
 
   async readHtml(roomCode: string): Promise<Buffer | undefined> {

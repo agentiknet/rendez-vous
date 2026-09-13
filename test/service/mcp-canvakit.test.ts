@@ -1,5 +1,8 @@
 import assert from "node:assert/strict"
-import { test } from "node:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { after, test } from "node:test"
 import { env } from "../../src/env.ts"
 import type { Room } from "../../src/rooms/types.ts"
 import { ArtifactRenderStore } from "../../src/service/artifact-renders.ts"
@@ -7,6 +10,19 @@ import { createMcpCanvakitHandler, roomRenderToken, type McpCanvakitDeps, type M
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/** Throwaway render-store directories, swept once at the end — the
+ *  `read_artifact` tests below write real files, and the default store points
+ *  at `env.mediaDir`. */
+const dirs: string[] = []
+after(() => {
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+})
+
+function trackDir(dir: string): string {
+  dirs.push(dir)
+  return dir
 }
 
 /** Flattens a handler response into the fields the assertions below need,
@@ -105,17 +121,33 @@ test("a notification (no id) gets 202 with no body", async () => {
   assert.equal(res.body, undefined)
 })
 
-test("tools/list advertises exactly the render_artifact tool with an input schema", async () => {
+test("tools/list advertises the render_artifact/read_artifact pair and nothing else", async () => {
   const { handler } = harness()
   const res = asRpc(await handler({ jsonrpc: "2.0", id: "a", method: "tools/list" }, undefined))
   assert.equal(res.status, 200)
   const tools = res.result?.tools
   assert.ok(Array.isArray(tools))
-  assert.equal(tools.length, 1, "one closed tool surface — render_artifact and nothing else")
-  const tool = tools[0]
-  assert.ok(isRecord(tool))
-  assert.equal(tool.name, "render_artifact")
-  assert.ok(isRecord(tool.inputSchema), "the tool must describe its input so the agent can fill it first try")
+  assert.deepEqual(
+    tools.map((tool) => (tool as { name: string }).name),
+    ["render_artifact", "read_artifact"],
+    "a closed surface: the document can be written and read back, and nothing else",
+  )
+  for (const tool of tools) {
+    assert.ok(isRecord(tool))
+    assert.ok(isRecord(tool.inputSchema), "every tool must describe its input so the agent fills it first try")
+  }
+
+  // `read_artifact` takes NO arguments — the bearer is the room. A `roomCode`
+  // here would repeat the BRIEF-06 mistake: a value the agent cannot know,
+  // and a way to name somebody else's room.
+  const read = tools.find((tool) => (tool as { name: string }).name === "read_artifact")
+  assert.ok(isRecord(read) && isRecord(read.inputSchema))
+  assert.deepEqual((read.inputSchema as Record<string, unknown>).properties, {})
+
+  // And no UI resource on it: it returns data for the model, not a panel.
+  // Pointing a host at render_artifact's panel from a READ would redraw the
+  // document every time somebody asked a question about it.
+  assert.equal(read._meta, undefined)
 })
 
 test("tools/list's data property carries an items schema (an array with none is uncallable from OpenAI function-calling)", async () => {
@@ -358,4 +390,113 @@ test("tools/list no longer requires roomCode and its description drops the RDV-7
     /RDV-7F3K/,
     "the example code must be gone — it is live bait for a model with no other source",
   )
+})
+
+// --- read_artifact (the missing half of render_artifact) ------------------
+//
+// The bug: the agent could WRITE the room's shared document and never read
+// it back, so asked what the document said it answered from an empty context
+// while every member looked at the render. `room_view` reports that a
+// document exists; this reports what is IN it.
+
+/** A harness whose render store is scoped to a throwaway directory — these
+ *  tests write real files, and the default store points at `env.mediaDir`. */
+function readHarness(): Harness & { readonly dir: string } {
+  const dir = trackDir(mkdtempSync(join(tmpdir(), "rdv-read-artifact-")))
+  const renders = new ArtifactRenderStore(dir)
+  const renderCalls: string[] = []
+  const deps: McpCanvakitDeps = {
+    roomExists: (code) => code === ROOM,
+    rooms: () => [room(ROOM)],
+    renders,
+    renderHtml: async () => Buffer.from("<!doctype html><html><body>doc</body></html>"),
+    renderPdf: async () => ({ bytes: Buffer.from("%PDF-1.7 fake"), pages: 1 }),
+  }
+  return { handler: createMcpCanvakitHandler(deps), renders, renderCalls, dir }
+}
+
+const READ_CALL = { jsonrpc: "2.0", id: "r", method: "tools/call", params: { name: "read_artifact", arguments: {} } }
+
+function readPayload(res: ReturnType<typeof asRpc>): Record<string, unknown> {
+  assert.equal(res.result?.isError, false, "an unrendered or unreadable document is an ANSWER, not a tool failure")
+  const content = res.result?.content
+  assert.ok(Array.isArray(content) && content.length === 1)
+  const first = content[0]
+  assert.ok(isRecord(first))
+  return JSON.parse(String(first.text)) as Record<string, unknown>
+}
+
+test("read_artifact on a room with no render says so, and does not fail", async () => {
+  const { handler } = readHarness()
+  const payload = readPayload(asRpc(await handler(READ_CALL, VALID_TOKEN)))
+  assert.deepEqual(payload, { room_code: ROOM, rendered: false })
+})
+
+test("read_artifact round-trips render_artifact's own blocks, unchanged", async () => {
+  const { handler } = readHarness()
+
+  const rendered = asRpc(
+    await handler(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: callParamsNoRoomCode(VALID_DATA) },
+      VALID_TOKEN,
+    ),
+  )
+  assert.equal(rendered.result?.isError, false)
+
+  const payload = readPayload(asRpc(await handler(READ_CALL, VALID_TOKEN)))
+  assert.equal(payload.rendered, true)
+  assert.equal(payload.source_available, true)
+  assert.equal(typeof payload.rendered_at, "string")
+  // The whole point: what comes back is what you would hand straight back to
+  // render_artifact with edits applied.
+  assert.deepEqual(payload.data, VALID_DATA)
+})
+
+test("a render whose source was never stored reads as rendered-but-unreadable, NEVER as nothing rendered", async () => {
+  const { handler, renders } = readHarness()
+
+  // Exactly the state of every render that landed before source capture
+  // existed — including the one on the live room's screen when this was
+  // written. `save` without a `source` argument is that state.
+  await renders.save(ROOM, Buffer.from("<html>old</html>"), Buffer.from("%PDF-1.7 old"), 2)
+
+  const payload = readPayload(asRpc(await handler(READ_CALL, VALID_TOKEN)))
+  assert.equal(payload.rendered, true, "the document is on screen — claiming otherwise is the bug this tool fixes")
+  assert.equal(payload.source_available, false)
+  assert.equal(payload.data, undefined, "no source means no data field — never an empty array standing in for one")
+  assert.match(String(payload.note), /not stored/i)
+})
+
+test("read_artifact is bound to the bearer's room: no token, no read, and no argument to name another room", async () => {
+  const { handler } = readHarness()
+
+  const anonymous = await handler(READ_CALL, undefined)
+  assert.equal(anonymous.status, 401)
+
+  const otherRoom = await handler(READ_CALL, `Bearer ${roomRenderToken("RDV-ZZZZ", env.roomTokenSecret)}`)
+  assert.equal(otherRoom.status, 401)
+
+  // Even handed a roomCode, there is nothing to honour it with — the tool
+  // takes no arguments, so the bearer decides and nothing else can.
+  const withArg = asRpc(
+    await handler(
+      { jsonrpc: "2.0", id: "r", method: "tools/call", params: { name: "read_artifact", arguments: { roomCode: "RDV-ZZZZ" } } },
+      VALID_TOKEN,
+    ),
+  )
+  assert.equal(readPayload(withArg).room_code, ROOM)
+})
+
+test("re-rendering replaces the readable source, so a read never returns a previous version's blocks", async () => {
+  const { handler } = readHarness()
+  const second = [{ isTitle: true, title: "Seminar budget", subtitle: "Final" }]
+
+  for (const data of [VALID_DATA, second]) {
+    const res = asRpc(
+      await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: callParamsNoRoomCode(data) }, VALID_TOKEN),
+    )
+    assert.equal(res.result?.isError, false)
+  }
+
+  assert.deepEqual(readPayload(asRpc(await handler(READ_CALL, VALID_TOKEN))).data, second)
 })
