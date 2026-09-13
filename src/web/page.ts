@@ -652,24 +652,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-function outboxRecordOf(value: unknown): { id: string; kind: string; text: string } | undefined {
+function outboxRecordOf(value: unknown): OutboxRecord | undefined {
   if (!isRecord(value) || typeof value.id !== "string") return undefined
   return {
     id: value.id,
     kind: typeof value.kind === "string" ? value.kind : "say",
     text: typeof value.text === "string" ? value.text : "",
+    // BRIEF-15: carried through, or a tool record reaches `planOutboxRender`
+    // anonymous and renders as "an unnamed tool" — this narrowing runs on
+    // every record in the real drain, and dropping a field here is invisible
+    // to any test that calls `planOutboxRender` directly.
+    ...(typeof value.toolName === "string" ? { toolName: value.toolName } : {}),
   }
 }
 
 function outboxPayloadOf(value: unknown): {
   pruned?: boolean
-  deliveries?: { id: string; kind: string; text: string }[]
+  deliveries?: OutboxRecord[]
 } {
   if (!isRecord(value)) return {}
   const deliveries = Array.isArray(value.deliveries)
-    ? value.deliveries
-        .map(outboxRecordOf)
-        .filter((record): record is { id: string; kind: string; text: string } => record !== undefined)
+    ? value.deliveries.map(outboxRecordOf).filter((record): record is OutboxRecord => record !== undefined)
     : undefined
   return {
     ...(typeof value.pruned === "boolean" ? { pruned: value.pruned } : {}),

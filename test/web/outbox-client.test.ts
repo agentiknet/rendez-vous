@@ -189,3 +189,45 @@ test("claimMember refuses to name-conflict silently: a claim mismatch clears the
   assert.equal(impostorToken, null, "a claim with no matching secret must not mint a token")
   assert.ok(conflicted, "the conflict must be reported so the page can show it")
 })
+
+test("BRIEF-15: a tool record survives the REAL drain path with its toolName — runOutboxTick, over a real socket, through outboxRecordOf's narrowing (a planOutboxRender-only test passes against a parser that drops the field)", async () => {
+  const { store, baseUrl, code } = await harness()
+  const deps = makeDeps(baseUrl, code, "Priya")
+  const state = freshOutboxTickState()
+
+  // Claim first, so the record below can be addressed to a real member id.
+  const claimed = await runOutboxTick(state, deps)
+  assert.equal(claimed.status, "ok")
+  const member = store.get(code)?.members.find((candidate) => candidate.displayName === "Priya")
+  assert.ok(member !== undefined)
+
+  const args = { roomCode: code, blocks: 4, artifactUrl: "https://example.test/artifact/" }
+  const seq = (store.get(code)?.deliverySeq ?? 0) + 1
+  await store.update(code, {
+    deliverySeq: seq,
+    deliveries: [
+      ...(store.get(code)?.deliveries ?? []),
+      {
+        id: `d${seq}`,
+        memberId: member.id,
+        kind: "tool",
+        toolName: "render_artifact",
+        text: JSON.stringify(args),
+        status: "pending",
+        failures: 0,
+        lastError: undefined,
+        createdAt: "2026-09-13T10:00:00.000Z",
+        deliveredAt: undefined,
+      },
+    ],
+  })
+
+  const outcome = await runOutboxTick(state, deps)
+  assert.equal(outcome.status, "ok")
+  assert.ok("items" in outcome)
+  const item = outcome.items.find((candidate) => candidate.id === `d${seq}`)
+  assert.ok(item !== undefined, "the tool record must reach the renderer at all")
+  assert.equal(item.kind, "tool")
+  assert.equal(item.toolName, "render_artifact", "the tool's name must survive the narrowing, or the bubble reads 'an unnamed tool'")
+  assert.deepEqual(JSON.parse(item.text), args)
+})
