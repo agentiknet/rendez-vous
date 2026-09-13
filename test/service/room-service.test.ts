@@ -998,7 +998,13 @@ test("a fan-out turn attaching a file nothing serves fans a queue:true correctio
   assert.ok(correction.includes("MilanoTripItinerary.txt"), "the agent is told which file failed")
   assert.ok(correction.includes(`${env.artifactAppDir}/.agentproto/ui`), "the agent is told the directory to write into")
 
-  // And the member got the honest line, not a link.
+  // And the member got the honest line, not a link. Waited for explicitly:
+  // the correction prompt and the member notice leave on two independent
+  // async paths, so the `waitFor` above says nothing about this one. Reading
+  // `sends` straight after it asserts on an absence that may simply not have
+  // arrived yet — a flake that reports "members are told the attachment
+  // failed" as FALSE when the only true statement is "not yet".
+  await waitFor(() => transport.sends.some((send) => send.message.text.includes("MilanoTripItinerary.txt")))
   const notice = transport.sends.find((send) => send.message.text.includes("MilanoTripItinerary.txt"))
   assert.ok(notice !== undefined, "members are told the attachment failed")
   assert.ok(!notice.message.text.includes("http"))

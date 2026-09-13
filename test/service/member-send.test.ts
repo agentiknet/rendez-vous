@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { test } from "node:test"
+import { after, test } from "node:test"
 import { RoomStore } from "../../src/rooms/store.ts"
 import { DeliveryEngine } from "../../src/service/delivery.ts"
 import { MemberSender } from "../../src/service/member-send.ts"
@@ -43,39 +43,53 @@ test("no transport.send call survives outside the member-send helper (brief 07)"
   assert.deepEqual(offenders, [], `direct transport sends outside the helper: ${offenders.join(", ")}`)
 })
 
+/** Torn down once, after the file — not in a per-test `finally`. The store
+ *  persists asynchronously, so an immediate `rm` races its own writes and
+ *  throws ENOTEMPTY out of the cleanup while the assertions themselves pass:
+ *  a green test reported red for a reason that has nothing to do with what it
+ *  asserts. Same pattern as `test/fanout/reader.test.ts`. */
+const dirs: string[] = []
+after(async () => {
+  await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
+})
+
 test("BRIEF-13 R6: an outbound to a push member carries the room code; a pull member's outbox record does not", async () => {
   const dir = await mkdtemp(join(tmpdir(), "rdv-member-send-"))
-  try {
-    const store = await RoomStore.open(dir)
-    const room = await store.create()
-    const push = await store.addMember(room.code, {
-      displayName: "Alice",
-      tier: "messenger",
-      address: { provider: "whatsapp", source: "agentpush", contactRef: "+1" },
-    })
-    const pull = await store.addMember(room.code, {
-      displayName: "Chloe",
-      tier: "room-web",
-      address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
-    })
+  dirs.push(dir)
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const push = await store.addMember(room.code, {
+    displayName: "Alice",
+    tier: "messenger",
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+1" },
+  })
+  const pull = await store.addMember(room.code, {
+    displayName: "Chloe",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+  })
 
-    const transport = new MemoryTransport()
-    const engine = new DeliveryEngine({ store, transport })
-    const sender = new MemberSender({ store, transport, engine })
+  const transport = new MemoryTransport()
+  // `autoDrain: false` is the actual fix, not tidiness. `accept` kicks
+  // `void this.drain(code)` deliberately off the critical path
+  // (`delivery.ts`), so `send` resolves while a background drain is still
+  // writing to `dir`; the teardown's `rm` then races a `.tmp` the store is
+  // mid-write and throws ENOTEMPTY — failing a test whose every assertion
+  // passed. This test reads the record and the direct push send; neither
+  // needs a drain, and the option exists for exactly this.
+  const engine = new DeliveryEngine({ store, transport, autoDrain: false })
+  const sender = new MemberSender({ store, transport, engine })
 
-    await sender.send(room.code, push, { text: "hello room", artifactUrl: undefined })
-    await sender.send(room.code, pull, { text: "hello room", artifactUrl: undefined })
+  await sender.send(room.code, push, { text: "hello room", artifactUrl: undefined })
+  await sender.send(room.code, pull, { text: "hello room", artifactUrl: undefined })
 
-    assert.equal(transport.sends[0]?.message.text, `hello room\n[${room.code}]`, "a push send must carry the room code")
+  assert.equal(transport.sends[0]?.message.text, `hello room\n[${room.code}]`, "a push send must carry the room code")
 
-    const record = store.get(room.code)?.deliveries?.find((delivery) => delivery.memberId === pull.id)
-    assert.ok(record !== undefined)
-    assert.equal(
-      record.text,
-      "hello room",
-      "the room-web page already shows the code — a pull member's own outbox record must not duplicate it",
-    )
-  } finally {
-    await rm(dir, { recursive: true, force: true })
-  }
+  const record = store.get(room.code)?.deliveries?.find((delivery) => delivery.memberId === pull.id)
+  assert.ok(record !== undefined)
+  assert.equal(
+    record.text,
+    "hello room",
+    "the room-web page already shows the code — a pull member's own outbox record must not duplicate it",
+  )
 })
