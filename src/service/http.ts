@@ -614,9 +614,14 @@ const OUTBOX_POLL_MS = 1000
  *  (PLAN-02 §3-D4). */
 export interface OutboxPayload {
   memberId: string
-  /** The room's current `deliverySeq` — the cursor the client's next
-   *  `since` should be one past (D7: at-least-once; dedupe on
-   *  `Delivery.id`). */
+  /** The room's current `deliverySeq` — how far the ROOM has got, for
+   *  display. It is NOT the client's next `since`, and an earlier version of
+   *  this comment said it was: the room's seq sits past records that were
+   *  still `pending` when this snapshot was taken, so advancing to it skips
+   *  the client's own undelivered mail, permanently. The next `since` is the
+   *  highest seq the client actually RENDERED
+   *  (`.plans/audience/APPENDIX-cursor-semantics.md` §3.1). D7 still holds:
+   *  at-least-once, dedupe on `Delivery.id`. */
   cursor: number
   /** The gap marker (PLAN-02 §3-D6): true when the requested `since` is
    *  below the oldest delivery id still retained FOR THIS MEMBER. `since` is
