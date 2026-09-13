@@ -16,6 +16,7 @@ import {
   MAX_RETAINED_DELIVERED,
   pruneDeliveries,
 } from "../../src/service/delivery.ts"
+import { PULL_STALE_MS, retentionFloor } from "../../src/rooms/types.ts"
 import { createHttpServer } from "../../src/service/http.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
@@ -345,6 +346,116 @@ test("a delivered record past the retention window is dropped even in a room too
 test("a delivered record whose timestamps cannot be dated is dropped, not kept forever", () => {
   const records: Delivery[] = [{ ...deliveredAt("d1", "m1", "undateable", "not-a-date"), deliveredAt: undefined }]
   assert.deepEqual(pruneDeliveries(records, Date.now()), [])
+})
+
+// The retention floor (PLAN-02 step 4, brief C): a live pull member's
+// undrained delivered records survive BOTH axes; a stale member's floor is
+// released and the same records go; the member itself is never removed.
+
+test("the floor keeps a delivered record the count cap and the age window would both drop", () => {
+  const now = Date.now()
+  const ancient = new Date(now - 10 * DELIVERED_RETENTION_MS).toISOString()
+  const records: Delivery[] = []
+  for (let i = 0; i < MAX_RETAINED_DELIVERED + 5; i += 1) {
+    records.push(deliveredAt(`d${i + 1}`, "m1", `done ${i}`, ancient))
+  }
+  // Without a floor: everything is ancient, so the age window drops it all.
+  assert.deepEqual(pruneDeliveries(records, now), [])
+  // With a floor at d10: every seq above it survives, overriding both axes;
+  // everything at or below it prunes exactly as it does today.
+  const pruned = pruneDeliveries(records, now, 10)
+  assert.deepEqual(
+    pruned.map((record) => record.id),
+    Array.from({ length: MAX_RETAINED_DELIVERED + 5 - 10 }, (_, i) => `d${11 + i}`),
+  )
+})
+
+test("the floor holds a pull member's record against live traffic; the stale release lets it go; the member stays, id intact", async () => {
+  const { store, code, alice, screen } = await roomWith()
+  const eng = engine(store, new FakeTransport())
+
+  // d1 goes to the screen (pull) and is delivered; the tab renders it and acks.
+  await eng.accept(code, "say", "for the screen", [screen.id])
+  await eng.drain(code)
+  assert.equal(await eng.ackCursor(code, screen.id, 1), "applied")
+
+  // Then the count cap floods: 25 more push deliveries. The floor is
+  // room-wide (min acked cursor across live pull members), so it holds EVERY
+  // delivered record above it — the screen's undrained d1 and the push tail
+  // alike. That is the write-amplification the brief says to budget: the
+  // stale release, not the cap, is the bound on what the floor holds.
+  for (let i = 2; i <= MAX_RETAINED_DELIVERED + 6; i += 1) {
+    await eng.accept(code, "say", `flood ${i}`, [alice.id])
+    await eng.drain(code)
+  }
+  const held = deliveriesOf(store.get(code))
+  assert.equal(held.length, MAX_RETAINED_DELIVERED + 6, "the floor holds everything above it — the cap cannot reclaim it")
+  assert.ok(
+    held.some((record) => record.id === "d1" && record.memberId === screen.id),
+    "the undrained pull record survives both retention axes",
+  )
+
+  // Release: past PULL_STALE_MS with no further ack the member is stale, its
+  // floor is gone, and the prune reclaims the backlog — the cap takes the
+  // oldest 6 records, d1 among them.
+  const later = Date.now() + PULL_STALE_MS + 1000
+  const room = store.get(code)
+  assert.ok(room !== undefined)
+  await store.update(code, { deliveries: pruneDeliveries(held, later, retentionFloor(room, later)) })
+  assert.ok(
+    !deliveriesOf(store.get(code)).some((record) => record.id === "d1"),
+    "the released floor lets the prune take the backlog",
+  )
+  // And the release NEVER removes the member (D6 constraint 1): same member,
+  // same id — the reconnecting tab is the same principal, not a fresh one.
+  const after = store.get(code)
+  assert.ok(after !== undefined)
+  assert.ok(after.members.some((member) => member.id === screen.id))
+})
+
+test("an ack confirms by recipient exactly the records at or below the cursor, and a backwards ack is ignored", async () => {
+  const { store, code, screen } = await roomWith()
+  const eng = engine(store, new FakeTransport())
+  await eng.accept(code, "say", "first", [screen.id])
+  await eng.accept(code, "say", "second", [screen.id])
+  await eng.drain(code)
+
+  assert.equal(await eng.ackCursor(code, screen.id, 1), "applied")
+  const records = () => deliveriesOf(store.get(code))
+  assert.equal(records().find((record) => record.id === "d1")?.confirmedBy, "recipient")
+  assert.equal(
+    records().find((record) => record.id === "d2")?.confirmedBy,
+    undefined,
+    "a record above the acked cursor is NOT confirmed by the recipient",
+  )
+
+  // A replayed/old ack must not rewind anything: ignored, cursor stays.
+  assert.equal(await eng.ackCursor(code, screen.id, 1), "ignored")
+  const member = store.get(code)?.members.find((candidate) => candidate.id === screen.id)
+  assert.ok(member !== undefined)
+  assert.equal(member.ackedSeq, 1)
+  assert.equal(records().find((record) => record.id === "d2")?.confirmedBy, undefined)
+  // ...and a later ack at or below the cursor cannot re-write history either.
+  assert.equal(await eng.ackCursor(code, screen.id, 0), "ignored")
+
+  assert.equal(await eng.ackCursor(code, screen.id, 2), "applied")
+  assert.equal(records().find((record) => record.id === "d2")?.confirmedBy, "recipient")
+})
+
+test("a record that completes below an already-acked cursor is confirmed by the recipient, not left unconfirmed (brief F)", async () => {
+  const { store, code, screen } = await roomWith()
+  const eng = engine(store, new FakeTransport())
+  // The tab acked up to d5 (it received those turns); d3 was still `pending`
+  // at that moment — the drain must not leave it honestly-unconfirmed, the
+  // recipient provably already has it.
+  await eng.ackCursor(code, screen.id, 5)
+  await store.update(code, { deliveries: [pendingDelivery("d3", screen.id, "the slow one")] })
+
+  await eng.drain(code)
+
+  const record = deliveriesOf(store.get(code)).find((candidate) => candidate.id === "d3")
+  assert.equal(record?.status, "delivered")
+  assert.equal(record?.confirmedBy, "recipient")
 })
 
 test("an id minted after a prune cannot collide with a record the prune kept", async () => {

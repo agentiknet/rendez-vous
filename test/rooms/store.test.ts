@@ -437,6 +437,55 @@ test("addMember throws on an address with no delivery mode — unrouted recipien
   )
 })
 
+test("ackCursor persists monotonically on the member and round-trips through the store (PLAN-02 step 4)", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const web = await store.addMember(room.code, {
+    displayName: "Chloe",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+  })
+
+  assert.equal(await store.ackCursor(room.code, web.id, 4, "2026-09-13T00:00:00.000Z"), "applied")
+  // A backwards ack is ignored as a cursor move but still refreshes liveness.
+  assert.equal(await store.ackCursor(room.code, web.id, 2, "2026-09-13T00:00:05.000Z"), "ignored")
+  const member = store.get(room.code)?.members.find((candidate) => candidate.id === web.id)
+  assert.ok(member !== undefined)
+  assert.equal(member.ackedSeq, 4)
+  assert.equal(member.ackedAt, "2026-09-13T00:00:05.000Z")
+
+  const reopened = await RoomStore.open(dir)
+  const loaded = reopened.get(room.code)?.members.find((candidate) => candidate.id === web.id)
+  assert.ok(loaded !== undefined)
+  assert.equal(loaded.ackedSeq, 4)
+  assert.equal(loaded.ackedAt, "2026-09-13T00:00:05.000Z")
+})
+
+test("open rejects a member whose ackedSeq is not a sane number", async () => {
+  const dir = trackDir(await freshDir())
+  const room = {
+    code: "RDV-7F3K",
+    members: [
+      {
+        id: "m1",
+        displayName: "Chloe",
+        tier: "room-web",
+        address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+        joinedAt: "2026-09-12T00:00:00.000Z",
+        ackedSeq: "many",
+      },
+    ],
+    createdAt: "2026-09-12T00:00:00.000Z",
+    updatedAt: "2026-09-12T00:00:00.000Z",
+    cursor: 0,
+    lastActivityAt: "2026-09-12T00:00:00.000Z",
+    state: "active",
+  }
+  await writeFile(join(dir, "rooms.json"), JSON.stringify({ rooms: [room] }), "utf8")
+  await assert.rejects(() => RoomStore.open(dir), /corrupt room store/i)
+})
+
 test("open migrates a pre-delivery rooms.json: delivery is derived from addresses and attempts is renamed to failures, in memory", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)

@@ -16,7 +16,7 @@ import type { TranscriptRecord } from "../daemon/records.ts"
 import { env } from "../env.ts"
 import { joinLinks } from "../links/index.ts"
 import type { Room, Tier, Delivery, Member } from "../rooms/types.ts"
-import { ROUTED_PROVIDERS } from "../rooms/types.ts"
+import { ROUTED_PROVIDERS, deliverySeqOf, pullMemberStale } from "../rooms/types.ts"
 import { renderRoomNotFoundPage, renderRoomPage } from "../web/page.ts"
 import { proxyArtifact, publicArtifactUrl } from "./artifact-proxy.ts"
 import { ArtifactRenderStore } from "./artifact-renders.ts"
@@ -260,7 +260,7 @@ export interface RoomStatePayload {
   code: string
   state: Room["state"]
   artifact: { url: string | undefined; ready: boolean }
-  members: { displayName: string; tier: Tier; joinedAt: string }[]
+  members: { displayName: string; tier: Tier; joinedAt: string; away: boolean }[]
   agent: { busy: boolean; lastActivityAt: string }
   updatedAt: string
 }
@@ -293,6 +293,10 @@ async function roomStatePayload(
       displayName: member.displayName,
       tier: member.tier,
       joinedAt: member.joinedAt,
+      // Stale pull member (brief D): the tab has not acked for PULL_STALE_MS
+      // — shown away in the roster and on the page, and its retention floor
+      // is released. The member itself is NEVER removed (D6 constraint 1).
+      away: pullMemberStale(member, now.getTime()),
     })),
     agent: { busy, lastActivityAt: room.lastActivityAt },
     updatedAt: now.toISOString(),
@@ -514,6 +518,51 @@ const NAME_TAKEN_MESSAGE = "ce nom est déjà pris dans cette room — choisis-e
  *  That is why the token is NOT embedded in the page HTML (see page.ts): the
  *  page is rendered before anyone has presented anything, and a spectator's
  *  HTML must hold no credential at all. */
+/** `POST /rooms/:code/outbox/cursor` (PLAN-02 step 4, brief A) — the cursor
+ *  acknowledgement. Same token family and same per-member server-side
+ *  resolution as the drain (`resolveOutboxMember`); a separate endpoint,
+ *  because a GET must not mutate. Body `{ "seq": <n> }` — the highest seq
+ *  the client has RENDERED (the page acks after rendering, never on
+ *  receipt). Monotonic server-side: an ack that would move the cursor
+ *  backwards is ignored, not an error, and answered with the floor that
+ *  stayed. */
+async function handleRoomCursorAck(
+  service: RoomService,
+  req: IncomingMessage,
+  res: ServerResponse,
+  encodedCode: string,
+): Promise<void> {
+  const code = decodeURIComponent(encodedCode)
+  const room = service.getRoom(code)
+  if (room === undefined) {
+    sendJson(res, 404, { error: "not_found" })
+    return
+  }
+  const member = resolveOutboxMember(room, code, req.headers.authorization)
+  if (member === undefined) {
+    // A wrong or absent token must reveal nothing — not even the roster.
+    sendJson(res, 401, { error: "unauthorized" })
+    return
+  }
+  const body = await readJsonBody(req)
+  if (!isRecord(body)) {
+    sendJson(res, 400, { error: "invalid_body" })
+    return
+  }
+  const seq = body.seq
+  if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) {
+    sendJson(res, 400, { error: "invalid_body" })
+    return
+  }
+  const outcome = await service.deliveryEngine.ackCursor(room.code, member.id, seq)
+  sendJson(res, 200, {
+    applied: outcome === "applied",
+    // The member's effective cursor either way: what the client may assume
+    // the floor now is.
+    ackedSeq: outcome === "applied" ? seq : member.ackedSeq ?? 0,
+  })
+}
+
 async function handleRoomClaim(
   service: RoomService,
   req: IncomingMessage,
@@ -560,16 +609,6 @@ async function handleRoomClaim(
  *  long before the agent's turn ends. */
 const OUTBOX_POLL_MS = 1000
 
-/** `Delivery.id` → its position in the room's monotonic `deliverySeq`. Ids
- *  are `d<seq>` (`DeliveryEngine.accept`); a room that predates the counter
- *  has exactly those ids too. Anything unparseable sorts as 0, so it is
- *  replayed only when `since` is omitted-and-zero, and never skipped into a
- *  silently-replayed position. */
-function deliverySeqOf(id: string): number {
-  const match = /^d(\d+)$/.exec(id)
-  return match === null ? 0 : Number.parseInt(match[1] ?? "0", 10)
-}
-
 /** What one outbox response carries. `deliveries` is already scoped to the
  *  requesting member, server-side, before the bytes leave the process
  *  (PLAN-02 §3-D4). */
@@ -591,12 +630,26 @@ export interface OutboxPayload {
 }
 
 function outboxFor(room: Room, member: Member, since: number, sinceGiven: boolean): OutboxPayload {
-  const mine = (room.deliveries ?? []).filter((delivery) => delivery.memberId === member.id)
-  let oldestRetained: number | undefined
-  for (const delivery of mine) {
-    const seq = deliverySeqOf(delivery.id)
-    if (oldestRetained === undefined || seq < oldestRetained) oldestRetained = seq
+  const all = room.deliveries ?? []
+  const mine = all.filter((delivery) => delivery.memberId === member.id)
+  const oldestOf = (records: readonly Delivery[]): number | undefined => {
+    let oldest: number | undefined
+    for (const delivery of records) {
+      const seq = deliverySeqOf(delivery.id)
+      if (oldest === undefined || seq < oldest) oldest = seq
+    }
+    return oldest
   }
+  // Brief E: when a member's backlog was pruned ENTIRELY, `mine` is empty and
+  // its own oldest-retained is `undefined` — total loss would read as "nothing
+  // new". Fall back to the room-wide oldest retained seq (any member's): the
+  // member's records were destroyed if the room still holds anything older
+  // than the client's cursor. Only when the room retains NOTHING at all does
+  // `pruned` stay false — with no record left there is no low-water mark to
+  // compare against, and the room's count/age caps mean that state is a room
+  // that has been quiet past `DELIVERED_RETENTION_MS`, not a destroyed
+  // backlog.
+  const oldestRetained = oldestOf(mine) ?? oldestOf(all)
   return {
     memberId: member.id,
     cursor: room.deliverySeq ?? 0,
@@ -1054,6 +1107,17 @@ async function handle(
       return
     }
     await handleRoomOutbox(service, req, res, encodedCode, parseSince(url.searchParams.get("since")), url.searchParams.has("since"))
+    return
+  }
+
+  const cursorMatch = /^\/rooms\/([^/]+)\/outbox\/cursor$/.exec(url.pathname)
+  if (cursorMatch !== null && req.method === "POST") {
+    const encodedCode = cursorMatch[1]
+    if (encodedCode === undefined) {
+      sendJson(res, 400, { error: "invalid_code" })
+      return
+    }
+    await handleRoomCursorAck(service, req, res, encodedCode)
     return
   }
 

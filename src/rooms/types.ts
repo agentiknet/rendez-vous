@@ -73,6 +73,22 @@ export interface Member {
    *  one: their address is already a credential a third party verified. */
   claim?: string
   joinedAt: string
+  /** The member's last cursor acknowledgement (PLAN-02 step 4 / brief A):
+   *  `ackedSeq` is the highest delivery seq the client has RENDERED and
+   *  therefore genuinely holds; `ackedAt` is the wall-clock of the last ack.
+   *  Written only by `POST /rooms/:code/outbox/cursor` (via
+   *  `RoomStore.ackCursor`) — a GET must never mutate. Optional on members
+   *  persisted before the field existed, same JSON round-trip rule as
+   *  `claim`. Absent `ackedSeq` = the floor holds nothing for this member.
+   *
+   *  The two fields answer two different questions and move on different
+   *  rules: `ackedSeq` is MONOTONIC (an ack that would move it backwards is
+   *  ignored — a client replaying an old response must not rewind the
+   *  retention floor), while `ackedAt` is liveness (refreshed on every ack,
+   *  even a non-advancing one, because re-asserting a cursor is still
+   *  evidence the client is there). */
+  ackedSeq?: number
+  ackedAt?: string
 }
 
 /** Push or pull, per member — the one question the fan-out's artifact-notice
@@ -162,17 +178,77 @@ export interface Delivery {
    *  while the type was open — `attempts` counted failures. */
   readonly failures: number
   /** Who confirmed the delivery (PLAN-02 §3-D2). `"transport"` = the push
-   *  provider accepted the hand-off. The union names a `"recipient"` variant
-   *  — the client advanced its cursor past the record — but nothing may set
-   *  it: an SSE flush proves the server SENT, not that anyone received, and
-   *  making `"recipient"` real needs a cursor-acknowledgement write (a POST
-   *  of last-seen-seq) that does not exist yet (PLAN-02 §3-D2 amendment F8).
-   *  Pull deliveries are therefore delivered-and-unconfirmed: `confirmedBy`
-   *  stays absent on them. Absent on records persisted before the field. */
+   *  provider accepted the hand-off. `"recipient"` = the client acked a
+   *  cursor at or above this record's seq (POST /rooms/:code/outbox/cursor)
+   *  — the genuinely stronger guarantee, real since the cursor ack shipped
+   *  (PLAN-02 step 4; D2's amendment F8 is discharged). Set only when the
+   *  ack lands or when a pull record completes for a member whose cursor
+   *  already covers it; never backfilled onto records that predate the ack
+   *  by any migration — absence stays the honest value there. */
   readonly confirmedBy?: "transport" | "recipient"
   readonly lastError: string | undefined
   readonly createdAt: string
   readonly deliveredAt: string | undefined
+}
+
+/** `Delivery.id` → its position in the room's monotonic `deliverySeq`. Ids
+ *  are `d<seq>` (`DeliveryEngine.accept`); a room that predates the counter
+ *  has exactly those ids too. Anything unparseable sorts as 0, so it is
+ *  replayed only when `since` is omitted-and-zero, and never skipped into a
+ *  silently-replayed position. Lives here (not in http.ts) because the
+ *  retention floor and the cursor ack compare the same numbers. */
+export function deliverySeqOf(id: string): number {
+  const match = /^d(\d+)$/.exec(id)
+  return match === null ? 0 : Number.parseInt(match[1] ?? "0", 10)
+}
+
+/** How long a pull member may go without a cursor ack before it is declared
+ *  stale: marked away in the roster (the agent stops addressing a ghost) and
+ *  its retention floor is released (the prune reclaims its backlog). It is
+ *  NEVER removed from the room — the member id is stable across a tab
+ *  closing and reopening only because nothing removes it, and removing it
+ *  would make the next visit a new principal whose cursor starts at
+ *  `deliverySeq`, hiding everything sent meanwhile (PLAN-02 §3-D6
+ *  constraint 1, §7.1/F3).
+ *
+ *  90 s, against the page's clocks (src/web/page.ts): the state poll runs
+ *  every 3 s and the outbox drain every 2 s, each followed by a cursor ack.
+ *  90 s is 30 missed state polls / 45 missed drain ticks — a slow mobile
+ *  network stalls well past a few missed polls without releasing the floor,
+ *  while an actually-closed tab is reclaimed within a minute and a half. A
+ *  value at the scale of the poll interval itself would turn a transient
+ *  stall into pruned backlog: data loss with nothing but the gap marker to
+ *  show for it. */
+export const PULL_STALE_MS = 90_000
+
+/** Whether a pull member is stale: no ack for `PULL_STALE_MS`. A member that
+ *  has never acked is dated from `joinedAt` — it has not acked for exactly
+ *  that long, which is what makes the `Ecran` ghost (a tab that joined and
+ *  never drained) go away. Undateable timestamps never declare staleness:
+ *  a member we cannot age is one we cannot safely release. Push members are
+ *  never stale — their delivery is someone else's problem the moment the
+ *  transport accepts it. */
+export function pullMemberStale(member: Member, nowMs: number): boolean {
+  if (deliveryModeOf(member) !== "pull") return false
+  const stamp = Date.parse(member.ackedAt ?? member.joinedAt)
+  return !Number.isNaN(stamp) && nowMs - stamp > PULL_STALE_MS
+}
+
+/** The retention floor (PLAN-02 §3-D6): the lowest acked cursor across the
+ *  room's LIVE pull members, or `undefined` when no live pull member has
+ *  acked anything. `pruneDeliveries` may never drop a delivered record whose
+ *  seq is above this — it is undrained mail, not completed work. Stale
+ *  members contribute nothing: their floor is released, and the gap marker
+ *  tells their tab what happened when it comes back. */
+export function retentionFloor(room: Room, nowMs: number): number | undefined {
+  let floor: number | undefined
+  for (const member of room.members) {
+    if (deliveryModeOf(member) !== "pull") continue
+    if (pullMemberStale(member, nowMs)) continue
+    const seq = member.ackedSeq
+    if (seq !== undefined && (floor === undefined || seq < floor)) floor = seq
+  }
+  return floor
 }
 
 export interface Room {

@@ -35,7 +35,7 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto"
 import { env } from "../env.ts"
-import type { Room } from "../rooms/types.ts"
+import { type Room, deliveryModeOf, pullMemberStale } from "../rooms/types.ts"
 import type { McpResponse, McpServerMount } from "./mcp-canvakit.ts"
 
 /** The delivery half of the audience tools (PLAN §3.2): the `say`/`whisper`
@@ -147,7 +147,7 @@ const METHOD_NOT_FOUND = -32601
 const ROSTER_TOOL = {
   name: "roster",
   description:
-    "List the members of THIS room (fixed by your credentials — no argument). One entry per member: member_id (use this to address them — display names can collide and change), display_name (for prose only), surface (the channel they are on: telegram, whatsapp, email, room-web), tier (messenger/email/room-web — a room-web member is a screen, not a phone), joined_at. Re-read it when you need to address someone; do not cache ids across turns — a member who leaves and rejoins gets a new id.",
+    "List the members of THIS room (fixed by your credentials — no argument). One entry per member: member_id (use this to address them — display names can collide and change), display_name (for prose only), surface (the channel they are on: telegram, whatsapp, email, room-web), tier (messenger/email/room-web — a room-web member is a screen, not a phone), joined_at, away (true = a room-web member whose tab has not drained its outbox for over 90 seconds — nobody is there; do not address them and do not expect an answer). Re-read it when you need to address someone; do not cache ids across turns — a member who leaves and rejoins gets a new id.",
   inputSchema: { type: "object", properties: {} },
 } as const
 
@@ -244,14 +244,20 @@ function resolveRoom(
 }
 
 /** The `roster` result. Ids and surfaces only — see the file-top HARD RULE:
- *  this result is projected on the room's shared screen. */
+ *  this result is projected on the room's shared screen. `away` (brief D):
+ *  a stale pull member is marked so the agent stops addressing a ghost —
+ *  the `Ecran` failure solved once; push members are never away (their
+ *  transport hand-off is the whole story). The stale member stays in the
+ *  roster — only its liveness claim is withdrawn. */
 function rosterResult(room: Room): Record<string, unknown> {
+  const nowMs = Date.now()
   const members = room.members.map((member) => ({
     member_id: member.id,
     display_name: member.displayName,
     surface: member.address.provider,
     tier: member.tier,
     joined_at: member.joinedAt,
+    away: deliveryModeOf(member) === "pull" && pullMemberStale(member, nowMs),
   }))
   return {
     content: [{ type: "text", text: JSON.stringify({ members, count: members.length }) }],

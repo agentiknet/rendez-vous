@@ -20,7 +20,7 @@
  */
 import type { JoinLinks } from "../links/index.ts"
 import { qrSvg } from "../links/index.ts"
-import type { Member, Room } from "../rooms/types.ts"
+import { type Member, type Room, deliveryModeOf, pullMemberStale } from "../rooms/types.ts"
 
 function escapeHtml(value: string): string {
   return value
@@ -54,10 +54,16 @@ function artifactLive(room: Room): boolean {
 }
 
 function memberHtml(member: Member): string {
+  // Brief D: a stale pull member is shown away — nobody is there to read.
+  // The member is never removed from the roster; only its presence claim goes.
+  const away =
+    deliveryModeOf(member) === "pull" && pullMemberStale(member, Date.now())
+      ? `<span class="member-away">away</span>`
+      : ""
   return (
     `<span class="member"><span class="member-name">${escapeHtml(member.displayName)}</span>` +
     `<span class="tier-badge tier-${escapeHtml(member.tier)}">${escapeHtml(member.tier)}</span>` +
-    `<span class="member-joined">joined ${escapeHtml(member.joinedAt)}</span></span>`
+    `${away}<span class="member-joined">joined ${escapeHtml(member.joinedAt)}</span></span>`
   )
 }
 
@@ -93,6 +99,7 @@ const STYLE = `
   .member-name { font-weight: 600; color: #1a1c23; }
   .tier-badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); background: #fff; color: var(--grey); font-weight: 600; }
   .member-joined { font-size: 11px; }
+  .member-away { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: #fdeaea; color: #b42318; font-weight: 700; }
   main { display: flex; height: calc(100vh - 260px); }
   #transcript-pane { flex: 1 1 55%; overflow-y: auto; padding: 12px; border-right: 1px solid var(--border); }
   #artifact-pane { flex: 1 1 45%; display: flex; align-items: stretch; justify-content: center; }
@@ -232,6 +239,12 @@ function script(code: string, room: Room, agentBusy: boolean): string {
         joined.textContent = "joined " + relTime(m.joinedAt) + " ago";
         span.appendChild(name);
         span.appendChild(tier);
+        if (m.away === true) {
+          const away = document.createElement("span");
+          away.className = "member-away";
+          away.textContent = "away";
+          span.appendChild(away);
+        }
         span.appendChild(joined);
         el.appendChild(span);
       });
@@ -388,6 +401,27 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     // carrier is /mcp/room's mount workaround (PLAN-02 §4.1) — not something
     // to propagate. The endpoint answers both readings (SSE or JSON); poll
     // is the one a browser can authenticate.
+    // The cursor ack (PLAN-02 step 4, brief A): POSTed to its own endpoint
+    // AFTER this batch has been rendered into the DOM — acking on receipt
+    // would claim receipt of things the visitor may never see, re-creating
+    // exactly the confusion the transport/recipient distinction exists to
+    // prevent. On empty polls the current cursor is re-asserted unchanged:
+    // the ack doubles as the liveness signal that keeps this tab's retention
+    // floor held and the roster honest (a tab that never acks anything would
+    // be declared stale and its backlog reclaimed after PULL_STALE_MS).
+    async function ackOutbox() {
+      if (memberTokenValue === null || outboxSince <= 0) return;
+      try {
+        await fetch("/rooms/" + ROOM_CODE + "/outbox/cursor", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: "Bearer " + memberTokenValue },
+          body: JSON.stringify({ seq: outboxSince }),
+        });
+      } catch (e) {
+        // Transient — the next drain tick re-acks from the same cursor.
+      }
+    }
+
     async function drainOutbox() {
       if (memberTokenValue === null) return;
       try {
@@ -414,8 +448,21 @@ function script(code: string, room: Room, agentBusy: boolean): string {
           el.appendChild(badge);
           el.appendChild(body);
         });
-        if (typeof payload.cursor === "number") outboxSince = payload.cursor;
+        // Cursor semantics (brief F): the cursor advances to the HIGHEST SEQ
+        // ACTUALLY RENDERED — never to payload.cursor (the room-wide
+        // deliverySeq), which can sit past records still pending for anyone;
+        // a since advanced past a still-pending record would skip it once it
+        // is delivered, and the ack would claim a receipt that never
+        // happened. The cursor may only move past records this tab received.
+        const deliveries = payload.deliveries === undefined || payload.deliveries === null ? [] : payload.deliveries;
+        deliveries.forEach(function (record) {
+          if (!record || typeof record.id !== "string") return;
+          const m = /^d(\d+)$/.exec(record.id);
+          const seq = m ? parseInt(m[1], 10) : 0;
+          if (seq > outboxSince) outboxSince = seq;
+        });
         transcriptEl.scrollTop = transcriptEl.scrollHeight;
+        await ackOutbox();
       } catch (e) {
         // Transient network error — the next tick retries from the same cursor.
       }

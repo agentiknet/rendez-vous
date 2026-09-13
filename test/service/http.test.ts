@@ -837,6 +837,99 @@ test("GET /rooms/:code/outbox answers Accept: text/event-stream with the same re
   assert.equal(frames[2]?.cursor, 2)
 })
 
+// --- POST /rooms/:code/outbox/cursor (PLAN-02 step 4: the ack) --------------
+
+test("GET /rooms/:code/outbox fires the gap marker from the room-wide oldest when the member's backlog was pruned ENTIRELY (brief E)", async () => {
+  const { store, baseUrl, code, alice, bob } = await outboxHarness()
+  // Alice has NO records of her own left — her backlog was pruned to nothing.
+  // Her own oldest-retained is undefined; without the room-wide fallback,
+  // `since=1` would read as "nothing new" while d1..d4 are gone.
+  await store.update(code, {
+    deliverySeq: 5,
+    deliveries: [outboxDelivery("d2", bob.id, "his phone got this one", "delivered"), outboxDelivery("d5", bob.id, "newest", "delivered")],
+  })
+
+  const sinceOne = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=1`, { headers: aliceHeaders(code, alice) }))
+  assert.equal(sinceOne.pruned, true, "total loss must not read as 'nothing new'")
+  assert.deepEqual(
+    isArrayOf(sinceOne.deliveries, (v): v is Record<string, unknown> => isRecord(v)) ? sinceOne.deliveries : [],
+    [],
+  )
+
+  // At the room-wide oldest there is no gap to report.
+  const sinceTwo = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=2`, { headers: aliceHeaders(code, alice) }))
+  assert.equal(sinceTwo.pruned, false)
+
+  // A member with records of her own still reads the gap from her OWN oldest,
+  // not the room's (the earlier D6 test pins that; this is the contrast).
+})
+
+async function postCursor(
+  baseUrl: string,
+  roomCode: string,
+  headers: Record<string, string>,
+  body: unknown,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await fetch(`${baseUrl}/rooms/${roomCode}/outbox/cursor`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  })
+  return { status: res.status, body: await readJson(res) }
+}
+
+test("POST /rooms/:code/outbox/cursor acks monotonically, persists on the member, and confirms by recipient (brief A/B)", async () => {
+  const { store, baseUrl, code, alice, bob } = await outboxHarness()
+  await store.update(code, {
+    deliverySeq: 2,
+    deliveries: [outboxDelivery("d1", alice.id, "hers", "delivered"), outboxDelivery("d2", alice.id, "hers too", "delivered")],
+  })
+
+  // Same token family as the drain: wrong or absent is 401, unknown room 404.
+  const absent = await postCursor(baseUrl, code, {}, { seq: 1 })
+  assert.equal(absent.status, 401)
+  const wrong = await postCursor(baseUrl, code, { authorization: `Bearer ${memberToken(code, alice.id, "wrong")}` }, { seq: 1 })
+  assert.equal(wrong.status, 401)
+  const unknownRoom = await postCursor(baseUrl, "RDV-ZZZZ", aliceHeaders(code, alice), { seq: 1 })
+  assert.equal(unknownRoom.status, 404)
+
+  // Malformed bodies are a validated 400.
+  for (const bad of [undefined, { seq: "1" }, { seq: -1 }, { seq: 1.5 }]) {
+    const badBody = await postCursor(baseUrl, code, aliceHeaders(code, alice), bad)
+    assert.equal(badBody.status, 400, `seq ${JSON.stringify(bad)} must be rejected`)
+  }
+
+  // An advancing ack lands: persisted on the member (seq + wall-clock), and
+  // the covered record becomes confirmedBy "recipient" (brief B).
+  const first = await postCursor(baseUrl, code, aliceHeaders(code, alice), { seq: 1 })
+  assert.equal(first.status, 200)
+  assert.equal(first.body.applied, true)
+  assert.equal(first.body.ackedSeq, 1)
+  const acked = store.get(code)?.members.find((candidate) => candidate.id === alice.id)
+  assert.ok(acked !== undefined)
+  assert.equal(acked.ackedSeq, 1)
+  assert.ok(acked.ackedAt !== undefined)
+  const d1 = store.get(code)?.deliveries?.find((record) => record.id === "d1")
+  assert.equal(d1?.confirmedBy, "recipient")
+
+  // A backwards ack is IGNORED, not an error: the floor does not rewind, and
+  // the response states the cursor that still holds.
+  const backwards = await postCursor(baseUrl, code, aliceHeaders(code, alice), { seq: 0 })
+  assert.equal(backwards.status, 200)
+  assert.equal(backwards.body.applied, false)
+  assert.equal(backwards.body.ackedSeq, 1)
+  assert.equal(store.get(code)?.members.find((candidate) => candidate.id === alice.id)?.ackedSeq, 1)
+
+  // A record above the cursor stays unconfirmed; acking past it confirms it.
+  const d2 = store.get(code)?.deliveries?.find((record) => record.id === "d2")
+  assert.equal(d2?.confirmedBy, undefined)
+  const second = await postCursor(baseUrl, code, aliceHeaders(code, alice), { seq: 2 })
+  assert.equal(second.body.applied, true)
+  const d2after = store.get(code)?.deliveries?.find((record) => record.id === "d2")
+  assert.equal(d2after?.confirmedBy, "recipient")
+  void bob
+})
+
 // --- POST /rooms/:code/claim (PLAN-02 step 3: the D3-amended name claim, ---
 // --- the spectator/member split, and the drain the page runs) ---------------
 

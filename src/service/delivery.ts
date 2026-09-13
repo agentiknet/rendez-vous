@@ -19,7 +19,13 @@
 import { renderForTier } from "../fanout/render.ts"
 import type { OutboundMessage, Transport } from "../fanout/types.ts"
 import type { RoomStore } from "../rooms/store.ts"
-import { MAX_DELIVERY_ATTEMPTS, type Delivery, type Member } from "../rooms/types.ts"
+import {
+  MAX_DELIVERY_ATTEMPTS,
+  type Delivery,
+  type Member,
+  deliverySeqOf,
+  retentionFloor,
+} from "../rooms/types.ts"
 
 /** Per-send hard timeout. Deliberately NOT the 2s house budget (that is for
  *  probes of things on our own tunnel, reader.ts): this wait covers a real
@@ -63,19 +69,54 @@ export const DELIVERED_RETENTION_MS = 60 * 60 * 1000
  *  newest `MAX_RETAINED_DELIVERED`; keep every `pending` and `failed` one, and
  *  keep the surviving records in their original order.
  *
+ *  `floor` is the room's retention floor (PLAN-02 §3-D6, `retentionFloor`):
+ *  a `delivered` record whose seq is ABOVE it is kept, overriding BOTH axes —
+ *  it is a live pull member's undrained mail, not completed work, and pruning
+ *  it would be the silent-loss fault D6 exists to prevent. Everything else
+ *  prunes exactly as it does today.
+ *
+ *  THE COST THIS REOPENS, BUDGETED (brief C): the count cap existed because
+ *  `RoomStore.persist` serializes the whole store on every write, and the
+ *  floor defeats it for exactly the records a live pull member has not
+ *  drained. Worst case accepted: one busy room fanning out to five pull
+ *  members at a sustained turn every 10 s writes ~5 records/turn ≈ 1 800
+ *  records/hour, and the floor holds everything above the SLOWEST live
+ *  member's ack. Liveness is what bounds it, and the stale release is the
+ *  bound: a member's unacked holdings are capped at ~PULL_STALE_MS (90 s) of
+ *  fan-out ≈ 45 records per member, ≈ 225 records ≈ a few hundred KB of JSON
+ *  per persist in that pathological room — released automatically once the
+ *  member goes stale, with the gap marker telling its tab what happened.
+ *  Without `PULL_STALE_MS` the floor is unbounded (a tab left open pins the
+ *  log forever); with it, the write amplification is finite and self-healing.
+ *
  *  A `delivered` record whose timestamps cannot be parsed is dropped rather
  *  than kept: an undateable record can never age out, which is exactly the
- *  unbounded retention this prune exists to prevent. Survivors are selected by
- *  ARRAY INDEX, not by id, so the prune is correct even on a legacy room whose
- *  length-derived ids collide (`Room.deliverySeq`). */
-export function pruneDeliveries(deliveries: readonly Delivery[], nowMs: number): Delivery[] {
+ *  unbounded retention this prune exists to prevent — unless the floor holds
+ *  it, in which case the stale release is what eventually drops it. Survivors
+ *  are selected by ARRAY INDEX, not by id, so the prune is correct even on a
+ *  legacy room whose length-derived ids collide (`Room.deliverySeq`). */
+export function pruneDeliveries(deliveries: readonly Delivery[], nowMs: number, floor?: number): Delivery[] {
   const keep = new Set<number>()
-  for (let index = deliveries.length - 1; index >= 0 && keep.size < MAX_RETAINED_DELIVERED; index -= 1) {
+  // The floor first: these records survive whatever their age and whatever
+  // the count cap says — overriding BOTH axes (brief C), including the
+  // undateable drop, until the stale release takes the floor away. The cap
+  // below then only counts records it keeps ON ITS OWN authority, so
+  // floor-protected records never crowd the retained tail out.
+  if (floor !== undefined) {
+    for (let index = 0; index < deliveries.length; index += 1) {
+      const delivery = deliveries[index]
+      if (delivery === undefined || delivery.status !== "delivered") continue
+      if (deliverySeqOf(delivery.id) > floor) keep.add(index)
+    }
+  }
+  let capped = 0
+  for (let index = deliveries.length - 1; index >= 0 && capped < MAX_RETAINED_DELIVERED; index -= 1) {
     const delivery = deliveries[index]
-    if (delivery === undefined || delivery.status !== "delivered") continue
+    if (delivery === undefined || delivery.status !== "delivered" || keep.has(index)) continue
     const stamp = Date.parse(delivery.deliveredAt ?? delivery.createdAt)
     if (Number.isNaN(stamp) || nowMs - stamp > DELIVERED_RETENTION_MS) continue
     keep.add(index)
+    capped += 1
   }
   return deliveries.filter((delivery, index) => delivery.status !== "delivered" || keep.has(index))
 }
@@ -188,7 +229,9 @@ export class DeliveryEngine {
         deliveredAt: undefined,
       }))
       await this.store.update(code, {
-        deliveries: pruneDeliveries([...(room.deliveries ?? []), ...created], this.nowMs()),
+        // The prune carries the room's retention floor: a live pull member's
+        // undrained records survive the cap and the age window.
+        deliveries: pruneDeliveries([...(room.deliveries ?? []), ...created], this.nowMs(), retentionFloor(room, this.nowMs())),
         deliverySeq: lastSeq + created.length,
       })
       if (this.autoDrain) {
@@ -227,6 +270,45 @@ export class DeliveryEngine {
     await Promise.all(this.store.list().map((room) => this.drain(room.code)))
   }
 
+  /** The cursor acknowledgement (PLAN-02 step 4, brief A): the client claims
+   *  it has rendered everything up to `seq`. Monotonic — a backwards ack is
+   *  IGNORED, not an error, so a client replaying an old response can never
+   *  rewind the retention floor. On an advancing ack, every delivered record
+   *  of this member at or below `seq` becomes `confirmedBy: "recipient"`:
+   *  the genuinely stronger guarantee (D2), real only because the client
+   *  itself asserted receipt. Never backfilled by a migration — records that
+   *  predate the ack stay honestly unconfirmed until THIS member's own ack
+   *  covers them.
+   *
+   *  CURSOR SEMANTICS (brief F, the cursor-outran-the-record gap): a cursor
+   *  may only advance past records the client ACTUALLY RECEIVED — never to
+   *  the room-wide `deliverySeq`, which can sit past records still `pending`
+   *  (this member's or anyone's). The page therefore acks the highest seq it
+   *  rendered, after rendering (src/web/page.ts), and this endpoint is a
+   *  POST, never a side effect on the GET. A record still pending below an
+   *  acked cursor is closed honestly: when its drain completes it, the pull
+   *  branch above marks it `confirmedBy: "recipient"` — the recipient did
+   *  already receive it. */
+  async ackCursor(code: string, memberId: string, seq: number): Promise<"applied" | "ignored"> {
+    const room = this.store.get(code)
+    if (room === undefined) throw new Error(`unknown room: ${code}`)
+    const member = room.members.find((candidate) => candidate.id === memberId)
+    if (member === undefined) return "ignored"
+    const outcome = await this.store.ackCursor(code, memberId, seq, this.now())
+    if (outcome === "applied") {
+      const deliveries = (this.store.get(code)?.deliveries ?? []).map((delivery) =>
+        delivery.memberId === memberId &&
+        delivery.status === "delivered" &&
+        delivery.confirmedBy === undefined &&
+        deliverySeqOf(delivery.id) <= seq
+          ? { ...delivery, confirmedBy: "recipient" as const }
+          : delivery,
+      )
+      await this.store.update(code, { deliveries })
+    }
+    return outcome
+  }
+
   private async drainRoom(code: string): Promise<void> {
     const room = this.store.get(code)
     if (room === undefined) return
@@ -253,10 +335,17 @@ export class DeliveryEngine {
       const message = this.renderFor(code, delivery, member)
       if (message === undefined) {
         // The pull tier gets nothing over the transport (render.ts) — the
-        // record sits in the outbox where the member drains it. It is
-        // delivered-and-unconfirmed: no `confirmedBy`, because an SSE flush
-        // proves sending, not receipt (PLAN-02 §3-D2, amendment F8).
-        await this.mark(code, delivery.id, { status: "delivered", deliveredAt: this.now() })
+        // record sits in the outbox where the member drains it. Confirmed by
+        // the transport it is not: either the recipient's cursor already
+        // covers this seq (it drained it while the record was still
+        // `pending` — see `ackCursor`'s cursor-semantics note), or it stays
+        // honestly unconfirmed until the ack lands.
+        const alreadyAcked = member.ackedSeq !== undefined && deliverySeqOf(delivery.id) <= member.ackedSeq
+        await this.mark(code, delivery.id, {
+          status: "delivered",
+          deliveredAt: this.now(),
+          ...(alreadyAcked ? { confirmedBy: "recipient" as const } : {}),
+        })
         return
       }
       try {
@@ -349,8 +438,11 @@ export class DeliveryEngine {
     // just marked `delivered` always survives its own prune — it is dated
     // `now`, and `drainRoom` walks pending records in array order, so it is
     // also the highest-indexed delivered one. A caller can still read back the
-    // status it just caused.
-    await this.store.update(code, { deliveries: pruneDeliveries(deliveries, this.nowMs()) })
+    // status it just caused. The prune carries the room's retention floor
+    // (brief C): a live pull member's undrained records survive both axes.
+    await this.store.update(code, {
+      deliveries: pruneDeliveries(deliveries, this.nowMs(), retentionFloor(room, this.nowMs())),
+    })
   }
 
   /** `now()` as epoch millis, for the retention window. Falls back to the real

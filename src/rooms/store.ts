@@ -86,11 +86,13 @@ function isMember(value: unknown): value is Member {
   ) {
     return false
   }
-  // `delivery` and `claim` are optional: members persisted before either
-  // field round-trip without the key (same rule as lastError/deliveredAt on
-  // a Delivery).
+  // `delivery`, `claim`, `ackedSeq` and `ackedAt` are optional: members
+  // persisted before any of these fields existed round-trip without the key
+  // (same rule as lastError/deliveredAt on a Delivery).
   const delivery = "delivery" in value ? value.delivery : undefined
   const claim = "claim" in value ? value.claim : undefined
+  const ackedSeq = "ackedSeq" in value ? value.ackedSeq : undefined
+  const ackedAt = "ackedAt" in value ? value.ackedAt : undefined
   return (
     isString(value.id) &&
     isString(value.displayName) &&
@@ -98,6 +100,8 @@ function isMember(value: unknown): value is Member {
     isAddress(value.address) &&
     (delivery === undefined || isMemberDelivery(delivery)) &&
     (claim === undefined || isString(value.claim)) &&
+    (ackedSeq === undefined || (typeof ackedSeq === "number" && Number.isInteger(ackedSeq) && ackedSeq >= 0)) &&
+    isStringOrUndefined(ackedAt) &&
     isString(value.joinedAt)
   )
 }
@@ -486,6 +490,39 @@ export class RoomStore {
     room.updatedAt = new Date().toISOString()
     await this.enqueueWrite()
     return removed
+  }
+
+  /** Persist one member's cursor acknowledgement (PLAN-02 step 4, brief A).
+   *
+   *  MONOTONIC on the seq: an ack that would move `ackedSeq` backwards (or
+   *  keep it where it is) does not touch it — a client replaying an old
+   *  response must not rewind the retention floor. The wall-clock is
+   *  refreshed in BOTH cases: re-asserting a cursor is still liveness
+   *  evidence, and liveness (not the cursor) is what `pullMemberStale`
+   *  reads — a client that keeps posting its unchanged cursor stays live
+   *  and keeps holding its floor legitimately, because it really did
+   *  receive everything up to it.
+   *
+   *  Returns `"applied"` when the cursor advanced, `"ignored"` otherwise
+   *  (backwards/no-op ack, or a member removed between the caller's auth
+   *  and this write). */
+  async ackCursor(code: string, memberId: string, seq: number, at: string): Promise<"applied" | "ignored"> {
+    const normalized = normalizeCode(code)
+    if (normalized === undefined) {
+      throw new Error(`invalid room code: ${code}`)
+    }
+    const room = this.rooms.get(normalized)
+    if (room === undefined) {
+      throw new Error(`unknown room: ${normalized}`)
+    }
+    const member = room.members.find((candidate) => candidate.id === memberId)
+    if (member === undefined) return "ignored"
+    const applied = seq > (member.ackedSeq ?? 0)
+    if (applied) member.ackedSeq = seq
+    member.ackedAt = at
+    room.updatedAt = at
+    await this.enqueueWrite()
+    return applied ? "applied" : "ignored"
   }
 
   async update(
