@@ -311,6 +311,11 @@ function rendezvousListResult(address: Address, lookup: AddressLookup, nowMs: nu
   const active = lookup.kind === "one"
   const rooms = matches.map(({ room, member }) => ({
     code: room.code,
+    // BRIEF-20: the slug is the room's NAME and is not secret — it is what a
+    // surface may display. `code` above is the capability to JOIN and travels
+    // in this payload only so the panel can fetch `/r/:code/state` and address
+    // a send; it must never be rendered. See `roomIdentityLabel`.
+    slug: room.slug,
     memberId: member.id,
     displayName: member.displayName,
     tier: member.tier,

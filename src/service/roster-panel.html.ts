@@ -90,6 +90,9 @@ export interface PanelDocument {
  *  degrade to a visible "we do not know", never to a confident wrong value. */
 export interface RosterListRoom {
   readonly code?: string
+  /** BRIEF-20: the room's NAME. This is the only room identifier the panel
+   *  may render; `code` above is the join capability and stays in JS values. */
+  readonly slug?: string
   readonly memberId?: string
   readonly displayName?: string
   readonly tier?: string
@@ -153,8 +156,14 @@ export interface RosterPlan {
  * link, no QR, no `href`, no `data-` attribute — those affordances are
  * exactly what turns a displayed identity into a one-click join.
  */
-export const roomIdentityLabel = (room: { readonly code?: string }): string => {
-  return typeof room.code === "string" ? room.code : ""
+export const roomIdentityLabel = (room: { readonly slug?: string }): string => {
+  // BRIEF-20 swapped this body, as this comment block anticipated. It reads
+  // the SLUG — the room's name, safe to print, forward and screenshot — and
+  // deliberately does NOT fall back to `code` when the slug is missing: a
+  // fallback would restore the very leak the split removed, silently, on
+  // exactly the rooms whose data is oldest. A room with no slug renders as
+  // unnamed, which is visibly wrong and therefore gets fixed.
+  return typeof room.slug === "string" ? room.slug : ""
 }
 
 /**

@@ -15,6 +15,7 @@ import {
   unreadLabelOf,
   type PanelDocument,
   type PanelElement,
+  type RosterListRoom,
   type RosterRowView,
 } from "../../src/service/roster-panel.html.ts"
 
@@ -136,8 +137,13 @@ test("the shipped panel has no join affordance anywhere: no href, no anchor, no 
 })
 
 test("roomIdentityLabel is the single accessor, and planRosterRows is its only call site per render", () => {
-  assert.equal(roomIdentityLabel({ code: "RDV-AAAA" }), "RDV-AAAA", "today it is the code; BRIEF-20 swaps the body")
-  assert.equal(roomIdentityLabel({}), "", "a room with no code has no identity to show, not a crash")
+  assert.equal(roomIdentityLabel({ slug: "harbor-lantern-ember" }), "harbor-lantern-ember", "BRIEF-20: the label is the slug")
+  assert.equal(roomIdentityLabel({}), "", "a room with no slug renders unnamed, not a crash")
+  // The arm that matters: a room carrying a code but no slug must render
+  // NOTHING. A fallback to `code` here would restore the leak the split
+  // removed, silently, on exactly the rooms whose data is oldest.
+  const sluglessButCoded: RosterListRoom = { code: "RDV-AAAA" }
+  assert.equal(roomIdentityLabel(sluglessButCoded), "", "a slugless room must never fall back to showing its join code")
 
   // One call site: the embedded script names it exactly twice — once in the
   // `const roomIdentityLabel = …` definition planRosterRows closes over, and
@@ -168,12 +174,16 @@ test("planRosterRows keeps the ambiguity flag and marks exactly the active room"
   const plan = planRosterRows({
     ambiguous: false,
     rooms: [
-      { code: "RDV-AAAA", presence: "present", presenceBasis: "acked", memberCount: 2, unread: 0, active: true, displayName: "Alice" },
-      { code: "RDV-BBBB", presence: "away", presenceBasis: "acked", memberCount: 5, unread: 3, active: false, displayName: "Alice" },
+      { code: "RDV-AAAA", slug: "harbor-lantern-ember", presence: "present", presenceBasis: "acked", memberCount: 2, unread: 0, active: true, displayName: "Alice" },
+      { code: "RDV-BBBB", slug: "copper-meadow-signal", presence: "away", presenceBasis: "acked", memberCount: 5, unread: 3, active: false, displayName: "Alice" },
     ],
   })
   assert.equal(plan.ambiguous, false)
-  assert.deepEqual(plan.rows.map((r) => r.identity), ["RDV-AAAA", "RDV-BBBB"])
+  assert.deepEqual(plan.rows.map((r) => r.identity), ["harbor-lantern-ember", "copper-meadow-signal"])
+  assert.ok(
+    !plan.rows.some((r) => r.identity.includes("RDV-")),
+    "BRIEF-20: a row's rendered identity is the slug — a join code must never reach it",
+  )
   assert.deepEqual(plan.rows.map((r) => r.active), [true, false], "exactly one row may carry the active pointer")
   assert.deepEqual(plan.rows.map((r) => r.unreadLabel), ["", "3"])
 
