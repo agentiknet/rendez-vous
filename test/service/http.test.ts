@@ -937,6 +937,215 @@ test("GET /rooms/:code/outbox answers Accept: text/event-stream with the same re
   assert.equal(frames[2]?.cursor, 2)
 })
 
+// --- POST /rooms/:code/agui (BRIEF-04: AG-UI on the room service) ---------
+
+function aguiRunBody(overrides: { messages?: unknown[]; forwardedProps?: Record<string, unknown> } = {}): string {
+  return JSON.stringify({
+    threadId: "thread-1",
+    runId: "run-1",
+    messages: overrides.messages ?? [],
+    ...(overrides.forwardedProps !== undefined ? { forwardedProps: overrides.forwardedProps } : {}),
+  })
+}
+
+test("POST /rooms/:code/agui refuses a wrong or absent member token, and 404s an unknown room — same resolution as the outbox drain (D4)", async () => {
+  const { baseUrl, code, alice } = await outboxHarness()
+
+  const absent = await fetch(`${baseUrl}/rooms/${code}/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: aguiRunBody(),
+  })
+  assert.equal(absent.status, 401)
+  assert.equal((await readJson(absent)).error, "unauthorized")
+
+  const wrong = await fetch(`${baseUrl}/rooms/${code}/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${memberToken(code, alice.id, "wrong-secret")}` },
+    body: aguiRunBody(),
+  })
+  assert.equal(wrong.status, 401)
+  assert.equal((await readJson(wrong)).error, "unauthorized")
+
+  const unknown = await fetch(`${baseUrl}/rooms/RDV-ZZZZ/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...aliceHeaders(code, alice) },
+    body: aguiRunBody(),
+  })
+  assert.equal(unknown.status, 404)
+})
+
+test("POST /rooms/:code/agui never carries another member's delivery on the wire (D4, filtered before the bytes leave — written fresh here, not assumed from outboxFor)", async () => {
+  const { store, baseUrl, code, alice, bob } = await outboxHarness()
+  await store.update(code, {
+    deliverySeq: 2,
+    deliveries: [
+      outboxDelivery("d1", alice.id, "for Chloe's eyes only"),
+      outboxDelivery("d2", bob.id, "for Bob's phone only"),
+    ],
+  })
+
+  const res = await fetch(`${baseUrl}/rooms/${code}/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...aliceHeaders(code, alice) },
+    body: aguiRunBody(),
+  })
+  assert.equal(res.status, 200)
+  const frames = await readSseRecords(res, 20)
+
+  assert.ok(!JSON.stringify(frames).includes("for Bob's phone only"), "member B's record must not be on the wire")
+  const content = frames.find((frame) => frame.type === "TEXT_MESSAGE_CONTENT")
+  assert.equal(content?.delta, "for Chloe's eyes only")
+  assert.equal(frames[0]?.type, "RUN_STARTED")
+  assert.equal(frames[frames.length - 1]?.type, "RUN_FINISHED")
+})
+
+test("POST /rooms/:code/agui: an explicitly presented `since` below the low-water mark fires the gap CUSTOM event before any TEXT_MESSAGE_START; an omitted `since` never does (D2/D3, docs/OUTBOX.md §8)", async () => {
+  const { store, baseUrl, code, alice } = await outboxHarness()
+  await store.update(code, {
+    deliverySeq: 8,
+    deliveryLowWater: 6,
+    deliveries: [outboxDelivery("d7", alice.id, "oldest she still has"), outboxDelivery("d8", alice.id, "newest")],
+  })
+
+  const withSince = await fetch(`${baseUrl}/rooms/${code}/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...aliceHeaders(code, alice) },
+    body: aguiRunBody({ forwardedProps: { since: 3 } }),
+  })
+  assert.equal(withSince.status, 200)
+  const framesWithSince = await readSseRecords(withSince, 20)
+  assert.equal(framesWithSince[0]?.type, "RUN_STARTED")
+  assert.equal(framesWithSince[1]?.type, "CUSTOM", "the gap must come before any transcript content")
+  assert.equal(framesWithSince[1]?.name, "rdv.outbox.gap")
+  assert.equal(
+    framesWithSince.findIndex((f) => f.type === "TEXT_MESSAGE_START"),
+    3,
+    "the gap precedes the first message (index 2 is that message's own kind CUSTOM event)",
+  )
+
+  const omitted = await fetch(`${baseUrl}/rooms/${code}/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...aliceHeaders(code, alice) },
+    body: aguiRunBody(),
+  })
+  assert.equal(omitted.status, 200)
+  const framesOmitted = await readSseRecords(omitted, 20)
+  assert.ok(
+    !framesOmitted.some((f) => f.type === "CUSTOM" && f.name === "rdv.outbox.gap"),
+    "omitting since must never claim a loss that never existed",
+  )
+})
+
+test("POST /rooms/:code/agui carries Delivery.kind through a CUSTOM event for say, whisper and system alike — a whisper must not render identically to a broadcast (D5)", async () => {
+  const { store, baseUrl, code, alice } = await outboxHarness()
+  await store.update(code, {
+    deliverySeq: 3,
+    deliveries: [
+      outboxDelivery("d1", alice.id, "a public say", "pending", "say"),
+      outboxDelivery("d2", alice.id, "a private whisper", "pending", "whisper"),
+      outboxDelivery("d3", alice.id, "a room notice", "pending", "system"),
+    ],
+  })
+
+  const res = await fetch(`${baseUrl}/rooms/${code}/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...aliceHeaders(code, alice) },
+    body: aguiRunBody(),
+  })
+  assert.equal(res.status, 200)
+  const frames = await readSseRecords(res, 20)
+
+  const kindFor = (messageId: string): unknown => {
+    const event = frames.find(
+      (f) => f.type === "CUSTOM" && f.name === "rdv.outbox.kind" && isRecord(f.value) && f.value.messageId === messageId,
+    )
+    return isRecord(event?.value) ? event.value.kind : undefined
+  }
+  assert.equal(kindFor("d1"), "say")
+  assert.equal(kindFor("d2"), "whisper")
+  assert.equal(kindFor("d3"), "system")
+})
+
+test("POST /rooms/:code/agui never acks a cursor on its own — writing frames to the wire is not the client rendering them (D7)", async () => {
+  const { store, baseUrl, code, alice } = await outboxHarness()
+  await store.update(code, {
+    deliverySeq: 2,
+    deliveries: [outboxDelivery("d1", alice.id, "one"), outboxDelivery("d2", alice.id, "two")],
+  })
+
+  const res = await fetch(`${baseUrl}/rooms/${code}/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...aliceHeaders(code, alice) },
+    body: aguiRunBody(),
+  })
+  assert.equal(res.status, 200)
+  await readSseRecords(res, 20)
+
+  const room = store.get(code)
+  const member = room?.members.find((m) => m.id === alice.id)
+  assert.equal(member?.ackedSeq, undefined, "absence stays the honest value — this endpoint must not auto-ack")
+})
+
+test("POST /rooms/:code/agui routes a trailing user message to the SAME send path /rooms/:code/send uses (D6) — the daemon prompt shows it arrived, prefixed exactly as room-web already is", async () => {
+  const { baseUrl, daemon, sessionId, code } = await newRoomHarness()
+
+  const claimRes = await fetch(`${baseUrl}/rooms/${code}/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ displayName: "Chloe" }),
+  })
+  assert.equal(claimRes.status, 200)
+  const claimBody = await readJson(claimRes)
+  const token = typeof claimBody.memberToken === "string" ? claimBody.memberToken : undefined
+  assert.ok(typeof token === "string", "claim must hand back a bearer token")
+
+  const res = await fetch(`${baseUrl}/rooms/${code}/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      threadId: "t1",
+      runId: "r1",
+      messages: [{ id: "m1", role: "user", content: "hi from AG-UI" }],
+    }),
+  })
+  assert.equal(res.status, 200)
+  await readSseRecords(res, 20)
+
+  const promptRequests = daemon.requestsReceived.filter((r) => r.path === `/sessions/${sessionId}/prompt`)
+  assert.equal(promptRequests.length, 1, "the message must reach the fan-in exactly once, not be reimplemented")
+  const body = promptRequests[0]?.body
+  assert.ok(isRecord(body))
+  if (isRecord(body)) assert.equal(body.prompt, "[Chloe · room-web] hi from AG-UI")
+})
+
+test("POST /rooms/:code/agui: a run with no trailing user message is a pure reconnect and must work — nothing is sent (D6)", async () => {
+  const { baseUrl, daemon, sessionId, code } = await newRoomHarness()
+
+  const claimRes = await fetch(`${baseUrl}/rooms/${code}/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ displayName: "Dana" }),
+  })
+  const claimBody = await readJson(claimRes)
+  const token = typeof claimBody.memberToken === "string" ? claimBody.memberToken : undefined
+  assert.ok(typeof token === "string")
+
+  const before = daemon.requestsReceived.filter((r) => r.path === `/sessions/${sessionId}/prompt`).length
+  const res = await fetch(`${baseUrl}/rooms/${code}/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ threadId: "t1", runId: "r1", messages: [] }),
+  })
+  assert.equal(res.status, 200)
+  const frames = await readSseRecords(res, 20)
+  assert.equal(frames[0]?.type, "RUN_STARTED")
+  assert.equal(frames[frames.length - 1]?.type, "RUN_FINISHED")
+
+  const after = daemon.requestsReceived.filter((r) => r.path === `/sessions/${sessionId}/prompt`).length
+  assert.equal(after, before, "a pure reconnect must not create a prompt")
+})
+
 // --- POST /rooms/:code/outbox/cursor (PLAN-02 step 4: the ack) --------------
 
 test("GET /rooms/:code/outbox fires the gap marker from the room-wide oldest, but ONLY for a legacy room with no low-water mark (brief E; scope narrowed by brief 12)", async () => {

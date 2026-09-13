@@ -18,12 +18,20 @@ import { joinLinks } from "../links/index.ts"
 import type { Room, Tier, Delivery, Member } from "../rooms/types.ts"
 import { ROUTED_PROVIDERS, deliverySeqOf, pullMemberStale } from "../rooms/types.ts"
 import { renderRoomNotFoundPage, renderRoomPage } from "../web/page.ts"
+import {
+  newUserMessageText,
+  outboxToAguiEvents,
+  parseRunAgentInput,
+  runErrorEvent,
+  sinceFromInput,
+  type AguiEvent,
+} from "../audience/agui.ts"
 import { proxyArtifact, publicArtifactUrl } from "./artifact-proxy.ts"
 import { ArtifactRenderStore } from "./artifact-renders.ts"
 import { createMcpCanvakitHandler, defaultMcpCanvakitDeps, type McpResponse } from "./mcp-canvakit.ts"
 import { bearerOf, createMcpRoomHandler, memberToken, tokensMatch } from "./mcp-room.ts"
 import { getSessionBusy, type DaemonExtraOptions } from "./daemon-extra.ts"
-import type { RoomService } from "./room-service.ts"
+import type { RoomService, RoomWebSendOutcome } from "./room-service.ts"
 import { MediaStore, type IngressMediaRecord } from "./media-store.ts"
 
 /** The `Room` shape handed to any client-facing surface — the JSON API and
@@ -816,6 +824,146 @@ async function handleRoomOutbox(
   }
 }
 
+/** `RoomWebSendOutcome` → a `RUN_ERROR` message, or `undefined` for a send
+ *  that succeeded. No `default` arm (`contract.ts`'s `kindOf` pattern): a
+ *  new outcome kind must be routed here explicitly or this fails to
+ *  compile, rather than silently falling through as success. */
+function sendFailureMessage(outcome: RoomWebSendOutcome): string | undefined {
+  switch (outcome.kind) {
+    case "sent":
+    case "delivered":
+      return undefined
+    case "unknown-code":
+      return "room not found"
+    case "no-session":
+      return "room has no active session"
+    case "name-claimed":
+      return NAME_TAKEN_MESSAGE
+  }
+}
+
+/** `POST /rooms/:code/agui` (BRIEF-04) — the AG-UI reading of the same
+ *  per-member outbox `handleRoomOutbox` drains, for any AG-UI client
+ *  (CopilotKit and friends) to become a room surface the way a browser tab
+ *  already does by polling the outbox. The room page is untouched and keeps
+ *  polling; this is purely additive.
+ *
+ *  A run here is BOUNDED, unlike the outbox SSE arm's indefinite follow:
+ *  one POST replays exactly what `outboxFor` returns for the presented
+ *  `since` and closes with `RUN_FINISHED`. AG-UI has no resume-from-cursor
+ *  concept of its own (the tension this brief exists to manage), so the
+ *  `STATE_SNAPSHOT` emitted on every run is what a reconnecting client has
+ *  to present `since` from on its NEXT run (D3) — the transport of the
+ *  drain stays a client-side choice either way (`docs/OUTBOX.md` §10).
+ *
+ *  D7: nothing here acks a cursor. Writing bytes to a socket is not a human
+ *  reading them (`docs/OUTBOX.md` §6) — an AG-UI client that never calls
+ *  `POST /rooms/:code/outbox/cursor` simply never produces a `"recipient"`
+ *  confirmation for what this endpoint sends, and that absence is the
+ *  honest value, not a gap to paper over here. */
+async function handleRoomAgui(
+  service: RoomService,
+  req: IncomingMessage,
+  res: ServerResponse,
+  encodedCode: string,
+): Promise<void> {
+  const code = decodeURIComponent(encodedCode)
+  const room = service.getRoom(code)
+  if (room === undefined) {
+    sendJson(res, 404, { error: "not_found" })
+    return
+  }
+  // D4: the member comes from the SAME bearer resolution the outbox drain
+  // uses — never from a body field. AG-UI has no recipient concept, and
+  // needs none: the per-member stream IS the addressing, whisper included.
+  const member = resolveOutboxMember(room, code, req.headers.authorization)
+  if (member === undefined) {
+    // A wrong or absent token must reveal nothing — not even the roster.
+    sendJson(res, 401, { error: "unauthorized" })
+    return
+  }
+
+  const parsed = parseRunAgentInput(await readJsonBody(req))
+  if ("error" in parsed) {
+    sendJson(res, 400, { error: parsed.error })
+    return
+  }
+  const { input } = parsed
+
+  const controller = new AbortController()
+  req.on("close", () => controller.abort())
+
+  res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache",
+    connection: "keep-alive",
+  })
+  res.flushHeaders()
+
+  const writeEvent = (event: AguiEvent): void => {
+    res.write(`data: ${JSON.stringify(event)}\n\n`)
+  }
+
+  // `outboxToAguiEvents` brackets its own output with RUN_STARTED/
+  // RUN_FINISHED (tested standalone, no socket). This flag exists only so
+  // the send-failure arm and the catch-all below don't ALSO write a
+  // RUN_STARTED once that self-bracketed run of events has already opened
+  // with its own — never two RUN_STARTED frames in one response.
+  let started = false
+
+  try {
+    // D6: a new user message rides this SAME POST, routed to whatever
+    // `/rooms/:code/send` already calls — never reimplemented, never
+    // bypassing the fan-in. A run whose last message is not a fresh user
+    // turn (a pure reconnect) sends nothing, which is normal.
+    const text = newUserMessageText(input)
+    if (text !== undefined) {
+      const outcome = await service.sendFromRoomWeb(code, member.displayName, text, member.claim)
+      const failure = sendFailureMessage(outcome)
+      if (failure !== undefined) {
+        writeEvent({ type: "RUN_STARTED", threadId: input.threadId, runId: input.runId })
+        writeEvent(runErrorEvent(failure))
+        return
+      }
+    }
+
+    // D3: the same `sinceGiven` distinction the HTTP outbox route makes —
+    // an omitted `since` must never be told it lost something that never
+    // existed (`docs/OUTBOX.md` §8).
+    const { since, sinceGiven } = sinceFromInput(input)
+    // D1: the SAME `outboxFor` the SSE outbox arm calls — no second read
+    // path, no re-derived "which records are mine".
+    const snapshot = service.getRoom(code) ?? room
+    const outbox = outboxFor(snapshot, member, since, sinceGiven)
+    started = true
+    for (const event of outboxToAguiEvents(input.threadId, input.runId, {
+      since,
+      cursor: outbox.cursor,
+      pruned: outbox.pruned,
+      lowWater: snapshot.deliveryLowWater,
+      deliveries: outbox.deliveries,
+    })) {
+      writeEvent(event)
+    }
+  } catch (error) {
+    // A stream that ends quietly is absence reading as delivery: an actual
+    // failure gets a RUN_ERROR frame, never a silent close. A genuine client
+    // disconnect throws here too (the write above fails against a closed
+    // socket) — `controller.signal.aborted` tells the two apart, so a
+    // disconnect does not attempt a second, equally doomed write.
+    if (!controller.signal.aborted) {
+      try {
+        if (!started) writeEvent({ type: "RUN_STARTED", threadId: input.threadId, runId: input.runId })
+        writeEvent(runErrorEvent(error instanceof Error ? error.message : String(error)))
+      } catch {
+        // The write itself failed — the socket is genuinely gone.
+      }
+    }
+  } finally {
+    res.end()
+  }
+}
+
 /** `GET /r/:code/media/:id` (docs/DELIVERABLE.md) — the link every delivery
  *  preview points at, extended to also serve ingress media records
  *  (docs/MULTIMODAL.md) with their stored mime. An unknown room or media id
@@ -1178,6 +1326,17 @@ async function handle(
       return
     }
     await handleRoomOutbox(service, req, res, encodedCode, parseSince(url.searchParams.get("since")), url.searchParams.has("since"))
+    return
+  }
+
+  const aguiMatch = /^\/rooms\/([^/]+)\/agui$/.exec(url.pathname)
+  if (aguiMatch !== null && req.method === "POST") {
+    const encodedCode = aguiMatch[1]
+    if (encodedCode === undefined) {
+      sendJson(res, 400, { error: "invalid_code" })
+      return
+    }
+    await handleRoomAgui(service, req, res, encodedCode)
     return
   }
 
