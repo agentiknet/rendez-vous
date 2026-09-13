@@ -20,7 +20,7 @@ import { ROUTED_PROVIDERS, deliverySeqOf, pullMemberStale } from "../rooms/types
 import { renderRoomNotFoundPage, renderRoomPage } from "../web/page.ts"
 import {
   newUserMessageText,
-  outboxToAguiEvents,
+  outboxToAguiEventBody,
   parseRunAgentInput,
   runErrorEvent,
   sinceFromInput,
@@ -911,12 +911,15 @@ async function handleRoomAgui(
     res.write(`data: ${JSON.stringify(event)}\n\n`)
   }
 
-  // `outboxToAguiEvents` brackets its own output with RUN_STARTED/
-  // RUN_FINISHED (tested standalone, no socket). This flag exists only so
-  // the send-failure arm and the catch-all below don't ALSO write a
-  // RUN_STARTED once that self-bracketed run of events has already opened
-  // with its own — never two RUN_STARTED frames in one response.
-  let started = false
+  // BRIEF-07: opened as the very first write, before ANY awaited work that
+  // can take arbitrarily long — `sendFromRoomWeb` below can await a whole
+  // agent turn. A client that gives up before that resolves must see a run
+  // that unambiguously started, never a silent empty 200 (`docs/OUTBOX.md`
+  // §1, absence must never read as delivery). This is the one and only
+  // place this handler writes RUN_STARTED — everything below uses
+  // `outboxToAguiEventBody`, the un-bracketed half of the translation
+  // (agui.ts), so there is never a second one and never zero.
+  writeEvent({ type: "RUN_STARTED", threadId: input.threadId, runId: input.runId })
 
   try {
     // D6: a new user message rides this SAME POST, routed to whatever
@@ -928,7 +931,6 @@ async function handleRoomAgui(
       const outcome = await service.sendFromRoomWeb(code, member.displayName, text, member.claim)
       const failure = sendFailureMessage(outcome)
       if (failure !== undefined) {
-        writeEvent({ type: "RUN_STARTED", threadId: input.threadId, runId: input.runId })
         writeEvent(runErrorEvent(failure))
         return
       }
@@ -942,16 +944,17 @@ async function handleRoomAgui(
     // path, no re-derived "which records are mine".
     const snapshot = service.getRoom(code) ?? room
     const outbox = outboxFor(snapshot, member, since, sinceGiven)
-    started = true
-    for (const event of outboxToAguiEvents(input.threadId, input.runId, {
+    for (const event of outboxToAguiEventBody({
       since,
       cursor: outbox.cursor,
       pruned: outbox.pruned,
       lowWater: snapshot.deliveryLowWater,
       deliveries: outbox.deliveries,
+      roomCode: code,
     })) {
       writeEvent(event)
     }
+    writeEvent({ type: "RUN_FINISHED", threadId: input.threadId, runId: input.runId })
   } catch (error) {
     // A stream that ends quietly is absence reading as delivery: an actual
     // failure gets a RUN_ERROR frame, never a silent close. A genuine client
@@ -960,7 +963,6 @@ async function handleRoomAgui(
     // disconnect does not attempt a second, equally doomed write.
     if (!controller.signal.aborted) {
       try {
-        if (!started) writeEvent({ type: "RUN_STARTED", threadId: input.threadId, runId: input.runId })
         writeEvent(runErrorEvent(error instanceof Error ? error.message : String(error)))
       } catch {
         // The write itself failed — the socket is genuinely gone.

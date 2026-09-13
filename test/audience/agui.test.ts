@@ -4,6 +4,7 @@ import {
   GAP_EVENT_NAME,
   KIND_EVENT_NAME,
   newUserMessageText,
+  outboxToAguiEventBody,
   outboxToAguiEvents,
   parseRunAgentInput,
   sinceFromInput,
@@ -32,7 +33,7 @@ function delivery(id: string, text: string, kind: Delivery["kind"] = "say"): Del
 }
 
 function frame(overrides: Partial<OutboxRunFrame>): OutboxRunFrame {
-  return { since: 0, cursor: 0, pruned: false, lowWater: undefined, deliveries: [], ...overrides }
+  return { since: 0, cursor: 0, pruned: false, lowWater: undefined, deliveries: [], roomCode: "RDV-TEST", ...overrides }
 }
 
 function types(events: readonly AguiEvent[]): string[] {
@@ -47,6 +48,13 @@ test("outboxToAguiEvents brackets every run with RUN_STARTED first and RUN_FINIS
   assert.deepEqual(events[0], { type: "RUN_STARTED", threadId: "t1", runId: "r1" })
   assert.equal(events[events.length - 1]?.type, "RUN_FINISHED")
   assert.deepEqual(events[events.length - 1], { type: "RUN_FINISHED", threadId: "t1", runId: "r1" })
+})
+
+test("outboxToAguiEventBody (BRIEF-07) carries the same body as outboxToAguiEvents minus the RUN_STARTED/RUN_FINISHED bracket — the un-bracketed half a caller can open its own run around", () => {
+  const body = outboxToAguiEventBody(frame({ deliveries: [delivery("d1", "hi")] }))
+  assert.ok(!body.some((event) => event.type === "RUN_STARTED" || event.type === "RUN_FINISHED"))
+  const bracketed = outboxToAguiEvents("t1", "r1", frame({ deliveries: [delivery("d1", "hi")] }))
+  assert.deepEqual(bracketed, [{ type: "RUN_STARTED", threadId: "t1", runId: "r1" }, ...body, { type: "RUN_FINISHED", threadId: "t1", runId: "r1" }])
 })
 
 test("a pruned:true run emits the gap CUSTOM event strictly before the first TEXT_MESSAGE_START (D2)", () => {
@@ -118,11 +126,11 @@ test("each delivery becomes a full TEXT_MESSAGE_START/_CONTENT/_END triple carry
   if (content?.type === "TEXT_MESSAGE_CONTENT") assert.equal(content.delta, "hello there")
 })
 
-test("STATE_SNAPSHOT carries the room's cursor on every run, so a reconnecting client has something to present next (D3)", () => {
-  const events = outboxToAguiEvents("t1", "r1", frame({ cursor: 42 }))
+test("STATE_SNAPSHOT carries the room's cursor and code on every run, so a reconnecting client has something to present next and knows which room it's on (D3, BRIEF-07)", () => {
+  const events = outboxToAguiEvents("t1", "r1", frame({ cursor: 42, roomCode: "RDV-EGCK" }))
   const snapshot = events.find((event) => event.type === "STATE_SNAPSHOT")
   assert.ok(snapshot?.type === "STATE_SNAPSHOT")
-  if (snapshot?.type === "STATE_SNAPSHOT") assert.deepEqual(snapshot.snapshot, { cursor: 42 })
+  if (snapshot?.type === "STATE_SNAPSHOT") assert.deepEqual(snapshot.snapshot, { cursor: 42, roomCode: "RDV-EGCK" })
 })
 
 test("deliveries in a run never carry another member's record — outboxToAguiEvents only ever sees what it is handed", () => {

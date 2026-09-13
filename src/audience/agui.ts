@@ -160,10 +160,14 @@ export interface TextMessageEndEvent {
  *  present next. Carries the ROOM's `deliverySeq` snapshot (`OutboxPayload.
  *  cursor`), not "the highest id we just sent" — same field the JSON/SSE
  *  outbox readings expose today, so a client reading either surface sees
- *  the same number. */
+ *  the same number.
+ *
+ *  BRIEF-07: also carries `roomCode` — a client is connected to exactly one
+ *  room and otherwise has no way to name it (same reasoning as BRIEF-06).
+ *  Not a leak: the caller already holds a member token scoped to this room. */
 export interface StateSnapshotEvent {
   readonly type: "STATE_SNAPSHOT"
-  readonly snapshot: { readonly cursor: number }
+  readonly snapshot: { readonly cursor: number; readonly roomCode: string }
 }
 
 /** AG-UI's only extension point, used twice below (D2's gap, D5's kind) —
@@ -215,18 +219,25 @@ export interface OutboxRunFrame {
   readonly pruned: boolean
   readonly lowWater: number | undefined
   readonly deliveries: readonly Delivery[]
+  readonly roomCode: string
 }
 
-/** The translation itself (D1-D5): `RUN_STARTED`, the gap (if any) strictly
- *  before any message, one `CUSTOM` + `TEXT_MESSAGE_START/CONTENT/END`
- *  triple per delivery (kind first, D5), a `STATE_SNAPSHOT` carrying the
- *  cursor a reconnect should present (D3), and `RUN_FINISHED`. Pure: no
- *  `RUN_ERROR` is ever produced here — a translation of already-fetched
- *  records cannot fail, and `RUN_ERROR` is for the handler's own fallible
- *  steps (parsing the body, routing the inbound send) that happen around
- *  this call, not inside it. */
-export function outboxToAguiEvents(threadId: string, runId: string, frame: OutboxRunFrame): readonly AguiEvent[] {
-  const events: AguiEvent[] = [{ type: "RUN_STARTED", threadId, runId }]
+/** The un-bracketed half of the translation (D1-D5, minus `RUN_STARTED`/
+ *  `RUN_FINISHED`): the gap (if any) strictly before any message, one
+ *  `CUSTOM` + `TEXT_MESSAGE_START/CONTENT/END` triple per delivery (kind
+ *  first, D5), then a `STATE_SNAPSHOT` carrying the cursor a reconnect
+ *  should present (D3). Pure: no `RUN_ERROR` is ever produced here — a
+ *  translation of already-fetched records cannot fail, and `RUN_ERROR` is
+ *  for the handler's own fallible steps (parsing the body, routing the
+ *  inbound send) that happen around this call, not inside it.
+ *
+ *  Split out (BRIEF-07) so a caller that must open the run BEFORE doing any
+ *  work that can take arbitrarily long (`handleRoomAgui`, ahead of its
+ *  `sendFromRoomWeb` await) can write its own `RUN_STARTED` early and use
+ *  this body without getting a second one — never two `RUN_STARTED` frames
+ *  in one response, and never zero. */
+export function outboxToAguiEventBody(frame: OutboxRunFrame): readonly AguiEvent[] {
+  const events: AguiEvent[] = []
 
   if (frame.pruned) {
     events.push({
@@ -249,7 +260,15 @@ export function outboxToAguiEvents(threadId: string, runId: string, frame: Outbo
     events.push({ type: "TEXT_MESSAGE_END", messageId: delivery.id })
   }
 
-  events.push({ type: "STATE_SNAPSHOT", snapshot: { cursor: frame.cursor } })
-  events.push({ type: "RUN_FINISHED", threadId, runId })
+  events.push({ type: "STATE_SNAPSHOT", snapshot: { cursor: frame.cursor, roomCode: frame.roomCode } })
   return events
+}
+
+/** The self-bracketed translation: `RUN_STARTED`, `outboxToAguiEventBody`,
+ *  `RUN_FINISHED` — kept as the one entry point that is unit-testable with
+ *  no socket (BRIEF-04's reason this module exists at all). A caller that
+ *  needs to open the run before `outboxToAguiEventBody`'s inputs are even
+ *  known (BRIEF-07) uses the body function directly instead of this one. */
+export function outboxToAguiEvents(threadId: string, runId: string, frame: OutboxRunFrame): readonly AguiEvent[] {
+  return [{ type: "RUN_STARTED", threadId, runId }, ...outboxToAguiEventBody(frame), { type: "RUN_FINISHED", threadId, runId }]
 }

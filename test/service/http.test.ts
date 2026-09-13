@@ -13,7 +13,7 @@ import { ArtifactRenderStore } from "../../src/service/artifact-renders.ts"
 import { LocalBooter, type SessionBooter } from "../../src/service/booter.ts"
 import { createHttpServer } from "../../src/service/http.ts"
 import { memberToken } from "../../src/service/mcp-room.ts"
-import { RoomService } from "../../src/service/room-service.ts"
+import { RoomService, type RoomWebSendOutcome } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
 
@@ -212,6 +212,56 @@ async function readSseRecords(res: Response, count: number): Promise<Record<stri
   }
   await reader.cancel().catch(() => undefined)
   return records
+}
+
+/** Like `readSseRecords`, but keeps pumping in the background instead of
+ *  cancelling once a target count is reached — needed to observe a frame
+ *  arriving WHILE later work is still pending, without tearing the stream
+ *  down (BRIEF-07's regression test: RUN_STARTED must be visible before
+ *  `sendFromRoomWeb` resolves). */
+function openSseStream(res: Response): {
+  records: Record<string, unknown>[]
+  waitFor(count: number, timeoutMs?: number): Promise<void>
+  cancel(): Promise<void>
+} {
+  if (res.body === null) throw new Error("stream response has no body")
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  const records: Record<string, unknown>[] = []
+
+  void (async () => {
+    for (;;) {
+      const { value, done } = await reader.read().catch(() => ({ value: undefined, done: true }))
+      if (done || value === undefined) return
+      buffer += decoder.decode(value, { stream: true })
+      let boundary = buffer.indexOf("\n\n")
+      while (boundary !== -1) {
+        const frame = buffer.slice(0, boundary)
+        buffer = buffer.slice(boundary + 2)
+        const dataLine = frame.split("\n").find((line) => line.startsWith("data:"))
+        if (dataLine !== undefined) {
+          const parsed: unknown = JSON.parse(dataLine.slice("data:".length).trim())
+          if (isRecord(parsed)) records.push(parsed)
+        }
+        boundary = buffer.indexOf("\n\n")
+      }
+    }
+  })()
+
+  return {
+    records,
+    async waitFor(count: number, timeoutMs = 2000): Promise<void> {
+      const start = Date.now()
+      while (records.length < count) {
+        if (Date.now() - start > timeoutMs) throw new Error("openSseStream.waitFor timed out")
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+    },
+    async cancel(): Promise<void> {
+      await reader.cancel().catch(() => undefined)
+    },
+  }
 }
 
 test("GET /rooms/:code/stream replays from since=0, filtered to the kinds the page renders", async () => {
@@ -1140,13 +1190,64 @@ test("POST /rooms/:code/agui routes a trailing user message to the SAME send pat
     }),
   })
   assert.equal(res.status, 200)
-  await readSseRecords(res, 20)
+  const frames = await readSseRecords(res, 20)
+  assert.equal(
+    frames.filter((f) => f.type === "RUN_STARTED").length,
+    1,
+    "exactly one RUN_STARTED — the early open must not double up with outboxToAguiEventBody's own bracket (BRIEF-07)",
+  )
+  assert.equal(frames.filter((f) => f.type === "RUN_FINISHED").length, 1)
+  const snapshot = frames.find((f) => f.type === "STATE_SNAPSHOT")
+  assert.equal(isRecord(snapshot?.snapshot) ? snapshot.snapshot.roomCode : undefined, code, "STATE_SNAPSHOT names the room the client is on (BRIEF-07)")
 
   const promptRequests = daemon.requestsReceived.filter((r) => r.path === `/sessions/${sessionId}/prompt`)
   assert.equal(promptRequests.length, 1, "the message must reach the fan-in exactly once, not be reimplemented")
   const body = promptRequests[0]?.body
   assert.ok(isRecord(body))
   if (isRecord(body)) assert.equal(body.prompt, "[Chloe · room-web] hi from AG-UI")
+})
+
+test("POST /rooms/:code/agui writes RUN_STARTED before awaiting the room's send — a client that gives up mid-turn has still seen a run that started, never a silent empty response (BRIEF-07)", async () => {
+  const { baseUrl, service, code } = await newRoomHarness()
+
+  const claimRes = await fetch(`${baseUrl}/rooms/${code}/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ displayName: "Faye" }),
+  })
+  const claimBody = await readJson(claimRes)
+  const token = typeof claimBody.memberToken === "string" ? claimBody.memberToken : undefined
+  assert.ok(typeof token === "string")
+
+  let releaseSend: (() => void) | undefined
+  const blockedSend = new Promise<void>((resolve) => {
+    releaseSend = resolve
+  })
+  const originalSendFromRoomWeb = service.sendFromRoomWeb.bind(service)
+  service.sendFromRoomWeb = async (...args: Parameters<typeof originalSendFromRoomWeb>) => {
+    await blockedSend
+    return originalSendFromRoomWeb(...args)
+  }
+
+  const res = await fetch(`${baseUrl}/rooms/${code}/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ threadId: "t1", runId: "r1", messages: [{ id: "m1", role: "user", content: "hi" }] }),
+  })
+  assert.equal(res.status, 200)
+
+  const stream = openSseStream(res)
+  await stream.waitFor(1)
+  assert.equal(stream.records[0]?.type, "RUN_STARTED", "RUN_STARTED must be on the wire while the send is still pending")
+
+  assert.ok(releaseSend !== undefined)
+  releaseSend?.()
+
+  await stream.waitFor(2)
+  const finished = stream.records.find((f) => f.type === "RUN_FINISHED")
+  assert.ok(finished !== undefined, "the run still closes normally once the send resolves")
+  assert.equal(stream.records.filter((f) => f.type === "RUN_STARTED").length, 1)
+  await stream.cancel()
 })
 
 test("POST /rooms/:code/agui: a run with no trailing user message is a pure reconnect and must work — nothing is sent (D6)", async () => {
@@ -1171,9 +1272,39 @@ test("POST /rooms/:code/agui: a run with no trailing user message is a pure reco
   const frames = await readSseRecords(res, 20)
   assert.equal(frames[0]?.type, "RUN_STARTED")
   assert.equal(frames[frames.length - 1]?.type, "RUN_FINISHED")
+  assert.equal(frames.filter((f) => f.type === "RUN_STARTED").length, 1, "a pure reconnect gets exactly one RUN_STARTED too")
 
   const after = daemon.requestsReceived.filter((r) => r.path === `/sessions/${sessionId}/prompt`).length
   assert.equal(after, before, "a pure reconnect must not create a prompt")
+})
+
+test("POST /rooms/:code/agui: a send FAILURE still gets exactly one RUN_STARTED, followed by RUN_ERROR — never zero, never two (BRIEF-07)", async () => {
+  const { baseUrl, service, code } = await newRoomHarness()
+
+  const claimRes = await fetch(`${baseUrl}/rooms/${code}/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ displayName: "Gwen" }),
+  })
+  const claimBody = await readJson(claimRes)
+  const token = typeof claimBody.memberToken === "string" ? claimBody.memberToken : undefined
+  assert.ok(typeof token === "string")
+
+  service.sendFromRoomWeb = async (): Promise<RoomWebSendOutcome> => ({ kind: "no-session" })
+
+  const res = await fetch(`${baseUrl}/rooms/${code}/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify({ threadId: "t1", runId: "r1", messages: [{ id: "m1", role: "user", content: "hi" }] }),
+  })
+  assert.equal(res.status, 200)
+  const frames = await readSseRecords(res, 20)
+
+  assert.equal(frames.filter((f) => f.type === "RUN_STARTED").length, 1)
+  assert.deepEqual(
+    frames.map((f) => f.type),
+    ["RUN_STARTED", "RUN_ERROR"],
+  )
 })
 
 // --- POST /rooms/:code/outbox/cursor (PLAN-02 step 4: the ack) --------------
