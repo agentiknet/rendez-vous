@@ -140,6 +140,11 @@ export interface McpRoomDeps {
   /** The delivery engine behind `say`/`whisper`. Omitting it leaves the
    *  tools unadvertised and uncallable — the step-1 surface, unchanged. */
   readonly deliveries?: McpRoomDeliveries
+  /** The stored-render lookup behind `room_view`'s `artifact` fact. Omitting
+   *  it makes `room_view` report `artifact.rendered: false` — which is why
+   *  it is wired at every real call site: the spectator page and the agent
+   *  must not disagree about whether a document exists. */
+  readonly storedRender?: (code: string) => Promise<{ readonly renderedAt: string } | undefined>
 }
 
 // --- JSON-RPC / MCP wire handling: same hand-rolled surface as canvakit's
@@ -184,7 +189,7 @@ const ROSTER_TOOL = {
 const ROOM_VIEW_TOOL = {
   name: "room_view",
   description:
-    "Render THIS room as a live panel for whoever is looking at this conversation. It shows the SHARED view every member and spectator can already see — code, state, roster, artifact — and nothing private: no whispers, no addressed traffic.",
+    "Render THIS room as a live panel for whoever is looking at this conversation. It shows the SHARED view every member and spectator can already see — code, state, roster, artifact — and nothing private: no whispers, no addressed traffic. The text result reports whether a document is currently rendered (`artifact.rendered` and `artifact.rendered_at`) but NOT its contents: if `rendered` is true, say so — the humans are already looking at it — and do not claim nothing has been rendered.",
   inputSchema: { type: "object", properties: {} },
   _meta: { ui: { resourceUri: ROOM_VIEW_RESOURCE_URI } },
 } as const
@@ -318,8 +323,28 @@ function rosterResult(room: Room): Record<string, unknown> {
  *  too. `state` is normalised to the page's own vocabulary ("live"/"paused"),
  *  not the internal `RoomState` union, so the result reads the same as the
  *  panel it points at. No member name, no transcript fragment: the panel
- *  fetches its own data from the spectator endpoint instead. */
-function roomViewResult(room: Room): Record<string, unknown> {
+ *  fetches its own data from the spectator endpoint instead.
+ *
+ *  `artifact` is a PRESENCE fact, not the document: a boolean and the
+ *  render timestamp, which is ids-and-counts by the file-top HARD RULE (no
+ *  title, no body — the panel and the room page render those themselves).
+ *  It exists because without it the agent has no token anywhere in its
+ *  context saying a document exists, and answers "nothing has been
+ *  rendered" to a human who is looking at the rendered document. That is
+ *  `docs/OUTBOX.md` §1 again — absence read as fact — this time about the
+ *  artifact instead of a delivery.
+ *
+ *  `rendered` mirrors `GET /r/:code/state`'s `artifact.ready` rule for the
+ *  stored-render half ONLY: a stored render counts even in a paused room,
+ *  because that is exactly when a member is still looking at one. A live
+ *  e2b box with no stored render is NOT claimed here — this server has no
+ *  liveness probe, and claiming a box answers when we have not asked is the
+ *  same defect pointed the other way. */
+async function roomViewResult(
+  room: Room,
+  storedRender: McpRoomDeps["storedRender"],
+): Promise<Record<string, unknown>> {
+  const render = storedRender === undefined ? undefined : await storedRender(room.code)
   return {
     content: [
       {
@@ -328,6 +353,10 @@ function roomViewResult(room: Room): Record<string, unknown> {
           code: room.code,
           state: room.state === "paused" ? "paused" : "live",
           member_count: room.members.length,
+          artifact:
+            render === undefined
+              ? { rendered: false }
+              : { rendered: true, rendered_at: render.renderedAt },
         }),
       },
     ],
@@ -452,7 +481,7 @@ export function createMcpRoomHandler(
       }
 
       if (params.name === ROOM_VIEW_TOOL.name) {
-        return ok(id, roomViewResult(room))
+        return ok(id, await roomViewResult(room, deps.storedRender))
       }
 
       if (params.name === SAY_TOOL.name || params.name === WHISPER_TOOL.name) {

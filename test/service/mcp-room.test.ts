@@ -238,6 +238,51 @@ test("tools/list advertises roster and room_view alone until a delivery engine i
   assert.deepEqual(whisper.inputSchema.required, ["text", "to"])
 })
 
+/** The bug this pins: `room_view` used to return code/state/member_count and
+ *  nothing else, so an agent asked "what's on screen?" had no token anywhere
+ *  in its context saying a document existed — and answered "nothing has been
+ *  rendered" to humans who were looking at the rendered document. Measured on
+ *  the live RDV-EGCK room. `docs/OUTBOX.md` §1, pointed at the artifact.
+ *
+ *  A PRESENCE fact only: a boolean and a timestamp. No title, no body — the
+ *  file-top HARD RULE holds, and this result is still safe to project on the
+ *  room's shared screen. */
+test("room_view reports whether a document is rendered, as presence and never contents", async () => {
+  const rooms = [room(ROOM_A, MEMBERS_A)]
+  const call = { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "room_view", arguments: {} } }
+  const payloadOf = (res: ReturnType<typeof asRpc>): Record<string, unknown> => {
+    const content = res.result?.content
+    assert.ok(Array.isArray(content) && content.length === 1)
+    return JSON.parse(String((content[0] as Record<string, unknown>).text)) as Record<string, unknown>
+  }
+
+  // A room with a stored render: rendered, with the store's own timestamp.
+  const withRender = createMcpRoomHandler({
+    rooms: () => rooms,
+    storedRender: async () => ({ renderedAt: "2026-09-13T20:11:00.000Z" }),
+  })
+  const hit = payloadOf(asRpc(await withRender(call, tokenFor(ROOM_A))))
+  assert.equal(hit.code, ROOM_A)
+  assert.equal(hit.member_count, MEMBERS_A.length)
+  assert.deepEqual(hit.artifact, { rendered: true, rendered_at: "2026-09-13T20:11:00.000Z" })
+
+  // Nothing rendered: `rendered: false` and NO timestamp — an absent render
+  // must never carry a time that reads as one.
+  const empty = createMcpRoomHandler({ rooms: () => rooms, storedRender: async () => undefined })
+  assert.deepEqual(payloadOf(asRpc(await empty(call, tokenFor(ROOM_A)))).artifact, { rendered: false })
+
+  // No lookup wired at all: still `false`, never a missing key the model can
+  // read as "the field doesn't apply here".
+  const bare = payloadOf(asRpc(await harness(rooms).handler(call, tokenFor(ROOM_A))))
+  assert.deepEqual(bare.artifact, { rendered: false })
+
+  // The HARD RULE: presence only. Nothing in this result names the document.
+  const serialised = JSON.stringify(hit)
+  for (const key of ["title", "url", "html", "text", "body"]) {
+    assert.equal(serialised.includes(`"${key}"`), false, `room_view leaked ${key}`)
+  }
+})
+
 test("a notification (no id) gets 202 with no body", async () => {
   const { handler } = harness([room(ROOM_A, MEMBERS_A)])
   const res = await handler({ jsonrpc: "2.0", method: "notifications/initialized" }, undefined)

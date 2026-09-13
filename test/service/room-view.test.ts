@@ -79,7 +79,7 @@ test("tools/list includes room_view with its resourceUri, present even with no d
   assert.equal(roomView._meta?.ui?.resourceUri, "ui://room_view/view")
 })
 
-test("tools/call room_view returns code, state and member_count — and nothing else", async () => {
+test("tools/call room_view returns code, state, member_count and artifact presence — and nothing else", async () => {
   const { handler } = harness([room(ROOM_A, MEMBERS_A)])
   const res = asRpc(
     await handler(
@@ -91,8 +91,18 @@ test("tools/call room_view returns code, state and member_count — and nothing 
   assert.equal(res.result?.isError, false)
   const content = res.result?.content as { type: string; text: string }[]
   assert.ok(Array.isArray(content) && content.length === 1)
-  const payload = JSON.parse(content[0]!.text) as { code: string; state: string; member_count: number }
-  assert.deepEqual(payload, { code: ROOM_A, state: "live", member_count: 3 })
+  // `artifact` is presence only — a boolean, plus the render timestamp when
+  // there is one. This harness wires no `storedRender`, so it reads `false`
+  // rather than going missing: a key the model cannot find reads as "does
+  // not apply here", which is how the agent came to tell a room full of
+  // people nothing had been rendered while they looked at the render.
+  const payload = JSON.parse(content[0]!.text) as {
+    code: string
+    state: string
+    member_count: number
+    artifact: { rendered: boolean }
+  }
+  assert.deepEqual(payload, { code: ROOM_A, state: "live", member_count: 3, artifact: { rendered: false } })
 
   // D2, the rule that gets broken first: no member display name and no
   // transcript text anywhere in the serialised result.

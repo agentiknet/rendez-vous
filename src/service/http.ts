@@ -1433,6 +1433,10 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
   const mcpRoom = createMcpRoomHandler({
     rooms: () => service.listRooms(),
     deliveries: service.deliveryEngine,
+    // The SAME lookup `GET /r/:code/state` answers from, deliberately: the
+    // agent's `room_view` and the members' page must never disagree about
+    // whether a document exists.
+    storedRender: getStoredRender,
   })
   const mcpPersonal = createMcpPersonalHandler({
     rooms: () => service.listRooms(),
