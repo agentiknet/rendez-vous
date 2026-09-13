@@ -1441,6 +1441,11 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
   const mcpPersonal = createMcpPersonalHandler({
     rooms: () => service.listRooms(),
     findByAddress: (address) => service.findByAddress(address),
+    // BRIEF-19: `rendezvous_send` is THE inbound path, not a second one —
+    // the same `handleInbound` a Telegram webhook and `/inbound/simulated`
+    // call, so a message sent from the roster panel is fanned in, attributed,
+    // suffixed and outboxed by exactly the code a real message is.
+    sendInbound: (input) => service.handleInbound(input),
   })
   return createServer((req, res) => {
     handle(service, dedup, media, daemon, mcpCanvakit, mcpRoom, mcpPersonal, hasStoredRender, getStoredRender, req, res).catch(

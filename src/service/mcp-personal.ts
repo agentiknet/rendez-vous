@@ -17,43 +17,118 @@
  * file: the address is already in the store, so the token is a pure
  * function of it.
  *
- * Scope, decided (not optional): read-only. `rendezvous_list` is the only
- * tool this server will ever advertise — sending stays on the room-scoped
- * `/mcp/room` mount, which already authenticates a room, not a person.
- * Minting is a CLI-only act (`src/cli.ts`): there is no HTTP route that
- * issues a principal token, because a route that did would be an account
- * system, which is not in scope.
+ * Scope (BRIEF-18 decided read-only; BRIEF-19 adds exactly one write):
+ * `rendezvous_list` reads, and `rendezvous_send` sends AS the principal into
+ * a room they are ALREADY in — identical in every respect to that person
+ * typing the same words on WhatsApp, and routed through the very same
+ * inbound path so fan-out, the outbox and BRIEF-13's R6 suffix all behave
+ * identically. It is deliberately NOT `say`/`whisper`: those are the
+ * AGENT's voice (`AudienceSendKind`), and a human borrowing them would make
+ * the transcript lie about who spoke. Minting stays a CLI-only act
+ * (`src/cli.ts`): there is no HTTP route that issues a principal token,
+ * because a route that did would be an account system.
  *
  * HARD RULE, inherited from mcp-room.ts's file-top rule: every tool result
  * on this server carries ids, counts and booleans — NEVER message text.
- * `rendezvous_list` has nothing else to leak, and anything that lands on
- * top of this file must inherit the rule too.
+ * `rendezvous_list` has nothing else to leak; `rendezvous_send` is HANDED
+ * text and must never echo a word of it back, not in a result and not in an
+ * error — its own result is a room code, a member id and an outcome name.
  */
 
 import { createHmac } from "node:crypto"
 import { env } from "../env.ts"
 import type { AddressLookup, AddressMatch } from "../rooms/store.ts"
-import { deliverySeqOf, pullMemberStale, type Address, type Member, type Room } from "../rooms/types.ts"
+import { deliverySeqOf, pullMemberStale, type Address, type Member, type Room, type Tier } from "../rooms/types.ts"
 import { bearerOf, tokensMatch } from "./mcp-room.ts"
+import { rosterPanelHtml } from "./roster-panel.html.ts"
 import type { McpResponse } from "./mcp-canvakit.ts"
+
+/** What a principal token is allowed to do (BRIEF-19, AMENDMENT 2). The
+ *  capability lives in the token's own DERIVATION, never in a flag the
+ *  server looks up: there is no record of a principal token anywhere, so
+ *  there is nothing to look a flag up IN. Two labels, two different HMACs,
+ *  two different 40-hex strings — a read token cannot be edited into a send
+ *  token, because the secret is what produced it. */
+export type PrincipalCapability = "read" | "send"
+
+/** The label each capability HMACs under. `principal:` is BRIEF-18's
+ *  original read-only derivation and MUST NOT change — every token minted
+ *  before BRIEF-19 keeps working, and keeps being read-only. */
+const PRINCIPAL_LABELS: Readonly<Record<PrincipalCapability, string>> = {
+  read: "principal",
+  send: "principal-rw",
+}
 
 /** The bearer token for `POST /mcp` (BRIEF-18): same family as
  *  `roomAudienceToken`/`memberToken`/`roomRenderToken` — an HMAC over
  *  `env.roomTokenSecret`, 40 hex chars, deterministic in its input so it is
  *  recomputed per call with no shared mutable state. The label is
- *  `principal:<provider>:<contactRef>`, deliberately ignoring
+ *  `principal:<provider>:<contactRef>` (read-only) or
+ *  `principal-rw:<provider>:<contactRef>` (may send), deliberately ignoring
  *  `Address.source` — that field is per-membership incidental (a channel
  *  name, or for email, a subject-line room-code hint), while `provider` +
  *  `contactRef` is the same pair `deliveryFromAddress` treats as identity.
+ *  `read` is the DEFAULT here and in the CLI: a caller who does not say
+ *  `--can-send` does not get a writing token by accident.
  *
  *  CAPABILITY AMPLIFIER — say it here, where the token is derived: a leaked
  *  room code exposes exactly one room; a leaked principal token exposes
  *  EVERY room this address is a member of. It is minted by a CLI command
  *  only (`src/cli.ts`), printed once, to an operator. There is no HTTP
- *  route that issues one — that would be an account system. */
-export function principalToken(address: Address, secret: string): string {
-  return createHmac("sha256", secret).update(`principal:${address.provider}:${address.contactRef}`).digest("hex").slice(0, 40)
+ *  route that issues one — that would be an account system.
+ *
+ *  THERE IS NO WAY TO REVOKE ONE. This is the real cost of BRIEF-19's write
+ *  capability, and it is stated here because this is where the capability is
+ *  created. A principal token is a PURE FUNCTION of (address, secret) with
+ *  no stored state: nothing records that it was minted, so nothing can
+ *  record that it was withdrawn. The only revocation that exists is rotating
+ *  `env.roomTokenSecret`, which invalidates EVERY token of EVERY kind at
+ *  once — every room's audience token, every member's outbox token, every
+ *  render token, every other principal's token — and therefore is not a
+ *  targeted action at all.
+ *
+ *  For a read-only token that is tolerable: the blast radius is reading
+ *  counts and codes. For a `principal-rw` token it is genuinely dangerous:
+ *  a leaked one can SPEAK AS THAT PERSON, in every room they are in,
+ *  FOREVER, and the transcript will attribute every word to them. Mint them
+ *  sparingly, and treat one as compromised the moment it leaves the
+ *  operator's hands.
+ *
+ *  A revocation mechanism is deliberately NOT in this brief — adding one is
+ *  a design with its own storage, its own failure modes and its own brief.
+ *  What is in scope is that the next person cannot fail to know. */
+export function principalToken(address: Address, secret: string, capability: PrincipalCapability = "read"): string {
+  return createHmac("sha256", secret)
+    .update(`${PRINCIPAL_LABELS[capability]}:${address.provider}:${address.contactRef}`)
+    .digest("hex")
+    .slice(0, 40)
 }
+
+/** What one inbound message needs to be indistinguishable from a real one.
+ *  Structurally `RoomService.InboundInput` — spelled out here rather than
+ *  imported so this file keeps depending on nothing but the store's shapes,
+ *  exactly as `mcp-room.ts` depends on the audience CONTRACT and not on the
+ *  delivery engine. */
+export interface PersonalInboundInput {
+  readonly address: Address
+  readonly displayName: string
+  readonly tier: Tier
+  readonly text: string
+}
+
+/** `RoomService.handleInbound`'s outcome, narrowed to the one field this
+ *  file reports. Every arm of that union has a `kind`; the panel and the
+ *  agent both get the NAME of what happened and nothing else — never the
+ *  text, never a fragment of it (file-top HARD RULE). */
+export interface PersonalInboundOutcome {
+  readonly kind: string
+}
+
+/** THE inbound path, injected. Not a second write path: `http.ts` wires this
+ *  straight to `RoomService.handleInbound`, the same function a Telegram
+ *  webhook and `/inbound/simulated` call, so a `rendezvous_send` message is
+ *  fanned in, suffixed and outboxed by exactly the code a real message is. */
+export type PersonalInboundSend = (input: PersonalInboundInput) => Promise<PersonalInboundOutcome>
 
 /** Injectable, so tests can prove auth/roster behaviour without a real
  *  store. `findByAddress` is BRIEF-13's roster query (`RoomStore`), reused
@@ -63,6 +138,11 @@ export interface McpPersonalDeps {
    *  changes between calls must be visible to the next `rendezvous_list`. */
   readonly rooms: () => readonly Room[]
   readonly findByAddress: (address: Address) => AddressLookup
+  /** The inbound path behind `rendezvous_send` (BRIEF-19). Omitting it
+   *  leaves the tool unadvertised and uncallable — the BRIEF-18 read-only
+   *  surface, unchanged — exactly as `McpRoomDeps.deliveries` gates
+   *  `say`/`whisper`. */
+  readonly sendInbound?: PersonalInboundSend
 }
 
 // --- JSON-RPC / MCP wire handling: mcp-room.ts's dialect, unchanged. ----
@@ -72,14 +152,54 @@ const INVALID_REQUEST = -32600
 const METHOD_NOT_FOUND = -32601
 const INVALID_PARAMS = -32602
 
+/** The MCP Apps resource this server serves (spec `2026-01-26`,
+ *  `modelcontextprotocol/ext-apps`): a host that recognises it renders the
+ *  roster panel (`roster-panel.html.ts`) instead of (or alongside)
+ *  `rendezvous_list`'s text result. */
+const ROSTER_RESOURCE_URI = "ui://rendezvous/roster"
+
 /** NO arguments: the principal is fixed by the bearer token, exactly the
  *  reasoning behind `roster`/`room_view` taking none (mcp-room.ts) — an
- *  argument naming an address would be a way to ask about someone else. */
+ *  argument naming an address would be a way to ask about someone else.
+ *
+ *  `_meta.ui.resourceUri` is carried BOTH here (the `tools/list` definition)
+ *  AND on the `tools/call` result (`rendezvousListResult`) — deliberately
+ *  redundant, for exactly the reason `ROOM_VIEW_TOOL` (mcp-room.ts:176) and
+ *  `RENDER_ARTIFACT_TOOL` (mcp-canvakit.ts:166) spell out: hosts differ on
+ *  which one they read, this server is hand-rolled so we own the envelope on
+ *  both ends, and satisfying both readings costs nothing. */
 const RENDEZVOUS_LIST_TOOL = {
   name: "rendezvous_list",
   description:
     "List every room YOUR principal (fixed by your bearer credential — no argument) is currently a member of. Each entry: code, member_id and display_name (your identity in that room), tier, presence (your OWN presence there), presence_basis (\"acked\" if it is backed by a real acknowledgement, \"never-acked\" if it is only dated from when you joined — treat \"never-acked\" as NOT evidence of absence), member_count, unread (records addressed to you above your acked position), active (whether this is your one canonical room), and last_activity_at. `ambiguous: true` means this address holds a membership in more than one room at once — a broken invariant surfaced, not hidden or resolved to a guess; when it is true, no room in the list is `active`, because there is no honest way to pick one. Ids, counts and codes only — never message content.",
   inputSchema: { type: "object", properties: {} },
+  _meta: { ui: { resourceUri: ROSTER_RESOURCE_URI } },
+} as const
+
+/** `rendezvous_send` (BRIEF-19). `roomCode` IS an argument here, unlike every
+ *  other tool on the person-scoped surface: a principal can be in more than
+ *  one room, so "which room" is a real question with no credential to answer
+ *  it. It is not a capability the argument grants — the handler refuses any
+ *  code the principal is not a member of, by name — it only picks among the
+ *  rooms they are already in.
+ *
+ *  This is an INBOUND message, not an agent utterance: it is fanned in as
+ *  that person, on the same path a WhatsApp message takes. Commands (`new`,
+ *  `join`, `leave`, `where`) therefore behave here exactly as they do when
+ *  typed on a phone — deliberately, because "identical in every respect" is
+ *  the whole specification. */
+const RENDEZVOUS_SEND_TOOL = {
+  name: "rendezvous_send",
+  description:
+    "Send a message AS YOU into one of the rooms you are already in — exactly as if you had typed it on your phone. It is attributed to you, not to the agent. `room_code` must name a room YOUR principal is a member of (see rendezvous_list); any other room is refused. Requires a send-capable credential; a read-only one is refused. Returns {room_code, member_id, outcome, accepted} — ids and an outcome name only, never the text back.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      roomCode: { type: "string", description: "A room code from rendezvous_list — one you are a member of." },
+      text: { type: "string", description: "The message, in your own voice." },
+    },
+    required: ["roomCode", "text"],
+  },
 } as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -111,20 +231,44 @@ function unauthorized(id: string | number | null): McpResponse {
   }
 }
 
+/** The address a bearer named, and what that bearer is allowed to do. The
+ *  capability is not stored anywhere and not looked up — it is WHICH
+ *  derivation matched, which is why it cannot be escalated without the
+ *  secret. */
+interface ResolvedPrincipal {
+  readonly address: Address
+  readonly capability: PrincipalCapability
+}
+
 /** Resolve the bearer to the address it names: recompute `principalToken`
  *  per member address currently in the store and compare with
  *  `timingSafeEqual` (via `tokensMatch`), as `resolveRoom` does for room
  *  codes. The token is not reversible, so recompute-and-compare is the only
- *  honest binding. */
-function resolvePrincipal(deps: McpPersonalDeps, authorization: string | undefined): Address | undefined {
+ *  honest binding. BRIEF-19: BOTH derivations are recomputed per address,
+ *  so a `principal-rw` token authenticates everything a `principal` one
+ *  does — a send capability is a superset, never a separate account. */
+function resolvePrincipal(deps: McpPersonalDeps, authorization: string | undefined): ResolvedPrincipal | undefined {
   const provided = bearerOf(authorization)
   if (provided === undefined) return undefined
   for (const room of deps.rooms()) {
     for (const member of room.members) {
-      if (tokensMatch(provided, principalToken(member.address, env.roomTokenSecret))) return member.address
+      if (tokensMatch(provided, principalToken(member.address, env.roomTokenSecret, "read"))) {
+        return { address: member.address, capability: "read" }
+      }
+      if (tokensMatch(provided, principalToken(member.address, env.roomTokenSecret, "send"))) {
+        return { address: member.address, capability: "send" }
+      }
     }
   }
   return undefined
+}
+
+/** The display name the rooms know this address by — the panel's header, and
+ *  the name a `rendezvous_send` message is attributed under. Taken from the
+ *  membership itself, never from an argument: a name a caller could supply
+ *  would be a way to speak under someone else's. */
+function principalDisplayName(matches: readonly AddressMatch[]): string | undefined {
+  return matches[0]?.member.displayName
 }
 
 /** `AddressLookup`'s matches, uniformly: `"none"` cannot occur here (the
@@ -185,7 +329,7 @@ function rendezvousListResult(address: Address, lookup: AddressLookup, nowMs: nu
           principal: {
             provider: address.provider,
             contactRef: address.contactRef,
-            displayName: matches[0]?.member.displayName,
+            displayName: principalDisplayName(matches),
           },
           rooms,
           ambiguous: lookup.kind === "ambiguous",
@@ -193,19 +337,124 @@ function rendezvousListResult(address: Address, lookup: AddressLookup, nowMs: nu
       },
     ],
     isError: false,
+    // Redundant with the `tools/list` definition's `_meta` — see
+    // `RENDEZVOUS_LIST_TOOL`'s doc comment for why both are written.
+    _meta: { ui: { resourceUri: ROSTER_RESOURCE_URI } },
   }
+}
+
+/** A `rendezvous_send` refusal that is NOT a credential problem. It is
+ *  returned as a tool-level JSON-RPC error (200 + `error`), deliberately not
+ *  the 401 `unauthorized` above: a caller with a perfectly good token who
+ *  named a room they are not in needs to be told about MEMBERSHIP, not sent
+ *  down a "check your permissions" dead end — the same distinction
+ *  `callRenderTool` draws in mcp-canvakit.ts. It names no room that was not
+ *  already named by the caller, so it reveals nothing: a code the principal
+ *  is not in produces this answer whether or not the room exists. */
+function membershipRefusal(id: string | number | null, roomCode: string): McpResponse {
+  return fail(
+    id,
+    INVALID_PARAMS,
+    `rendezvous_send: you are not a member of ${roomCode}. This is a membership question — you can only send into rooms you have already joined, and rendezvous_list shows which those are.`,
+  )
+}
+
+/** A `rendezvous_send` refusal for a READ-ONLY principal token (AMENDMENT
+ *  2). Names the reason, because the reason is fixable and the fix is not
+ *  guessable: the capability is baked into the token's derivation, so the
+ *  only remedy is a new token. Never a silent no-op. */
+function readOnlyRefusal(id: string | number | null): McpResponse {
+  return fail(
+    id,
+    INVALID_REQUEST,
+    "rendezvous_send: this principal token was derived read-only, so it can list your rooms but not speak in them. The send capability is part of the token itself, not a setting — mint a new one with `principal-token <provider> <contactRef> --can-send`.",
+  )
+}
+
+/** Outcome kinds from the inbound path that mean NOTHING was routed. Listed
+ *  explicitly rather than inferred, so a new failure arm in
+ *  `InboundOutcome` cannot quietly start reporting `accepted: true`. */
+const UNROUTED_OUTCOMES: readonly string[] = [
+  "unknown-code",
+  "unknown-sender",
+  "not-in-room",
+  "ambiguous",
+  "undeliverable",
+]
+
+/** The `rendezvous_send` result: a room code, a member id and the NAME of
+ *  what the inbound path did. Never the text, never a fragment of it — the
+ *  file-top HARD RULE applies with full force here, because this is the one
+ *  tool on this server that is handed message content at all. */
+function sendResult(roomCode: string, memberId: string, outcome: PersonalInboundOutcome): Record<string, unknown> {
+  const accepted = !UNROUTED_OUTCOMES.includes(outcome.kind)
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({ roomCode, memberId, outcome: outcome.kind, accepted }),
+      },
+    ],
+    isError: !accepted,
+  }
+}
+
+/** `rendezvous_send`'s whole body. Membership is checked against the SAME
+ *  `findByAddress` lookup `rendezvous_list` reports from — one scan, one
+ *  truth — and the send itself is `deps.sendInbound`, which is
+ *  `RoomService.handleInbound` verbatim. Nothing here reimplements routing,
+ *  attribution, fan-out or the R6 suffix; that is the point. */
+async function callSendTool(
+  deps: McpPersonalDeps,
+  principal: ResolvedPrincipal,
+  params: Record<string, unknown>,
+  id: string | number | null,
+): Promise<McpResponse> {
+  const sendInbound = deps.sendInbound
+  if (sendInbound === undefined) {
+    return fail(id, METHOD_NOT_FOUND, `unknown tool: ${RENDEZVOUS_SEND_TOOL.name}`)
+  }
+
+  // Capability before arguments: a read-only token must learn nothing about
+  // whether the room it named exists or holds it as a member.
+  if (principal.capability !== "send") return readOnlyRefusal(id)
+
+  const args = isRecord(params.arguments) ? params.arguments : {}
+  const roomCode = typeof args.roomCode === "string" ? args.roomCode.trim() : ""
+  const text = typeof args.text === "string" ? args.text : ""
+  if (roomCode.length === 0) {
+    return fail(id, INVALID_PARAMS, "rendezvous_send: arguments.roomCode must be a room code you are a member of")
+  }
+  if (text.trim().length === 0) {
+    // The error names the FIELD, never the value — an empty message has
+    // nothing to echo, but the rule that keeps it that way is the file-top
+    // HARD RULE, not the emptiness.
+    return fail(id, INVALID_PARAMS, "rendezvous_send: arguments.text must be a non-empty message")
+  }
+
+  const matches = matchesOf(deps.findByAddress(principal.address))
+  const match = matches.find((candidate) => candidate.room.code === roomCode)
+  if (match === undefined) return membershipRefusal(id, roomCode)
+
+  const outcome = await sendInbound({
+    address: principal.address,
+    // The member's OWN name and tier, from the membership — never from an
+    // argument. Attribution has to be a fact about the room, not a claim
+    // the caller makes about itself.
+    displayName: match.member.displayName,
+    tier: match.member.tier,
+    text,
+  })
+  return ok(id, sendResult(match.room.code, match.member.id, outcome))
 }
 
 /**
  * Handle one JSON-RPC 2.0 request body (already JSON.parse'd) with its
  * `Authorization` header value. `mcp-room.ts`'s method surface
  * (`initialize`, `notifications/initialized`, `tools/list`, `tools/call`,
- * `resources/list`, `resources/read`) — this server serves no resources
- * yet, so `resources/list` is always empty and `resources/read` always
- * names an unknown uri, but both methods exist rather than 404ing, for the
- * same reason `http.ts` answers a POST-only MCP endpoint 405 and not 404:
- * an MCP client that gets an unrecognised method shape falls back to OAuth
- * discovery instead of ever calling `tools/call`.
+ * `resources/list`, `resources/read`) — the last two serve BRIEF-19's
+ * roster panel (`ui://rendezvous/roster`), the MCP Apps half of this
+ * server, exactly as they serve `room_view`'s panel on `/mcp/room`.
  */
 export function createMcpPersonalHandler(
   deps: McpPersonalDeps,
@@ -234,31 +483,93 @@ export function createMcpPersonalHandler(
     }
 
     if (method === "tools/list") {
-      return ok(id, { tools: [RENDEZVOUS_LIST_TOOL] })
+      // `rendezvous_send` is advertised only when something can perform it,
+      // exactly as `say`/`whisper` are gated on `deps.deliveries`
+      // (mcp-room.ts). Capability is NOT a listing concern: a read-only
+      // token still sees the tool and still gets a refusal that names why,
+      // which is strictly more useful than a tool that vanishes.
+      const tools = deps.sendInbound === undefined ? [RENDEZVOUS_LIST_TOOL] : [RENDEZVOUS_LIST_TOOL, RENDEZVOUS_SEND_TOOL]
+      return ok(id, { tools })
     }
 
     if (method === "resources/list") {
-      return ok(id, { resources: [] })
+      return ok(id, {
+        resources: [
+          { uri: ROSTER_RESOURCE_URI, name: "rendezvous_roster", mimeType: "text/html;profile=mcp-app" },
+        ],
+      })
     }
 
     if (method === "resources/read") {
       // Bearer checked before the uri, same reason `mcp-room.ts` checks it
       // first: a rejected call must reveal nothing.
-      const address = resolvePrincipal(deps, authorization)
-      if (address === undefined) return unauthorized(id)
-      return fail(id, INVALID_PARAMS, `unknown resource uri: ${String(params.uri)}`)
+      const principal = resolvePrincipal(deps, authorization)
+      if (principal === undefined) return unauthorized(id)
+
+      if (params.uri !== ROSTER_RESOURCE_URI) {
+        return fail(id, INVALID_PARAMS, `unknown resource uri: ${String(params.uri)}`)
+      }
+
+      // The identifying value is BAKED IN, resolved from the bearer — no
+      // query param, no postMessage handshake for identity, no new auth
+      // surface, and above all no token in the bytes: the panel is handed
+      // WHO it is, never HOW to prove it.
+      const matches = matchesOf(deps.findByAddress(principal.address))
+      return ok(id, {
+        contents: [
+          {
+            uri: ROSTER_RESOURCE_URI,
+            mimeType: "text/html;profile=mcp-app",
+            text: rosterPanelHtml(
+              {
+                provider: principal.address.provider,
+                contactRef: principal.address.contactRef,
+                displayName: principalDisplayName(matches),
+              },
+              env.publicUrl,
+            ),
+            // Load-bearing, not decoration. `connectDomains`: the panel
+            // fetches `GET /r/:code/state` from `env.publicUrl` to expand a
+            // row's roster, and a host that sandboxes the iframe without
+            // this allowlist shows "who is there" failing forever.
+            // `resourceDomains`/`frameDomains` are carried for the CSP
+            // schema's own defaults — each maps to a directive that is
+            // `'none'` when the field is omitted, and a spec-compliant host
+            // (unlike the CopilotKit build this was verified against, which
+            // wildcards them) enforces that. This panel nests no iframe
+            // today; `frameDomains` is what keeps that from being a silent
+            // wall the day one is added, and BRIEF-19 requires it.
+            _meta: {
+              ui: {
+                csp: {
+                  connectDomains: [env.publicUrl],
+                  resourceDomains: [env.publicUrl],
+                  frameDomains: [env.publicUrl],
+                },
+              },
+            },
+          },
+        ],
+      })
     }
 
     if (method === "tools/call") {
       // Token checked before anything else: a rejected call must reveal
       // nothing, not even that a principal token would succeed for this
       // shape of request.
-      const address = resolvePrincipal(deps, authorization)
-      if (address === undefined) return unauthorized(id)
+      const principal = resolvePrincipal(deps, authorization)
+      if (principal === undefined) return unauthorized(id)
 
       if (params.name === RENDEZVOUS_LIST_TOOL.name) {
-        const lookup = deps.findByAddress(address)
-        return ok(id, rendezvousListResult(address, lookup, Date.now()))
+        // Read works on BOTH derivations (AMENDMENT 2): a send-capable
+        // token is a superset of a read-only one, and a read-only one keeps
+        // doing exactly what BRIEF-18 minted it for.
+        const lookup = deps.findByAddress(principal.address)
+        return ok(id, rendezvousListResult(principal.address, lookup, Date.now()))
+      }
+
+      if (params.name === RENDEZVOUS_SEND_TOOL.name) {
+        return callSendTool(deps, principal, params, id)
       }
 
       return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(params.name)}`)

@@ -64,13 +64,35 @@ async function serve(): Promise<void> {
  *  no HTTP route that does this (BRIEF-18) — a route that minted principal
  *  tokens would be an account system. `source` plays no part in the token
  *  (`principalToken`'s doc) so any value works; `cli` names where it came
- *  from for anyone reading a persisted room's `member.address` later. */
-function principalTokenCommand(provider: string | undefined, contactRef: string | undefined): void {
+ *  from for anyone reading a persisted room's `member.address` later.
+ *
+ *  READ-ONLY BY DEFAULT (BRIEF-19, AMENDMENT 2). `--can-send` is required to
+ *  mint the `principal-rw` derivation, and the warning below is printed with
+ *  it every single time, because the token that comes out CANNOT BE REVOKED:
+ *  it is a pure function of (address, secret), so nothing records it and
+ *  nothing can withdraw it. The only undo is rotating `RDV_ROOM_TOKEN_SECRET`,
+ *  which invalidates every token of every kind at once. See `principalToken`
+ *  in src/service/mcp-personal.ts for the full statement. */
+function principalTokenCommand(provider: string | undefined, contactRef: string | undefined, flags: readonly string[]): void {
   if (provider === undefined || contactRef === undefined) {
-    console.error("Usage: node src/cli.ts principal-token <provider> <contactRef>")
+    console.error("Usage: node src/cli.ts principal-token <provider> <contactRef> [--can-send]")
     process.exit(1)
   }
-  console.log(principalToken({ provider, source: "cli", contactRef }, env.roomTokenSecret))
+  const unknownFlag = flags.find((flag) => flag !== "--can-send")
+  if (unknownFlag !== undefined) {
+    // A mistyped `--can-send` must NOT silently mint a read-only token that
+    // then fails confusingly at `rendezvous_send`.
+    console.error(`Unknown option: ${unknownFlag}`)
+    console.error("Usage: node src/cli.ts principal-token <provider> <contactRef> [--can-send]")
+    process.exit(1)
+  }
+  const canSend = flags.includes("--can-send")
+  if (canSend) {
+    console.error("WARNING: this token can SEND AS this person, in every room they are in.")
+    console.error("WARNING: it cannot be revoked — a principal token is a pure function of (address, secret),")
+    console.error("WARNING: so the only undo is rotating RDV_ROOM_TOKEN_SECRET, which invalidates EVERY token.")
+  }
+  console.log(principalToken({ provider, source: "cli", contactRef }, env.roomTokenSecret, canSend ? "send" : "read"))
 }
 
 function main(): void {
@@ -83,11 +105,11 @@ function main(): void {
     return
   }
   if (command === "principal-token") {
-    principalTokenCommand(process.argv[3], process.argv[4])
+    principalTokenCommand(process.argv[3], process.argv[4], process.argv.slice(5))
     return
   }
   console.error("Usage: node src/cli.ts serve")
-  console.error("       node src/cli.ts principal-token <provider> <contactRef>")
+  console.error("       node src/cli.ts principal-token <provider> <contactRef> [--can-send]")
   process.exit(1)
 }
 
