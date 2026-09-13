@@ -2,14 +2,16 @@
  * The AG-UI translation (BRIEF-04): a transport-free mapping from the
  * outbox's own vocabulary — `Delivery[]`, a cursor, a `pruned` gap marker —
  * to AG-UI's fixed event vocabulary (`RUN_STARTED`, `TEXT_MESSAGE_*`,
- * `STATE_SNAPSHOT`, `CUSTOM`, …). It is kept free of `node:http` and SSE
+ * `TOOL_CALL_*`, `STATE_SNAPSHOT`, `CUSTOM`, …). It is kept free of
+ * `node:http` and SSE
  * framing for the same reason `src/audience/contract.ts` is kept MCP-free:
  * so it is testable without a socket, and so a second transport (there will
  * be one) inherits these semantics instead of re-deriving them.
  *
  * No `@ag-ui/*` package is installed anywhere in this repo (checked, not
- * assumed — `package.json`, `node_modules`, and the `rdv-copilotkit-host/`
- * directory the brief warns off do not exist in this checkout). BRIEF-04
+ * assumed — `package.json` lists one runtime dependency, `qrcode-generator`;
+ * the CopilotKit harness the brief warns off lives in a sibling directory
+ * outside this repo and pulls none of its deps in here). BRIEF-04
  * anticipates exactly this and calls for hand-rolling the small event
  * vocabulary this module actually emits, in `mcp-room.ts`'s style — no zod,
  * no new dependency. The shapes below are therefore this repo's own
@@ -156,6 +158,36 @@ export interface TextMessageEndEvent {
   readonly messageId: string
 }
 
+/** BRIEF-15. AG-UI's native vocabulary for "the agent called something",
+ *  emitted for a `Delivery.kind === "tool"` record INSTEAD of the text
+ *  triple — never alongside it. A tool record's `text` is `args` JSON, and
+ *  a generic AG-UI client renders `TEXT_MESSAGE_CONTENT` as agent prose:
+ *  emitting both would put a serialised argument object in the transcript
+ *  as something the agent said.
+ *
+ *  `toolCallId` is the `Delivery.id`, the same keying discipline
+ *  `messageId` follows — one record, one id, across every surface that
+ *  reads this outbox. `parentMessageId` is deliberately absent: the outbox
+ *  has no notion of a tool call belonging to a preceding message, and
+ *  inventing a parent id that no `TEXT_MESSAGE_START` ever used would make
+ *  a client nest the call under a message that does not exist. */
+export interface ToolCallStartEvent {
+  readonly type: "TOOL_CALL_START"
+  readonly toolCallId: string
+  readonly toolCallName: string
+}
+
+export interface ToolCallArgsEvent {
+  readonly type: "TOOL_CALL_ARGS"
+  readonly toolCallId: string
+  readonly delta: string
+}
+
+export interface ToolCallEndEvent {
+  readonly type: "TOOL_CALL_END"
+  readonly toolCallId: string
+}
+
 /** D3: the honest slot for the cursor a reconnecting client needs to
  *  present next. Carries the ROOM's `deliverySeq` snapshot (`OutboxPayload.
  *  cursor`), not "the highest id we just sent" — same field the JSON/SSE
@@ -187,6 +219,9 @@ export type AguiEvent =
   | TextMessageStartEvent
   | TextMessageContentEvent
   | TextMessageEndEvent
+  | ToolCallStartEvent
+  | ToolCallArgsEvent
+  | ToolCallEndEvent
   | StateSnapshotEvent
   | CustomEvent
 
@@ -206,6 +241,15 @@ export const GAP_EVENT_NAME = "rdv.outbox.gap"
  *  its own for the distinction. */
 export const KIND_EVENT_NAME = "rdv.outbox.kind"
 
+/** BRIEF-15: the name a `kind: "tool"` record is announced under when it
+ *  carries no `toolName`. Unreachable by construction — `recordToolCall` is
+ *  the only minter and always supplies one — but `Delivery.toolName` is
+ *  optional, so the translation must still produce a well-formed event
+ *  rather than fall through and emit nothing for the record. A record that
+ *  yields zero events is a delivery the client never hears about: §1 again,
+ *  in the translation layer this time. Visibly wrong beats silently absent. */
+export const UNNAMED_TOOL = "rdv.unnamed_tool"
+
 /** What `outboxToAguiEvents` needs: the SAME fields `outboxFor` already
  *  computed (D1) — this function derives nothing from `Room` or `Member`
  *  itself, so there is no second place to get the gap marker, the
@@ -224,8 +268,9 @@ export interface OutboxRunFrame {
 
 /** The un-bracketed half of the translation (D1-D5, minus `RUN_STARTED`/
  *  `RUN_FINISHED`): the gap (if any) strictly before any message, one
- *  `CUSTOM` + `TEXT_MESSAGE_START/CONTENT/END` triple per delivery (kind
- *  first, D5), then a `STATE_SNAPSHOT` carrying the cursor a reconnect
+ *  `CUSTOM` + one triple per delivery (kind first, D5) — the text triple
+ *  for `say`/`whisper`/`system`, the `TOOL_CALL_*` triple for `tool`
+ *  (BRIEF-15) — then a `STATE_SNAPSHOT` carrying the cursor a reconnect
  *  should present (D3). Pure: no `RUN_ERROR` is ever produced here — a
  *  translation of already-fetched records cannot fail, and `RUN_ERROR` is
  *  for the handler's own fallible steps (parsing the body, routing the
@@ -250,7 +295,26 @@ export function outboxToAguiEventBody(frame: OutboxRunFrame): readonly AguiEvent
   // §8): the absence of the CUSTOM event above IS the "false" answer.
 
   for (const delivery of frame.deliveries) {
+    // The kind event is emitted for EVERY record, tool ones included: it is
+    // how a client keyed on `rdv.outbox.kind` tells the four apart, and
+    // dropping it for one kind would make that client's `default` arm the
+    // thing deciding how a tool call renders.
     events.push({ type: "CUSTOM", name: KIND_EVENT_NAME, value: { messageId: delivery.id, kind: delivery.kind } })
+    if (delivery.kind === "tool") {
+      // BRIEF-15: the native TOOL_CALL triple, and NOT the text triple —
+      // see `ToolCallStartEvent`. `text` is already the args JSON, so the
+      // delta is a copy: nothing is re-encoded here, and a client that
+      // `JSON.parse`s the delta gets back exactly what the tool was called
+      // with.
+      events.push({
+        type: "TOOL_CALL_START",
+        toolCallId: delivery.id,
+        toolCallName: delivery.toolName ?? UNNAMED_TOOL,
+      })
+      events.push({ type: "TOOL_CALL_ARGS", toolCallId: delivery.id, delta: delivery.text })
+      events.push({ type: "TOOL_CALL_END", toolCallId: delivery.id })
+      continue
+    }
     events.push({
       type: "TEXT_MESSAGE_START",
       messageId: delivery.id,

@@ -79,6 +79,48 @@ one member.
 of completed work, plus — since step 4 — whatever a live pull member has not
 yet drained. Anything needing durable history needs its own store.
 
+### 2.1 `kind: "tool"` — the agent called something (BRIEF-15)
+
+A fourth kind, alongside `say` / `whisper` / `system`. It records that the
+agent **called a tool** — today only `render_artifact` — so a surface can tell
+the room that the shared document moved.
+
+It rides this queue rather than a second "events" channel on purpose: a
+parallel stream would have to re-derive the cursor, the per-member scoping,
+the retention floor and the gap marker, and §1's table is ten entries of what
+happens when a second path re-derives one of them wrongly.
+
+The rules that are specific to it:
+
+- **Pull members only.** `DeliveryEngine.recordToolCall` mints one record per
+  pull member and none for a push member. A messenger member has no surface
+  that can render a tool call; giving them a record would mean either shipping
+  `args` JSON to a phone, or minting a record that can never be sent and
+  marking it `delivered` anyway. They get nothing, and the absence claims
+  nothing. `renderFor` returning `undefined` for the kind is the second lock,
+  and `attempt` refuses to call a push member's empty render "delivered".
+- **`text` is the call's arguments as JSON, not prose.** It is exactly what
+  `TOOL_CALL_ARGS.delta` carries, so the AG-UI translation is a copy rather
+  than a re-encoding. Every reader MUST branch on `kind` before touching
+  `text`: a catch-all arm puts a serialised argument object in a transcript
+  attributed to the agent.
+- **The recorded args are a summary**, not the verbatim call — `render_artifact`
+  records `{roomCode, blocks, artifactUrl}` and omits the document, which
+  would otherwise be copied into one record per watching member and then
+  pinned there by the retention floor. A client that wants the content calls
+  `read_artifact`.
+- **It MUST NOT move `spokenSeq`.** A turn that only rendered a document has
+  not spoken, and the silent-turn warning must still fire for it — that turn
+  is the one most likely to need it.
+- **It is recorded only after a successful render**, and a failure to record
+  never fails the render: the document exists and the agent must be told so.
+
+In AG-UI it becomes the `TOOL_CALL_START` / `TOOL_CALL_ARGS` / `TOOL_CALL_END`
+triple, keyed by the delivery id, **instead of** — never alongside — the text
+triple. A record that yielded zero events would be a delivery the client never
+hears about, so a record missing its `toolName` is announced under
+`UNNAMED_TOOL` rather than skipped: visibly wrong beats silently absent.
+
 ---
 
 ## 3. The cursor

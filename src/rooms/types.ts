@@ -183,9 +183,30 @@ export interface Delivery {
    *  tools; `"system"` is the ROOM's own voice — join links, the QR caption,
    *  join/resume/paused notices, the fan-out's turn text to a pull member.
    *  A join link attributed to the agent is a small lie the page would
-   *  render; system is per-member but not secret, and never a whisper. */
-  readonly kind: "say" | "whisper" | "system"
+   *  render; system is per-member but not secret, and never a whisper.
+   *
+   *  `"tool"` is nobody speaking: it records that the agent CALLED something
+   *  (today, `render_artifact`), so a surface can show the room that the
+   *  shared document moved. It rides this same queue rather than a second
+   *  channel so it inherits the cursor, the per-member scoping, the
+   *  retention floor and the gap marker — a parallel "events" stream would
+   *  have to re-derive all four, and §1's table is ten entries of what
+   *  happens when a second path re-derives one of them wrongly. */
+  readonly kind: "say" | "whisper" | "system" | "tool"
+  /** For every kind but `"tool"`, the text a human reads. For `"tool"` it is
+   *  the call's arguments as JSON — which is exactly what AG-UI's
+   *  `TOOL_CALL_ARGS.delta` carries, so the translation is a copy, not a
+   *  re-encoding. It is NOT prose and MUST NOT be rendered as prose: every
+   *  reader branches on `kind` first (`outboxToAguiEventBody`,
+   *  `runOutboxTick`), and `DeliveryEngine.renderFor` returns `undefined`
+   *  for it so no transport can ever put it on a phone. */
   readonly text: string
+  /** The called tool's name — set on `kind: "tool"` records and on no
+   *  other. Optional rather than a separate `Delivery` arm because `text`,
+   *  `status`, `failures` and the rest are read unconditionally across the
+   *  engine, the store and the retention prune; splitting the type would
+   *  touch all of them to express one extra string. */
+  readonly toolName?: string
   readonly status: "pending" | "delivered" | "failed"
   /** Failure count, not attempt count: it only moves when a send fails, and
    *  a delivered record carries `0` (PLAN-02 §3-D2). Renamed from `attempts`

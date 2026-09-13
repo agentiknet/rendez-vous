@@ -23,6 +23,7 @@ import {
   MAX_DELIVERY_ATTEMPTS,
   type Delivery,
   type Member,
+  deliveryModeOf,
   deliverySeqOf,
   retentionFloors,
 } from "../rooms/types.ts"
@@ -81,6 +82,11 @@ function spokenSeqFor(kind: Delivery["kind"], seq: number): number | undefined {
     case "whisper":
       return seq
     case "system":
+      return undefined
+    // A turn that ONLY rendered a document did not speak. Moving the counter
+    // here would silence the silent-turn warning for exactly the turn most
+    // likely to need it: the agent produced an artifact and told nobody.
+    case "tool":
       return undefined
   }
 }
@@ -255,6 +261,7 @@ export class DeliveryEngine {
     kind: Delivery["kind"],
     text: string,
     memberIds: readonly string[],
+    toolName?: string,
   ): Promise<AcceptOutcome> {
     const room = this.store.get(code)
     if (room === undefined) throw new Error(`unknown room: ${code}`)
@@ -278,6 +285,10 @@ export class DeliveryEngine {
         id: `d${lastSeq + index + 1}`,
         memberId,
         kind,
+        // Written only when supplied, so a non-tool record round-trips
+        // through `JSON.stringify` with the key genuinely absent rather than
+        // present-and-undefined (the rule `confirmedBy` follows).
+        ...(toolName !== undefined ? { toolName } : {}),
         text,
         status: "pending",
         failures: 0,
@@ -313,6 +324,29 @@ export class DeliveryEngine {
     }
 
     return { accepted, unknown }
+  }
+
+  /** Record that the agent called a tool, as one `kind: "tool"` record per
+   *  PULL member — and per pull member only.
+   *
+   *  The tier filter is the whole point and lives HERE, at the mint, not in
+   *  a transport guard downstream. A messenger member has no surface that
+   *  can render a tool call: giving them a record would mean either shipping
+   *  `args` JSON to a phone, or minting a record that can never be sent and
+   *  then marking it `delivered` anyway — §1's invariant, wearing costume
+   *  eleven. A push member simply gets no record, and the absence claims
+   *  nothing.
+   *
+   *  `args` is serialised once, here, so `text` holds exactly the bytes
+   *  `TOOL_CALL_ARGS.delta` will carry. Returns the ids of the members that
+   *  got a record, so a caller can tell "nobody was watching" from "the room
+   *  was told" — the two must never look alike. */
+  async recordToolCall(code: string, toolName: string, args: unknown): Promise<AcceptOutcome> {
+    const room = this.store.get(code)
+    if (room === undefined) throw new Error(`unknown room: ${code}`)
+    const watching = room.members.filter((member) => deliveryModeOf(member) === "pull").map((member) => member.id)
+    if (watching.length === 0) return { accepted: [], unknown: [] }
+    return this.accept(code, "tool", JSON.stringify(args), watching, toolName)
   }
 
   /** Attempt every `pending` delivery still under the retry cap for one
@@ -404,7 +438,7 @@ export class DeliveryEngine {
       lastError = `member ${delivery.memberId} is no longer in the room`
     } else {
       const message = this.renderFor(code, delivery, member)
-      if (message === undefined) {
+      if (message === undefined && deliveryModeOf(member) === "pull") {
         // The pull tier gets nothing over the transport (render.ts) — the
         // record sits in the outbox where the member drains it. Confirmed by
         // the transport it is not: either the recipient's cursor already
@@ -419,21 +453,29 @@ export class DeliveryEngine {
         })
         return
       }
-      try {
-        await withTimeout(this.transport.send(member, message), this.sendTimeoutMs)
-        // A push hand-off the provider accepted is confirmed by the
-        // transport — the only confirmation that exists today (D2/F8).
-        await this.mark(code, delivery.id, {
-          status: "delivered",
-          deliveredAt: this.now(),
-          confirmedBy: "transport",
-        })
-        if (delivery.kind === "whisper") {
-          await this.announceWhisper(code, member)
+      if (message === undefined) {
+        // Nothing to render for a member we WOULD have pushed to. Nobody
+        // received anything, so this falls through to the failure path
+        // below — never to the `delivered` arm above, which is the pull
+        // tier's alone (§1: the console-fallback bug, one layer up).
+        lastError = `nothing to render for a ${member.tier} member from a ${delivery.kind} record`
+      } else {
+        try {
+          await withTimeout(this.transport.send(member, message), this.sendTimeoutMs)
+          // A push hand-off the provider accepted is confirmed by the
+          // transport — the only confirmation that exists today (D2/F8).
+          await this.mark(code, delivery.id, {
+            status: "delivered",
+            deliveredAt: this.now(),
+            confirmedBy: "transport",
+          })
+          if (delivery.kind === "whisper") {
+            await this.announceWhisper(code, member)
+          }
+          return
+        } catch (error: unknown) {
+          lastError = messageOf(error)
         }
-        return
-      } catch (error: unknown) {
-        lastError = messageOf(error)
       }
     }
 
@@ -478,6 +520,13 @@ export class DeliveryEngine {
    *  observable visibility `renderWhisperForMember` gives an announced
    *  whisper (whisper.ts). */
   private renderFor(code: string, delivery: Delivery, member: Member): OutboundMessage | undefined {
+    // A tool record never travels a transport, whatever the member's tier:
+    // its `text` is `args` JSON, not prose. `recordToolCall` already mints
+    // these for pull members only; this is the second lock, and `attempt`
+    // below refuses to call a push member's empty render "delivered", so a
+    // future caller that mints one wrongly gets a loud `failed` record
+    // rather than a silent lie.
+    if (delivery.kind === "tool") return undefined
     let text: string
     if (delivery.kind === "whisper") {
       if (delivery.memberId === member.id) {

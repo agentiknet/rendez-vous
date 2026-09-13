@@ -1458,6 +1458,12 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
     ...defaultMcpCanvakitDeps(media.renders),
     roomExists: (code) => service.getRoom(code) !== undefined,
     rooms: () => service.listRooms(),
+    // BRIEF-15: the SAME engine `say`/`whisper`/`system` go through, so a
+    // render announcement inherits the cursor, the per-member scoping and
+    // the gap marker instead of re-deriving them on a side channel.
+    recordToolCall: async (code, toolName, args) => {
+      await service.deliveryEngine.recordToolCall(code, toolName, args)
+    },
   })
   const mcpRoom = createMcpRoomHandler({
     rooms: () => service.listRooms(),

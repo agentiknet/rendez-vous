@@ -200,10 +200,17 @@ function isDelivery(value: unknown): value is Delivery {
   // `isAsk` above).
   const lastError = "lastError" in value ? value.lastError : undefined
   const deliveredAt = "deliveredAt" in value ? value.deliveredAt : undefined
+  // `toolName` is optional and present on `kind: "tool"` records only. A
+  // record failing this predicate makes `open()` reject the WHOLE file as
+  // "unexpected shape" — so a kind missing from the list below does not lose
+  // one record, it refuses to boot the service against a room file that
+  // contains one. Keep it in step with `Delivery["kind"]`.
+  const toolName = "toolName" in value ? value.toolName : undefined
   return (
     isString(value.id) &&
     isString(value.memberId) &&
-    (value.kind === "say" || value.kind === "whisper" || value.kind === "system") &&
+    (value.kind === "say" || value.kind === "whisper" || value.kind === "system" || value.kind === "tool") &&
+    isStringOrUndefined(toolName) &&
     isString(value.text) &&
     isDeliveryStatus(value.status) &&
     ((typeof failures === "number" && failures >= 0) ||

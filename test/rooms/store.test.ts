@@ -676,3 +676,73 @@ test('a Delivery of kind "system" round-trips through the store (brief B)', asyn
   assert.equal(loaded.text, "Room created: RDV-TEST")
   assert.equal(loaded.status, "delivered")
 })
+
+test('a Delivery of kind "tool" round-trips through the store WITH its toolName (BRIEF-15) — a kind missing from isDelivery is dropped on read, which would delete the room\'s own history on the next boot', async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const web = await store.addMember(room.code, {
+    displayName: "Chloe",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+  })
+  const toolCall: Delivery = {
+    id: "d1",
+    memberId: web.id,
+    kind: "tool",
+    toolName: "render_artifact",
+    text: JSON.stringify({ roomCode: room.code, blocks: 3 }),
+    status: "delivered",
+    failures: 0,
+    lastError: undefined,
+    createdAt: "2026-09-13T00:00:00.000Z",
+    deliveredAt: "2026-09-13T00:00:01.000Z",
+  }
+  await store.update(room.code, { deliveries: [toolCall], deliverySeq: 1 })
+
+  const reopened = await RoomStore.open(dir)
+  const loaded = reopened.get(room.code)?.deliveries?.[0]
+  assert.ok(loaded !== undefined, "the record must survive the reload, not be silently dropped")
+  assert.equal(loaded.kind, "tool")
+  assert.equal(loaded.toolName, "render_artifact")
+  assert.deepEqual(JSON.parse(loaded.text), { roomCode: room.code, blocks: 3 })
+})
+
+test("a persisted delivery whose toolName is not a string makes the whole store refuse to open, so a corrupt record can never reach the AG-UI translation dressed as a well-formed tool call", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const web = await store.addMember(room.code, {
+    displayName: "Chloe",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+  })
+  await store.update(room.code, {
+    deliveries: [
+      {
+        id: "d1",
+        memberId: web.id,
+        kind: "tool",
+        text: "{}",
+        status: "delivered",
+        failures: 0,
+        lastError: undefined,
+        createdAt: "2026-09-13T00:00:00.000Z",
+        deliveredAt: "2026-09-13T00:00:01.000Z",
+      },
+    ],
+    deliverySeq: 1,
+  })
+  // Corrupt the field on disk, then reload: the validator is the only thing
+  // between a hand-edited room file and every reader downstream of it.
+  const path = join(dir, "rooms.json")
+  const raw = await readFile(path, "utf8")
+  const corrupted = raw.replace(/"kind":\s*"tool"/, '"kind": "tool", "toolName": 42')
+  assert.notEqual(corrupted, raw, "the corruption must actually have been applied, or this test proves nothing")
+  await writeFile(path, corrupted, "utf8")
+
+  // Refusing to boot is the honest outcome, and the stronger one: dropping
+  // the record would hand every reader downstream a room whose history is
+  // quietly shorter than what is on disk.
+  await assert.rejects(() => RoomStore.open(dir), /unexpected shape/)
+})

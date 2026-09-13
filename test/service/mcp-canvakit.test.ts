@@ -560,3 +560,93 @@ test("export_artifact is bound to the bearer's room", async () => {
   assert.equal((await handler(EXPORT_CALL, undefined)).status, 401)
   assert.equal((await handler(EXPORT_CALL, `Bearer ${roomRenderToken("RDV-ZZZZ", env.roomTokenSecret)}`)).status, 401)
 })
+
+// --- BRIEF-15: render_artifact records the call in the room's outbox ----
+
+interface RecordedCall {
+  readonly code: string
+  readonly toolName: string
+  readonly args: unknown
+}
+
+/** A canvakit handler wired to a spy `recordToolCall`, plus a knob to make
+ *  the render fail or the recording throw. Written fresh rather than folded
+ *  into `harness()` so the failure arms below cannot be satisfied by a
+ *  default the shared harness happens to set. */
+function recordingHarness(opts: { failRender?: boolean; failRecord?: boolean } = {}): {
+  readonly handler: ReturnType<typeof createMcpCanvakitHandler>
+  readonly recorded: RecordedCall[]
+} {
+  const recorded: RecordedCall[] = []
+  const renders = new ArtifactRenderStore(trackDir(mkdtempSync(join(tmpdir(), "rdv-canvakit-record-"))))
+  const handler = createMcpCanvakitHandler({
+    roomExists: (code) => code === ROOM,
+    rooms: () => [room(ROOM)],
+    renders,
+    renderHtml: async () => {
+      if (opts.failRender === true) throw new Error("canvakit: template not found")
+      return Buffer.from("<!doctype html><html><body>doc</body></html>")
+    },
+    renderPdf: async () => ({ bytes: Buffer.from("%PDF-1.7 fake"), pages: 2 }),
+    recordToolCall: async (code, toolName, args) => {
+      recorded.push({ code, toolName, args })
+      if (opts.failRecord === true) throw new Error("outbox unavailable")
+    },
+  })
+  return { handler, recorded }
+}
+
+test("a successful render_artifact records the call in the room's outbox, naming the tool", async () => {
+  const { handler, recorded } = recordingHarness()
+  const res = asRpc(
+    await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: callParams(ROOM, VALID_DATA) }, VALID_TOKEN),
+  )
+  assert.equal(res.result?.isError, false)
+  assert.equal(recorded.length, 1)
+  assert.equal(recorded[0]?.code, ROOM)
+  assert.equal(recorded[0]?.toolName, "render_artifact")
+})
+
+test("the recorded args are a SUMMARY — the block count and the artifact URL, never the document itself, which the retention floor would then pin per watching member", async () => {
+  const { handler, recorded } = recordingHarness()
+  await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: callParams(ROOM, VALID_DATA) }, VALID_TOKEN)
+
+  const args = recorded[0]?.args
+  assert.ok(isRecord(args))
+  assert.equal(args.roomCode, ROOM)
+  assert.equal(args.blocks, VALID_DATA.length)
+  assert.equal(typeof args.artifactUrl, "string")
+  // The document's own prose must not be in there. Checked against the
+  // serialised form, because that is what actually lands in `Delivery.text`.
+  const serialised = JSON.stringify(args)
+  assert.ok(!serialised.includes("Seminar budget"), "the document's content must not be copied into the outbox record")
+})
+
+test("a FAILED render records nothing — announcing a render that produced no document is the lie this whole file is built to avoid", async () => {
+  const { handler, recorded } = recordingHarness({ failRender: true })
+  const res = asRpc(
+    await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: callParams(ROOM, VALID_DATA) }, VALID_TOKEN),
+  )
+  assert.equal(res.result?.isError, true)
+  assert.deepEqual(recorded, [], "nothing rendered, so the room must be told nothing")
+})
+
+test("a recordToolCall that throws does not fail the render: the document exists and the agent must still be told so", async () => {
+  const { handler, recorded } = recordingHarness({ failRecord: true })
+  const res = asRpc(
+    await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: callParams(ROOM, VALID_DATA) }, VALID_TOKEN),
+  )
+  assert.equal(res.result?.isError, false, "the render succeeded; telling the room is downstream of that")
+  assert.equal(recorded.length, 1, "it WAS attempted — the throw is swallowed, not the call")
+  const content = res.result?.content
+  assert.ok(Array.isArray(content) && isRecord(content[0]))
+  assert.ok(isRecord(JSON.parse(String(content[0].text))), "the agent still gets its normal success payload")
+})
+
+test("a handler with no recordToolCall dep renders exactly as before — the announcement is additive and never load-bearing", async () => {
+  const { handler } = harness({ rooms: () => [room(ROOM)] })
+  const res = asRpc(
+    await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: callParams(ROOM, VALID_DATA) }, VALID_TOKEN),
+  )
+  assert.equal(res.result?.isError, false)
+})

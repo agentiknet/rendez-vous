@@ -1740,3 +1740,37 @@ test("POST /inbound/simulated answers an unroutable provider with a validated 40
   assert.equal(body.error, "unknown_provider")
   assert.equal(body.provider, "sim")
 })
+
+// --- BRIEF-15: a tool record on the AG-UI wire -------------------------
+
+test("POST /rooms/:code/agui carries a kind:'tool' record as the TOOL_CALL triple and emits no TEXT_MESSAGE_* for it — end to end, over a real socket", async () => {
+  const { store, baseUrl, code, alice } = await outboxHarness()
+  const args = { roomCode: code, blocks: 3, artifactUrl: "https://example.test/artifact/" }
+  await store.update(code, {
+    deliverySeq: 1,
+    deliveries: [{ ...outboxDelivery("d1", alice.id, JSON.stringify(args), "pending", "tool"), toolName: "render_artifact" }],
+  })
+
+  const res = await fetch(`${baseUrl}/rooms/${code}/agui`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...aliceHeaders(code, alice) },
+    body: aguiRunBody(),
+  })
+  assert.equal(res.status, 200)
+  const frames = await readSseRecords(res, 20)
+
+  const start = frames.find((frame) => frame.type === "TOOL_CALL_START")
+  assert.equal(start?.toolCallId, "d1")
+  assert.equal(start?.toolCallName, "render_artifact")
+
+  const argsFrame = frames.find((frame) => frame.type === "TOOL_CALL_ARGS")
+  assert.deepEqual(JSON.parse(String(argsFrame?.delta)), args)
+  assert.ok(frames.some((frame) => frame.type === "TOOL_CALL_END"))
+
+  assert.ok(
+    !frames.some((frame) => typeof frame.type === "string" && frame.type.startsWith("TEXT_MESSAGE")),
+    "a tool record must not also arrive as agent prose",
+  )
+  assert.equal(frames[0]?.type, "RUN_STARTED")
+  assert.equal(frames[frames.length - 1]?.type, "RUN_FINISHED")
+})

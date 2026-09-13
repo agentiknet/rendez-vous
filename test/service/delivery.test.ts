@@ -816,3 +816,109 @@ test("bare agent text still reaches phones exactly as before (the additive const
   assert.equal(transport.sends.some((send) => send.memberId === screen.id), false, "room-web stays transport-silent")
   await fanout.stopAll()
 })
+
+// --- BRIEF-15: recordToolCall ------------------------------------------
+
+test("recordToolCall mints a record for the PULL member only — a messenger member gets nothing, because there is nothing they could be shown", async () => {
+  const { store, code, alice, bob, screen } = await roomWith()
+  const transport = new FakeTransport()
+  const eng = engine(store, transport)
+
+  const outcome = await eng.recordToolCall(code, "render_artifact", { blocks: 3 })
+  assert.deepEqual(outcome.accepted, [screen.id])
+  assert.deepEqual(outcome.unknown, [])
+
+  const records = deliveriesOf(store.get(code))
+  assert.equal(records.length, 1, "exactly one record, for the one pull member")
+  assert.equal(records[0]?.memberId, screen.id)
+  assert.equal(records[0]?.kind, "tool")
+  assert.equal(records[0]?.toolName, "render_artifact")
+  for (const pushMember of [alice, bob]) {
+    assert.ok(
+      !records.some((record) => record.memberId === pushMember.id),
+      `a push member (${pushMember.displayName}) must own no tool record at all`,
+    )
+  }
+})
+
+test("a tool record never reaches a transport: the drain makes no send, and the pull member's record completes as delivered exactly like any other pull record", async () => {
+  const { store, code, screen } = await roomWith()
+  const transport = new FakeTransport()
+  const eng = engine(store, transport)
+
+  await eng.recordToolCall(code, "render_artifact", { blocks: 3 })
+  await eng.drain(code)
+
+  assert.deepEqual(transport.sends, [], "no member may receive a tool record over a transport")
+  const record = deliveriesOf(store.get(code)).find((candidate) => candidate.memberId === screen.id)
+  assert.equal(record?.status, "delivered")
+  assert.equal(record?.confirmedBy, undefined, "nothing acked it, so it stays honestly unconfirmed")
+})
+
+test("recordToolCall stores the args as JSON in `text`, byte-for-byte what TOOL_CALL_ARGS will carry", async () => {
+  const { store, code } = await roomWith()
+  const eng = engine(store, new FakeTransport())
+  const args = { roomCode: code, blocks: 3, artifactUrl: "https://example.test/a/" }
+
+  await eng.recordToolCall(code, "render_artifact", args)
+
+  const record = deliveriesOf(store.get(code))[0]
+  assert.ok(record !== undefined)
+  assert.deepEqual(JSON.parse(record.text), args)
+})
+
+test("a tool record does NOT move spokenSeq: a turn that only rendered a document has not spoken, and the silent-turn warning must still fire", async () => {
+  const { store, code } = await roomWith()
+  const eng = engine(store, new FakeTransport())
+  const before = store.get(code)?.spokenSeq
+
+  await eng.recordToolCall(code, "render_artifact", { blocks: 3 })
+
+  const after = store.get(code)
+  assert.equal(after?.spokenSeq, before, "spokenSeq must be untouched by a tool record")
+  assert.ok((after?.deliverySeq ?? 0) > 0, "the delivery counter DID move — the record exists, it just is not speech")
+})
+
+test("recordToolCall in a room with no pull member mints nothing and reports nobody, so a caller can tell 'the room was told' from 'nobody was watching'", async () => {
+  const dir = await freshDir()
+  const store = await RoomStore.open(dir)
+  const created = await store.create()
+  await store.addMember(created.code, {
+    displayName: "Alice",
+    tier: "messenger",
+    address: { provider: "telegram", source: "test", contactRef: "ref-Alice" },
+  })
+  const eng = engine(store, new FakeTransport())
+
+  const outcome = await eng.recordToolCall(created.code, "render_artifact", { blocks: 3 })
+
+  assert.deepEqual(outcome.accepted, [])
+  assert.deepEqual(deliveriesOf(store.get(created.code)), [])
+})
+
+test("recordToolCall against an unknown room throws rather than silently recording nothing — the two must not look alike", async () => {
+  const { store } = await roomWith()
+  const eng = engine(store, new FakeTransport())
+  await assert.rejects(() => eng.recordToolCall("RDV-NOPE", "render_artifact", {}), /unknown room/)
+})
+
+test("a tool record minted for a PUSH member (a caller bug this engine cannot mint on its own) fails loudly instead of being marked delivered to someone who received nothing", async () => {
+  const { store, code, alice } = await roomWith()
+  const transport = new FakeTransport()
+  const eng = engine(store, transport)
+  // Written directly into the store, bypassing `recordToolCall`'s tier
+  // filter: this asserts the SECOND lock, the one that catches a future
+  // caller who mints past the first.
+  await store.update(code, {
+    deliveries: [{ ...pendingDelivery("d1", alice.id, "{}"), kind: "tool", toolName: "render_artifact" }],
+    deliverySeq: 1,
+  })
+
+  await eng.drain(code)
+
+  assert.deepEqual(transport.sends, [], "args JSON must never be handed to a push transport")
+  const record = deliveriesOf(store.get(code))[0]
+  assert.notEqual(record?.status, "delivered")
+  assert.equal(record?.failures, 1)
+  assert.match(record?.lastError ?? "", /nothing to render/)
+})

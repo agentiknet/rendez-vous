@@ -8,6 +8,7 @@ import {
   outboxToAguiEvents,
   parseRunAgentInput,
   sinceFromInput,
+  UNNAMED_TOOL,
   type AguiEvent,
   type OutboxRunFrame,
   type RunAgentInput,
@@ -198,4 +199,71 @@ test("parseRunAgentInput keeps an object forwardedProps and drops a non-object o
   const withoutProps = parseRunAgentInput({ threadId: "t1", runId: "r1", messages: [], forwardedProps: "nope" })
   assert.ok("input" in withoutProps)
   if ("input" in withoutProps) assert.equal(withoutProps.input.forwardedProps, undefined)
+})
+
+// --- BRIEF-15: the tool kind -------------------------------------------
+
+function toolDelivery(id: string, toolName: string | undefined, args: unknown): Delivery {
+  const base = delivery(id, JSON.stringify(args), "tool")
+  return toolName === undefined ? base : { ...base, toolName }
+}
+
+test("a kind:'tool' delivery emits the TOOL_CALL triple and NOT the text triple — an args blob must never reach a transcript as agent prose", () => {
+  const body = outboxToAguiEventBody(frame({ deliveries: [toolDelivery("d7", "render_artifact", { blocks: 3 })] }))
+  assert.deepEqual(types(body), ["CUSTOM", "TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END", "STATE_SNAPSHOT"])
+  // Written as an explicit scan rather than relying on the list above, so a
+  // future event added between the two still fails this if it is a text one.
+  assert.ok(!body.some((event) => event.type.startsWith("TEXT_MESSAGE")), "no TEXT_MESSAGE_* event may accompany a tool record")
+})
+
+test("the TOOL_CALL triple is keyed by the delivery id, the same discipline messageId follows, and carries the tool's name", () => {
+  const body = outboxToAguiEventBody(frame({ deliveries: [toolDelivery("d7", "render_artifact", { blocks: 3 })] }))
+  const start = body.find((event) => event.type === "TOOL_CALL_START")
+  const end = body.find((event) => event.type === "TOOL_CALL_END")
+  assert.deepEqual(start, { type: "TOOL_CALL_START", toolCallId: "d7", toolCallName: "render_artifact" })
+  assert.deepEqual(end, { type: "TOOL_CALL_END", toolCallId: "d7" })
+})
+
+test("TOOL_CALL_ARGS.delta is the record's text verbatim, so a client that JSON.parses it gets back exactly what was recorded (no re-encoding)", () => {
+  const args = { roomCode: "RDV-TEST", blocks: 3, artifactUrl: "https://example.test/r/RDV-TEST/artifact/" }
+  const body = outboxToAguiEventBody(frame({ deliveries: [toolDelivery("d7", "render_artifact", args)] }))
+  const event = body.find((candidate) => candidate.type === "TOOL_CALL_ARGS")
+  assert.ok(event !== undefined && "delta" in event)
+  assert.deepEqual(JSON.parse(event.delta), args)
+})
+
+test("the rdv.outbox.kind CUSTOM event is emitted for a tool record too, and reports kind 'tool' — a client keyed on it must not fall through to a default arm", () => {
+  const body = outboxToAguiEventBody(frame({ deliveries: [toolDelivery("d7", "render_artifact", {})] }))
+  const kindEvent = body.find((event) => event.type === "CUSTOM" && event.name === KIND_EVENT_NAME)
+  assert.ok(kindEvent !== undefined && "value" in kindEvent)
+  assert.deepEqual(kindEvent.value, { messageId: "d7", kind: "tool" })
+  // Ordering: the kind event precedes the call it describes, exactly as it
+  // precedes TEXT_MESSAGE_START for the other kinds (D5).
+  assert.ok(types(body).indexOf("CUSTOM") < types(body).indexOf("TOOL_CALL_START"))
+})
+
+test("a tool record with no toolName still produces a well-formed, visibly-named call — a record that yielded zero events would be a delivery the client never hears about", () => {
+  const body = outboxToAguiEventBody(frame({ deliveries: [toolDelivery("d7", undefined, { blocks: 1 })] }))
+  assert.deepEqual(types(body), ["CUSTOM", "TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END", "STATE_SNAPSHOT"])
+  const start = body.find((event) => event.type === "TOOL_CALL_START")
+  assert.ok(start !== undefined && "toolCallName" in start)
+  assert.equal(start.toolCallName, UNNAMED_TOOL)
+})
+
+test("tool and text records interleave in outbox order, each getting its own triple and neither borrowing the other's", () => {
+  const body = outboxToAguiEventBody(
+    frame({ deliveries: [delivery("d1", "before"), toolDelivery("d2", "render_artifact", {}), delivery("d3", "after")] }),
+  )
+  assert.deepEqual(types(body), [
+    "CUSTOM", "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END",
+    "CUSTOM", "TOOL_CALL_START", "TOOL_CALL_ARGS", "TOOL_CALL_END",
+    "CUSTOM", "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END",
+    "STATE_SNAPSHOT",
+  ])
+})
+
+test("a run whose only record is a tool call still ends with the STATE_SNAPSHOT a reconnecting client resumes from (D3) — the cursor must not depend on a text message having been sent", () => {
+  const body = outboxToAguiEventBody(frame({ cursor: 7, deliveries: [toolDelivery("d7", "render_artifact", {})] }))
+  const snapshot = body[body.length - 1]
+  assert.deepEqual(snapshot, { type: "STATE_SNAPSHOT", snapshot: { cursor: 7, roomCode: "RDV-TEST" } })
 })

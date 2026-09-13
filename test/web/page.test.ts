@@ -252,3 +252,38 @@ test("renderRoomPage keeps the join chooser and QR alongside the state row", () 
   assert.match(html, /class="join-qr"[^>]*>\s*<svg/)
   assert.match(html, /id="stay-here-button"[^>]*>Stay here</)
 })
+
+// --- BRIEF-15: the tool kind on the room page --------------------------
+
+test("planOutboxRender names a tool record explicitly instead of collapsing it into `say` — the catch-all arm would attribute an args blob to the agent", () => {
+  const plan = planOutboxRender(
+    { pruned: false, deliveries: [{ id: "d7", kind: "tool", text: '{"blocks":3}', toolName: "render_artifact" }] },
+    {},
+  )
+  assert.equal(plan.items.length, 1)
+  assert.equal(plan.items[0]?.kind, "tool")
+  assert.equal(plan.items[0]?.toolName, "render_artifact")
+})
+
+test("planOutboxRender carries no toolName on a non-tool record, so the renderer cannot mistake one for a call", () => {
+  const plan = planOutboxRender({ pruned: false, deliveries: [{ id: "d1", kind: "say", text: "hello" }] }, {})
+  assert.equal(plan.items[0]?.kind, "say")
+  assert.equal(plan.items[0]?.toolName, undefined)
+})
+
+test("an unrecognised kind still falls back to `say` — only `tool` was carved out, and an unknown kind's text IS prose by every other reading", () => {
+  const plan = planOutboxRender({ pruned: false, deliveries: [{ id: "d1", kind: "future-kind", text: "hello" }] }, {})
+  assert.equal(plan.items[0]?.kind, "say")
+})
+
+test("the embedded page renders a tool record as its own bubble and never prints its args — the transcript is where humans read", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks())
+  assert.ok(html.includes('item.kind === "tool"'), "the browser-side renderer must branch on the tool kind")
+  assert.ok(html.includes("The shared document was just updated."), "render_artifact gets a sentence a human can act on")
+  assert.ok(html.includes(".bubble.tool"), "the tool bubble must have a style of its own, not inherit the agent's")
+  // The one thing that must NOT be in the renderer: the args. `item.text` is
+  // written into the body for every other kind; a tool record must not reach
+  // that line.
+  const toolArm = html.slice(html.indexOf('item.kind === "tool"'), html.indexOf('const el = bubble(item.kind === "whisper"'))
+  assert.ok(!toolArm.includes("body.textContent = item.text"), "a tool record's args must never be written into the transcript body")
+})

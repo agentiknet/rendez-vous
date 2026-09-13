@@ -146,6 +146,7 @@ const STYLE = `
   .bubble.assistant { background: #fff; border: 1px solid var(--border); }
   .bubble.whisper { border-color: #d8c9f0; background: #f6f1fd; }
   .bubble.system { border-color: #c9dcef; background: #eef6fd; }
+  .bubble.tool { border-color: #cfe3d4; background: #f1f8f3; font-style: italic; }
   .outbox-gap { font-size: 12px; color: #b42318; background: #fdeaea; border: 1px solid #f2c4c0; border-radius: 6px; padding: 6px 10px; margin: 0 0 10px; }
   #name-error { color: #b42318; font-size: 12px; font-weight: 600; display: none; width: 100%; }
   .badge { display: inline-block; font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 4px; }
@@ -445,6 +446,27 @@ function script(code: string, room: Room, agentBusy: boolean): string {
         transcriptEl.appendChild(gapEl);
       }
       outcome.items.forEach(function (item) {
+        if (item.kind === "tool") {
+          // BRIEF-15: a tool record's text is the call's arguments as JSON.
+          // The room is told THAT the agent called something, never what it
+          // passed — the transcript is where humans read, and an argument
+          // blob there is noise at best and a disclosure at worst. The one
+          // tool the room cares about today gets a sentence; anything else
+          // is named, not paraphrased, so a new tool never arrives here
+          // wearing a description this code invented for it.
+          const el = bubble("assistant tool");
+          const badge = document.createElement("span");
+          badge.className = "badge";
+          badge.textContent = "the agent used a tool";
+          const body = document.createElement("div");
+          body.textContent =
+            item.toolName === "render_artifact"
+              ? "The shared document was just updated."
+              : "Called " + (item.toolName ? item.toolName : "an unnamed tool") + ".";
+          el.appendChild(badge);
+          el.appendChild(body);
+          return;
+        }
         const el = bubble(item.kind === "whisper" ? "assistant whisper" : item.kind === "system" ? "assistant system" : "assistant");
         const badge = document.createElement("span");
         badge.className = "badge";
@@ -548,13 +570,34 @@ function script(code: string, room: Room, agentBusy: boolean): string {
  *  `gapState` defaults to a fresh object per call so callers that do not
  *  care about de-duplication (existing tests) see the old always-report
  *  behaviour unchanged. */
+/** One delivery as the outbox JSON carries it. `toolName` is present on
+ *  `kind: "tool"` records only (BRIEF-15). Named types rather than repeated
+ *  inline literals so the tool arm could not be added to the reader without
+ *  the renderer's own signature following it. */
+export interface OutboxRecord {
+  readonly id: string
+  readonly kind: string
+  readonly text: string
+  readonly toolName?: string
+}
+
+/** One transcript entry, after `planOutboxRender` has decided how it reads.
+ *  `kind` is narrowed to the four the page knows how to draw — the mapping
+ *  is total, with no catch-all. */
+export interface OutboxItem {
+  readonly id: string
+  readonly kind: "say" | "whisper" | "system" | "tool"
+  readonly text: string
+  readonly toolName?: string
+}
+
 export const planOutboxRender = (
-  payload: { pruned?: boolean; deliveries?: readonly { id: string; kind: string; text: string }[] },
+  payload: { pruned?: boolean; deliveries?: readonly OutboxRecord[] },
   seenIds: Record<string, boolean>,
   since = 0,
   gapState: { lastReportedSince?: number } = {},
-): { gap: string | undefined; items: { id: string; kind: string; text: string }[] } => {
-  const items: { id: string; kind: string; text: string }[] = []
+): { gap: string | undefined; items: OutboxItem[] } => {
+  const items: OutboxItem[] = []
   const deliveries = payload.deliveries === undefined || payload.deliveries === null ? [] : payload.deliveries
   for (const record of deliveries) {
     if (record === undefined || record === null) continue
@@ -565,10 +608,27 @@ export const planOutboxRender = (
     // join link, a resume notice, the fan-out's turn text to this tab) is
     // per-member but not secret, and renders distinctly from both a `say`
     // and a `whisper`.
+    //
+    // BRIEF-15: `tool` is named EXPLICITLY here rather than falling into the
+    // `say` arm. Its `text` is the call's arguments as JSON, so the default
+    // arm would put a serialised object in the transcript attributed to the
+    // agent — the same shape of lie as a join link signed by the agent, and
+    // the reason this chain has no catch-all.
     items.push({
       id: record.id,
-      kind: record.kind === "whisper" ? "whisper" : record.kind === "system" ? "system" : "say",
+      kind:
+        record.kind === "whisper"
+          ? "whisper"
+          : record.kind === "system"
+            ? "system"
+            : record.kind === "tool"
+              ? "tool"
+              : "say",
       text: record.text === undefined ? "" : record.text,
+      // Written only when present (`exactOptionalPropertyTypes`), so a
+      // non-tool item carries no `toolName` key at all rather than an
+      // explicit `undefined` the renderer would have to test for twice.
+      ...(record.toolName !== undefined ? { toolName: record.toolName } : {}),
     })
   }
   const isNewGap = payload.pruned === true && (gapState.lastReportedSince === undefined || since > gapState.lastReportedSince)
@@ -711,7 +771,7 @@ export type OutboxTickOutcome =
   | { status: "claim-failed" }
   | { status: "auth-lost" }
   | { status: "drain-failed" }
-  | { status: "ok"; gap: string | undefined; items: { id: string; kind: string; text: string }[] }
+  | { status: "ok"; gap: string | undefined; items: OutboxItem[] }
 
 /** One 2 s drain tick (brief 14) — the single place that claims-if-needed,
  *  drains, and acks, replacing three functions that used to fail

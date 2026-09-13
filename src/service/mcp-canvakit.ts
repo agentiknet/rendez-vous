@@ -96,6 +96,17 @@ export interface McpCanvakitDeps {
   /** Render the data file to `outPath` as PDF; resolve with the bytes and
    *  page count. Throw with canvakit's verbatim error text on failure. */
   readonly renderPdf: (dataPath: string, outPath: string) => Promise<{ bytes: Buffer; pages: number }>
+  /** BRIEF-15: record, in the room's own outbox, that the agent re-rendered
+   *  the shared document — so every watching surface learns the document
+   *  moved on the same stream it already reads, instead of finding out by
+   *  chance on its next poll.
+   *
+   *  Optional, and called ONLY after a successful save: a render that threw
+   *  produced nothing and must announce nothing (same rule as the `_meta`
+   *  omitted from the error branch below). When it is absent, or when it
+   *  throws, the render still succeeds — telling the room is downstream of
+   *  the document existing, and must never be able to undo it. */
+  readonly recordToolCall?: (code: string, toolName: string, args: unknown) => Promise<void>
 }
 
 /** The real deps for production wiring (`http.ts`): the seeded template,
@@ -463,6 +474,29 @@ async function callRenderTool(
     // `data` is stored alongside the render so `read_artifact` can hand the
     // document back in the shape it was written in.
     const record = await deps.renders.save(roomCode, html, pdf.bytes, pdf.pages, data)
+    // BRIEF-15: the room learns the document moved, on the outbox it already
+    // drains. After the save, never before — announcing a render that then
+    // failed is the lie this whole file is built to avoid.
+    //
+    // The recorded args are a SUMMARY, not the verbatim call: `data` is the
+    // whole document and would be copied into one outbox record per watching
+    // member, where the retention floor then pins it. A client that wants the
+    // content calls `read_artifact`, which is what that tool is for. Said
+    // plainly here because `TOOL_CALL_ARGS` normally means "exactly what the
+    // tool was called with", and this one does not.
+    if (deps.recordToolCall !== undefined) {
+      try {
+        await deps.recordToolCall(roomCode, RENDER_ARTIFACT_TOOL.name, {
+          roomCode,
+          blocks: data.length,
+          artifactUrl: publicArtifactUrl(roomCode),
+        })
+      } catch (error: unknown) {
+        // Never fatal: the document exists and the agent must be told so.
+        const why = error instanceof Error ? error.message : String(error)
+        console.error(`failed to record the render of ${roomCode} in the outbox: ${why}`)
+      }
+    }
     return {
       status: 200,
       body: {
