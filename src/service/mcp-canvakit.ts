@@ -163,6 +163,87 @@ const RENDER_ARTIFACT_RESOURCE_URI = "ui://render_artifact/view"
  *  AND on the `tools/call` result — deliberately redundant, for the same
  *  reason `ROOM_VIEW_TOOL`'s doc comment in mcp-room.ts gives: hosts differ
  *  on which one they read. */
+
+// BRIEF-05 fix 3: `items: { type: "object" }` (an empty object schema, no
+// properties) got past OpenAI's "array must have items" validator, but an
+// empty schema is what the model decodes against — the schema wins over the
+// prose description every time, so gpt-4.1 emitted `data: [{}, {}]`
+// (traced live; rdv-copilotkit-host/REPORT.md's Test 1 "Related bug"
+// paragraph). These five shapes are the real union the description already
+// documented in prose; `parseRenderArgs` stays exactly as permissive as
+// before (a wrong shape still comes back as canvakit's verbatim error, the
+// design this repo wants) — only the ADVERTISED schema changes, so the
+// model has real properties to fill in instead of nothing.
+const TITLE_BLOCK_SCHEMA = {
+  type: "object",
+  properties: {
+    isTitle: { const: true },
+    title: { type: "string" },
+    subtitle: { type: "string" },
+    date: { type: "string" },
+  },
+  required: ["isTitle", "title"],
+} as const
+
+const PROSE_BLOCK_SCHEMA = {
+  type: "object",
+  properties: {
+    isProse: { const: true },
+    heading: { type: "string" },
+    paragraphs: { type: "array", items: { type: "string" } },
+  },
+  required: ["isProse", "paragraphs"],
+} as const
+
+const BULLETS_BLOCK_SCHEMA = {
+  type: "object",
+  properties: {
+    isBullets: { const: true },
+    heading: { type: "string" },
+    items: { type: "array", items: { type: "string" } },
+  },
+  required: ["isBullets", "items"],
+} as const
+
+const TABLE_ROW_SCHEMA = {
+  type: "object",
+  properties: {
+    col1: { type: "string" },
+    col2: { type: "string" },
+    col3: { type: "string" },
+  },
+  required: ["col1", "col2", "col3"],
+} as const
+
+const TABLE_BLOCK_SCHEMA = {
+  type: "object",
+  properties: {
+    isTable: { const: true },
+    heading: { type: "string" },
+    head: { type: "array", items: { type: "string" }, minItems: 3, maxItems: 3 },
+    rows: { type: "array", items: TABLE_ROW_SCHEMA },
+  },
+  required: ["isTable", "head", "rows"],
+} as const
+
+const FIGURE_SCHEMA = {
+  type: "object",
+  properties: {
+    value: { type: "string" },
+    label: { type: "string" },
+  },
+  required: ["value", "label"],
+} as const
+
+const FIGURES_BLOCK_SCHEMA = {
+  type: "object",
+  properties: {
+    isFigures: { const: true },
+    items: { type: "array", items: FIGURE_SCHEMA },
+  },
+  required: ["isFigures", "items"],
+} as const
+
 const RENDER_ARTIFACT_TOOL = {
   name: "render_artifact",
   description:
@@ -173,14 +254,15 @@ const RENDER_ARTIFACT_TOOL = {
       roomCode: { type: "string", description: "This room's code, e.g. RDV-7F3K." },
       data: {
         type: "array",
-        // Deliberately loose: OpenAI's tool-schema validator rejects an
-        // array with no `items` before the model ever runs ("Array type
-        // must have items property"), making this tool uncallable — but the
-        // blocks are a heterogeneous union already described in prose below,
-        // and `parseRenderArgs` validates only that `data` is an array. A
-        // tighter schema here would claim a contract the handler does not
-        // enforce.
-        items: { type: "object" },
+        items: {
+          oneOf: [
+            TITLE_BLOCK_SCHEMA,
+            PROSE_BLOCK_SCHEMA,
+            BULLETS_BLOCK_SCHEMA,
+            TABLE_BLOCK_SCHEMA,
+            FIGURES_BLOCK_SCHEMA,
+          ],
+        },
         description:
           "The document as a list of typed blocks. Each block is one of: {isTitle:true,title,subtitle,date}, {isProse:true,heading,paragraphs:[...]}, {isBullets:true,heading,items:[...]}, {isTable:true,heading,head:[3 strings],rows:[{col1,col2,col3}]}, {isFigures:true,items:[{value,label}]}. Blocks are optional and repeatable, in any order.",
       },

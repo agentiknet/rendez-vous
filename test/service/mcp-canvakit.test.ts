@@ -104,7 +104,35 @@ test("tools/list's data property carries an items schema (an array with none is 
   assert.ok(isRecord(tool) && isRecord(tool.inputSchema))
   const properties = (tool.inputSchema as Record<string, unknown>).properties
   assert.ok(isRecord(properties) && isRecord(properties.data))
-  assert.deepEqual(properties.data.items, { type: "object" })
+  assert.ok(isRecord(properties.data.items), "data.items must itself be a schema, not left absent")
+})
+
+// BRIEF-05 fix 3: `items: { type: "object" }` is an empty schema — no
+// properties for the model to fill in, so gpt-4.1 emitted `data: [{}, {}]`
+// every time (a real, traced finding — see mcp-canvakit.ts's comment above
+// RENDER_ARTIFACT_TOOL). This asserts the advertised schema has moved to a
+// real union with actual properties per block, not just a differently
+// empty one.
+test("tools/list's data.items is a real union over the five block shapes, not an empty object schema", async () => {
+  const { handler } = harness()
+  const res = asRpc(await handler({ jsonrpc: "2.0", id: "a", method: "tools/list" }, undefined))
+  const tools = res.result?.tools
+  assert.ok(Array.isArray(tools))
+  const tool = tools[0]
+  assert.ok(isRecord(tool) && isRecord(tool.inputSchema))
+  const properties = (tool.inputSchema as Record<string, unknown>).properties
+  assert.ok(isRecord(properties) && isRecord(properties.data) && isRecord(properties.data.items))
+  const items = properties.data.items as Record<string, unknown>
+  assert.notDeepEqual(items, { type: "object" }, "the empty-object schema that caused the empty-block bug must be gone")
+  const branches = items.oneOf ?? items.anyOf
+  assert.ok(Array.isArray(branches), "data.items must be a oneOf/anyOf union")
+  assert.equal(branches.length, 5, "one branch per documented block shape")
+  const discriminators = branches
+    .filter(isRecord)
+    .flatMap((branch) => (isRecord(branch.properties) ? Object.keys(branch.properties) : []))
+  for (const flag of ["isTitle", "isProse", "isBullets", "isTable", "isFigures"]) {
+    assert.ok(discriminators.includes(flag), `${flag} must be a real property somewhere in the union`)
+  }
 })
 
 test("a call with the room's valid token renders both formats and returns the artifact URL", async () => {
