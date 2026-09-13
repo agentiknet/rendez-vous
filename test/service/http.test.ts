@@ -1707,7 +1707,11 @@ test("a spectator tab gets a working page and NO token in the HTML (brief C)", a
   assert.equal(res.status, 200)
   const html = await res.text()
   assert.ok(html.includes(code), "the page renders for a visitor with no name claimed at all")
-  assert.ok(html.includes("/outbox?since="), "the outbox drain is in the page script")
+  // BRIEF-15 step 2: the drain is an AG-UI run now. The cursor ack still
+  // goes to `/outbox/cursor` — AG-UI has none of its own (D7), and without
+  // the ack this member's retention floor is released.
+  assert.ok(html.includes("/agui"), "the AG-UI drain is in the page script")
+  assert.ok(html.includes("/outbox/cursor"), "the cursor ack survived the transport change")
   for (const member of [alice, bob]) {
     const token = memberToken(code, member.id, env.roomTokenSecret)
     assert.ok(!html.includes(token), "no member's bearer token is embedded in the HTML")

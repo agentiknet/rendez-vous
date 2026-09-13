@@ -21,6 +21,11 @@
 import type { JoinLinks } from "../links/index.ts"
 import { qrSvg } from "../links/index.ts"
 import { type Member, type Room, deliveryModeOf, pullMemberStale } from "../rooms/types.ts"
+// BRIEF-15 step 2: the two CUSTOM event names the AG-UI drain keys on, taken
+// from the translation that emits them rather than re-spelled here — a typo
+// in a string literal would read as "no gap" and "no kind", which is to say
+// as silence.
+import { GAP_EVENT_NAME, KIND_EVENT_NAME } from "../audience/agui.ts"
 
 // Exported: the room_view MCP App panel (src/service/room-view.html.ts) is a
 // sibling render with the same escaping story — one copy, two callers.
@@ -404,8 +409,11 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     const CLAIM_RETRY_MAX_MS = ${embedJson(CLAIM_RETRY_MAX_MS)};
     const OUTBOX_FAILURE_VISIBLE_AFTER = ${embedJson(OUTBOX_FAILURE_VISIBLE_AFTER)};
     const isRecord = ${isRecord.toString()};
-    const outboxRecordOf = ${outboxRecordOf.toString()};
-    const outboxPayloadOf = ${outboxPayloadOf.toString()};
+    const GAP_EVENT_NAME = ${embedJson(GAP_EVENT_NAME)};
+    const KIND_EVENT_NAME = ${embedJson(KIND_EVENT_NAME)};
+    const aguiFrameOf = ${aguiFrameOf.toString()};
+    const aguiSseFrames = ${aguiSseFrames.toString()};
+    const aguiPayloadOf = ${aguiPayloadOf.toString()};
     const claimStorageKey = ${claimStorageKey.toString()};
     const claimMember = ${claimMember.toString()};
     const freshOutboxTickState = ${freshOutboxTickState.toString()};
@@ -652,32 +660,154 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-function outboxRecordOf(value: unknown): OutboxRecord | undefined {
-  if (!isRecord(value) || typeof value.id !== "string") return undefined
+/** One AG-UI frame, narrowed to the fields this client reads. Everything
+ *  else in the vocabulary (`RUN_STARTED`, `TEXT_MESSAGE_START/END`,
+ *  `STATE_SNAPSHOT`, `RUN_FINISHED`) rides past unread: the bracket carries
+ *  no delivery of its own, and `STATE_SNAPSHOT.cursor` is deliberately NOT
+ *  consulted — see `aguiPayloadOf`. */
+export interface AguiFrame {
+  type: string
+  name?: string
+  messageId?: string
+  toolCallId?: string
+  toolCallName?: string
+  delta?: string
+  /** `CUSTOM.value`, narrowed to the two fields the kind event carries. The
+   *  gap event's own payload is not read: its PRESENCE is the whole signal. */
+  value?: { messageId?: string; kind?: string }
+}
+
+function aguiFrameOf(value: unknown): AguiFrame | undefined {
+  if (!isRecord(value) || typeof value.type !== "string") return undefined
+  const custom = isRecord(value.value) ? value.value : undefined
+  const messageId = custom !== undefined && typeof custom.messageId === "string" ? custom.messageId : undefined
+  const kind = custom !== undefined && typeof custom.kind === "string" ? custom.kind : undefined
   return {
-    id: value.id,
-    kind: typeof value.kind === "string" ? value.kind : "say",
-    text: typeof value.text === "string" ? value.text : "",
-    // BRIEF-15: carried through, or a tool record reaches `planOutboxRender`
-    // anonymous and renders as "an unnamed tool" — this narrowing runs on
-    // every record in the real drain, and dropping a field here is invisible
-    // to any test that calls `planOutboxRender` directly.
-    ...(typeof value.toolName === "string" ? { toolName: value.toolName } : {}),
+    type: value.type,
+    ...(typeof value.name === "string" ? { name: value.name } : {}),
+    ...(typeof value.messageId === "string" ? { messageId: value.messageId } : {}),
+    ...(typeof value.toolCallId === "string" ? { toolCallId: value.toolCallId } : {}),
+    ...(typeof value.toolCallName === "string" ? { toolCallName: value.toolCallName } : {}),
+    ...(typeof value.delta === "string" ? { delta: value.delta } : {}),
+    ...(messageId !== undefined || kind !== undefined
+      ? { value: { ...(messageId !== undefined ? { messageId } : {}), ...(kind !== undefined ? { kind } : {}) } }
+      : {}),
   }
 }
 
-function outboxPayloadOf(value: unknown): {
+/** Split an SSE body into its `data:` payloads, parsed. Tolerates the
+ *  `event: <name>` line the outbox arm writes, blank padding, and a trailing
+ *  partial frame (dropped — half a frame is not a delivery). Written against
+ *  the bytes rather than `EventSource` because the AG-UI run is BOUNDED: the
+ *  whole body arrives and ends, so there is nothing to subscribe to. */
+export function aguiSseFrames(body: string): AguiFrame[] {
+  const frames: AguiFrame[] = []
+  for (const block of body.split("\n\n")) {
+    const data = block
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim())
+      .join("")
+    if (data === "") continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(data)
+    } catch (e) {
+      continue
+    }
+    const frame = aguiFrameOf(parsed)
+    if (frame !== undefined) frames.push(frame)
+  }
+  return frames
+}
+
+/** BRIEF-15 step 2: an AG-UI run read back into the SAME `{pruned,
+ *  deliveries}` shape `outboxPayloadOf` produces, so `planOutboxRender` —
+ *  and with it the gap de-duplication, the `seenDeliveries` dedupe and the
+ *  whole renderer — stays the one implementation. A second rendering path
+ *  for the second transport is how the two would drift.
+ *
+ *  Three mappings, and one deliberate omission:
+ *
+ *  - `CUSTOM rdv.outbox.gap` → `pruned: true`. Its ABSENCE is the `false`
+ *    (docs/OUTBOX.md §8): there is no reassurance event to look for.
+ *  - `CUSTOM rdv.outbox.kind` → the record's kind, which is authoritative.
+ *    `TEXT_MESSAGE_START.role` is not consulted: `say` and `whisper` both
+ *    arrive as `assistant` there, and a whisper rendered as a `say` is a
+ *    private message shown with a public badge.
+ *  - `TOOL_CALL_START/ARGS` → a `kind: "tool"` record carrying `toolName`.
+ *
+ *  The omission: `STATE_SNAPSHOT.cursor` is never read. It is the room-wide
+ *  `deliverySeq`, which can sit past records still pending for this member;
+ *  the caller advances its cursor from the ids it ACTUALLY rendered, which
+ *  is brief F's rule and the reason the JSON drain ignores `payload.cursor`
+ *  too. Taking the snapshot here would skip a member's own pending record —
+ *  §1's table, row five. */
+export function aguiPayloadOf(frames: readonly AguiFrame[]): {
   pruned?: boolean
   deliveries?: OutboxRecord[]
 } {
-  if (!isRecord(value)) return {}
-  const deliveries = Array.isArray(value.deliveries)
-    ? value.deliveries.map(outboxRecordOf).filter((record): record is OutboxRecord => record !== undefined)
-    : undefined
-  return {
-    ...(typeof value.pruned === "boolean" ? { pruned: value.pruned } : {}),
-    ...(deliveries !== undefined ? { deliveries } : {}),
+  let pruned = false
+  const kinds: Record<string, string> = {}
+  const names: Record<string, string> = {}
+  const texts: Record<string, string> = {}
+  const order: string[] = []
+
+  // First seen wins the position, so records render in the order the run
+  // sent them — the outbox's own order (D1), not the order a `kind` event
+  // happened to arrive in.
+  const remember = (id: string): void => {
+    if (!Object.prototype.hasOwnProperty.call(texts, id)) {
+      texts[id] = ""
+      order.push(id)
+    }
   }
+
+  for (const frame of frames) {
+    if (frame.type === "CUSTOM" && frame.name === GAP_EVENT_NAME) {
+      pruned = true
+      continue
+    }
+    // The kind event is authoritative and arrives BEFORE the record it
+    // describes, so it is recorded without creating one: a kind with no
+    // content following it is not a delivery.
+    if (frame.type === "CUSTOM" && frame.name === KIND_EVENT_NAME) {
+      const custom = frame.value
+      if (custom !== undefined && custom.messageId !== undefined && custom.kind !== undefined) {
+        kinds[custom.messageId] = custom.kind
+      }
+      continue
+    }
+    if (frame.type === "TEXT_MESSAGE_CONTENT" && frame.messageId !== undefined) {
+      remember(frame.messageId)
+      texts[frame.messageId] = (texts[frame.messageId] ?? "") + (frame.delta ?? "")
+      continue
+    }
+    if (frame.type === "TOOL_CALL_START" && frame.toolCallId !== undefined) {
+      remember(frame.toolCallId)
+      // Set here as well as from the kind event: a TOOL_CALL_START is a tool
+      // call whatever the CUSTOM event said, and a kind event lost to a
+      // truncated frame must not turn one into agent prose.
+      kinds[frame.toolCallId] = "tool"
+      if (frame.toolCallName !== undefined) names[frame.toolCallId] = frame.toolCallName
+      continue
+    }
+    if (frame.type === "TOOL_CALL_ARGS" && frame.toolCallId !== undefined) {
+      remember(frame.toolCallId)
+      texts[frame.toolCallId] = (texts[frame.toolCallId] ?? "") + (frame.delta ?? "")
+    }
+  }
+
+  const deliveries: OutboxRecord[] = order.map((id) => {
+    const toolName = names[id]
+    return {
+      id,
+      kind: kinds[id] ?? "say",
+      text: texts[id] ?? "",
+      ...(toolName !== undefined ? { toolName } : {}),
+    }
+  })
+  return { pruned, deliveries }
 }
 
 /** What claiming needs from its environment: real `fetch` and real
@@ -811,8 +941,30 @@ export async function runOutboxTick(state: OutboxTickState, deps: OutboxTickDeps
 
   let res: Response
   try {
-    res = await deps.fetchImpl("/rooms/" + deps.roomCode + "/outbox?since=" + state.outboxSince, {
-      headers: { authorization: "Bearer " + state.memberToken },
+    // BRIEF-15 step 2: the drain is an AG-UI run. Same member bearer, same
+    // per-member scoping, same records — the room page is now one AG-UI
+    // client among however many others, instead of the one surface that
+    // spoke a private dialect.
+    //
+    // The run is BOUNDED (it closes with RUN_FINISHED), so this stays a
+    // tick rather than becoming a subscription: AG-UI has no resume-from-
+    // cursor concept, and `since` rides `forwardedProps` on the way in (D3).
+    res = await deps.fetchImpl("/rooms/" + deps.roomCode + "/agui", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream",
+        authorization: "Bearer " + state.memberToken,
+      },
+      // No message: a tick is a pure reconnect (D6). Typing is still
+      // `POST /rooms/:code/send`, which has its own claim and name-conflict
+      // handling — routing sends through here as well would duplicate it.
+      body: JSON.stringify({
+        threadId: deps.roomCode,
+        runId: "tick-" + String(deps.now()),
+        messages: [],
+        forwardedProps: { since: state.outboxSince },
+      }),
     })
   } catch (e) {
     state.drainFailureStreak += 1
@@ -830,15 +982,30 @@ export async function runOutboxTick(state: OutboxTickState, deps: OutboxTickDeps
     state.drainFailureStreak += 1
     return { status: "drain-failed" }
   }
-  let rawPayload: unknown
+  let frames: AguiFrame[]
   try {
-    rawPayload = await res.json()
+    frames = aguiSseFrames(await res.text())
   } catch (e) {
     state.drainFailureStreak += 1
     return { status: "drain-failed" }
   }
+  // A run that reported an error did not finish cleanly, and a partial
+  // transcript rendered as a complete one is exactly what RUN_ERROR exists
+  // to prevent (docs/OUTBOX.md §1). Counted as a failed tick so the banner
+  // can surface it, same as a dropped fetch.
+  if (frames.some((frame) => frame.type === "RUN_ERROR")) {
+    state.drainFailureStreak += 1
+    return { status: "drain-failed" }
+  }
+  // A body carrying no RUN_STARTED is not an AG-UI run — it is a proxy page,
+  // a truncated response, or an endpoint that is not there. Rendering its
+  // zero records as "nothing new" would be an absence reading as delivery.
+  if (!frames.some((frame) => frame.type === "RUN_STARTED")) {
+    state.drainFailureStreak += 1
+    return { status: "drain-failed" }
+  }
 
-  const payload = outboxPayloadOf(rawPayload)
+  const payload = aguiPayloadOf(frames)
   const plan = planOutboxRender(payload, state.seenDeliveries, state.outboxSince, state.gapState)
   // Cursor semantics (brief F): the cursor advances to the HIGHEST SEQ
   // ACTUALLY RENDERED — never to payload.cursor (the room-wide deliverySeq),

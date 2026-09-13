@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { JoinLinks } from "../../src/links/index.ts"
 import type { Room } from "../../src/rooms/types.ts"
-import { planOutboxRender, renderRoomNotFoundPage, renderRoomPage } from "../../src/web/page.ts"
+import { aguiPayloadOf, aguiSseFrames, planOutboxRender, renderRoomNotFoundPage, renderRoomPage } from "../../src/web/page.ts"
 
 function fakeLinks(overrides: Partial<JoinLinks> = {}): JoinLinks {
   return {
@@ -128,7 +128,12 @@ test("renderRoomPage's inline script no longer parses whisper markers — whispe
   // The outbox drain IS in the page: the embedded pure plan function, the
   // poll, the claim exchange, and the gap notice.
   assert.ok(html.includes("const planOutboxRender ="), "the tested plan function is embedded verbatim")
-  assert.ok(html.includes("/outbox?since="))
+  // BRIEF-15 step 2: the drain moved from `GET /outbox?since=` to an AG-UI
+  // run. The cursor ACK still posts to `/outbox/cursor` — AG-UI has no
+  // acknowledgement of its own (D7), and without it the retention floor is
+  // released and this member's backlog becomes prunable.
+  assert.ok(html.includes("/agui"), "the drain is an AG-UI run")
+  assert.ok(html.includes("/outbox/cursor"), "the cursor ack must survive the transport change")
   assert.ok(html.includes("/claim"), "the claim exchange is in the page")
   assert.ok(html.includes("rdv-claim:"), "the claim secret is stored keyed by room code + name")
   assert.ok(html.includes("outbox-gap"))
@@ -286,4 +291,128 @@ test("the embedded page renders a tool record as its own bubble and never prints
   // that line.
   const toolArm = html.slice(html.indexOf('item.kind === "tool"'), html.indexOf('const el = bubble(item.kind === "whisper"'))
   assert.ok(!toolArm.includes("body.textContent = item.text"), "a tool record's args must never be written into the transcript body")
+})
+
+// --- BRIEF-15 step 2: the page as an AG-UI client ----------------------
+
+/** Builds the SSE body the AG-UI endpoint actually writes. */
+function sse(...events: readonly Record<string, unknown>[]): string {
+  return events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")
+}
+
+const RUN_OPEN = { type: "RUN_STARTED", threadId: "t", runId: "r" }
+const RUN_CLOSE = { type: "RUN_FINISHED", threadId: "t", runId: "r" }
+
+test("aguiSseFrames parses the frames the endpoint writes and drops what is not a frame", () => {
+  const frames = aguiSseFrames(sse(RUN_OPEN, { type: "TEXT_MESSAGE_END", messageId: "d1" }, RUN_CLOSE))
+  assert.deepEqual(frames.map((frame) => frame.type), ["RUN_STARTED", "TEXT_MESSAGE_END", "RUN_FINISHED"])
+
+  assert.deepEqual(aguiSseFrames(""), [])
+  assert.deepEqual(aguiSseFrames("data: not json\n\n"), [], "an unparseable payload is dropped, not thrown on")
+  assert.deepEqual(aguiSseFrames("data: {\"no\":\"type\"}\n\n"), [], "a frame with no type is not a frame")
+  // A truncated tail (the connection died mid-write) must not become a frame.
+  assert.deepEqual(aguiSseFrames(sse(RUN_OPEN) + 'data: {"type":"TEXT_MES'), [{ type: "RUN_STARTED" }])
+})
+
+test("aguiSseFrames tolerates the `event:` line the outbox SSE arm writes alongside its data", () => {
+  const frames = aguiSseFrames('event: meta\ndata: {"type":"RUN_STARTED"}\n\n')
+  assert.deepEqual(frames, [{ type: "RUN_STARTED" }])
+})
+
+test("aguiPayloadOf maps the text triple back to a record, keyed by messageId, with the CUSTOM kind event as the authority", () => {
+  const payload = aguiPayloadOf(
+    aguiSseFrames(
+      sse(
+        RUN_OPEN,
+        { type: "CUSTOM", name: "rdv.outbox.kind", value: { messageId: "d1", kind: "whisper" } },
+        { type: "TEXT_MESSAGE_START", messageId: "d1", role: "assistant" },
+        { type: "TEXT_MESSAGE_CONTENT", messageId: "d1", delta: "for your eyes only" },
+        { type: "TEXT_MESSAGE_END", messageId: "d1" },
+        RUN_CLOSE,
+      ),
+    ),
+  )
+  // The role would have said "assistant" — a whisper shown with a public
+  // badge is the failure this assertion exists for.
+  assert.deepEqual(payload.deliveries, [{ id: "d1", kind: "whisper", text: "for your eyes only" }])
+  assert.equal(payload.pruned, false)
+})
+
+test("aguiPayloadOf maps the TOOL_CALL triple to a kind:'tool' record carrying its name and its args", () => {
+  const payload = aguiPayloadOf(
+    aguiSseFrames(
+      sse(
+        RUN_OPEN,
+        { type: "CUSTOM", name: "rdv.outbox.kind", value: { messageId: "d7", kind: "tool" } },
+        { type: "TOOL_CALL_START", toolCallId: "d7", toolCallName: "render_artifact" },
+        { type: "TOOL_CALL_ARGS", toolCallId: "d7", delta: '{"blocks":3}' },
+        { type: "TOOL_CALL_END", toolCallId: "d7" },
+        RUN_CLOSE,
+      ),
+    ),
+  )
+  assert.deepEqual(payload.deliveries, [{ id: "d7", kind: "tool", text: '{"blocks":3}', toolName: "render_artifact" }])
+})
+
+test("a TOOL_CALL_START whose kind event went missing is STILL a tool record — a lost CUSTOM frame must not turn args JSON into agent prose", () => {
+  const payload = aguiPayloadOf(
+    aguiSseFrames(sse(RUN_OPEN, { type: "TOOL_CALL_START", toolCallId: "d7", toolCallName: "render_artifact" }, { type: "TOOL_CALL_ARGS", toolCallId: "d7", delta: "{}" }, RUN_CLOSE)),
+  )
+  assert.equal(payload.deliveries?.[0]?.kind, "tool")
+})
+
+test("aguiPayloadOf concatenates streamed deltas, for text and for args alike", () => {
+  const payload = aguiPayloadOf(
+    aguiSseFrames(
+      sse(
+        RUN_OPEN,
+        { type: "TEXT_MESSAGE_CONTENT", messageId: "d1", delta: "hello " },
+        { type: "TEXT_MESSAGE_CONTENT", messageId: "d1", delta: "world" },
+        { type: "TOOL_CALL_START", toolCallId: "d2", toolCallName: "render_artifact" },
+        { type: "TOOL_CALL_ARGS", toolCallId: "d2", delta: '{"blo' },
+        { type: "TOOL_CALL_ARGS", toolCallId: "d2", delta: 'cks":3}' },
+        RUN_CLOSE,
+      ),
+    ),
+  )
+  assert.equal(payload.deliveries?.[0]?.text, "hello world")
+  assert.deepEqual(JSON.parse(String(payload.deliveries?.[1]?.text)), { blocks: 3 })
+})
+
+test("records keep the run's order, and a kind event alone creates no record — a kind with no content following it is not a delivery", () => {
+  const payload = aguiPayloadOf(
+    aguiSseFrames(
+      sse(
+        RUN_OPEN,
+        { type: "CUSTOM", name: "rdv.outbox.kind", value: { messageId: "d9", kind: "system" } },
+        { type: "TEXT_MESSAGE_CONTENT", messageId: "d1", delta: "first" },
+        { type: "TEXT_MESSAGE_CONTENT", messageId: "d2", delta: "second" },
+        RUN_CLOSE,
+      ),
+    ),
+  )
+  assert.deepEqual(payload.deliveries?.map((record) => record.id), ["d1", "d2"])
+})
+
+test("the gap CUSTOM event becomes pruned:true, and its absence is the false — there is no reassurance event to look for (docs/OUTBOX.md §8)", () => {
+  const withGap = aguiPayloadOf(
+    aguiSseFrames(sse(RUN_OPEN, { type: "CUSTOM", name: "rdv.outbox.gap", value: { since: 2, cursor: 9 } }, RUN_CLOSE)),
+  )
+  assert.equal(withGap.pruned, true)
+  assert.equal(aguiPayloadOf(aguiSseFrames(sse(RUN_OPEN, RUN_CLOSE))).pruned, false)
+})
+
+test("aguiPayloadOf never reads STATE_SNAPSHOT.cursor — the room-wide deliverySeq can sit past this member's own pending records (brief F)", () => {
+  const payload = aguiPayloadOf(
+    aguiSseFrames(sse(RUN_OPEN, { type: "STATE_SNAPSHOT", snapshot: { cursor: 999, roomCode: "RDV-TEST" } }, RUN_CLOSE)),
+  )
+  assert.deepEqual(payload.deliveries, [], "a snapshot is not a delivery")
+})
+
+test("the embedded page ships the AG-UI drain, not the JSON one — the transports must not both be live in the browser", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks())
+  assert.ok(html.includes("const aguiPayloadOf ="), "the AG-UI parser is embedded verbatim, same trick as planOutboxRender")
+  assert.ok(html.includes("const aguiSseFrames ="))
+  assert.ok(html.includes('"/agui"') || html.includes("/agui"), "the drain must target the AG-UI route")
+  assert.ok(!html.includes("const outboxPayloadOf ="), "the superseded JSON parser must not still be shipped")
 })

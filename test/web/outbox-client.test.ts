@@ -190,7 +190,7 @@ test("claimMember refuses to name-conflict silently: a claim mismatch clears the
   assert.ok(conflicted, "the conflict must be reported so the page can show it")
 })
 
-test("BRIEF-15: a tool record survives the REAL drain path with its toolName — runOutboxTick, over a real socket, through outboxRecordOf's narrowing (a planOutboxRender-only test passes against a parser that drops the field)", async () => {
+test("BRIEF-15: a tool record survives the REAL drain path with its toolName — runOutboxTick, over a real socket, through the AG-UI frame parser (a planOutboxRender-only test passes against a parser that drops the field)", async () => {
   const { store, baseUrl, code } = await harness()
   const deps = makeDeps(baseUrl, code, "Priya")
   const state = freshOutboxTickState()
@@ -230,4 +230,86 @@ test("BRIEF-15: a tool record survives the REAL drain path with its toolName —
   assert.equal(item.kind, "tool")
   assert.equal(item.toolName, "render_artifact", "the tool's name must survive the narrowing, or the bubble reads 'an unnamed tool'")
   assert.deepEqual(JSON.parse(item.text), args)
+})
+
+// --- BRIEF-15 step 2: the tick's AG-UI failure arms --------------------
+
+/** Deps whose drain answers with a canned SSE body. The token is preset on
+ *  the state by the caller, so the claim leg never runs and these tests are
+ *  about the run's own shape and nothing else. */
+function cannedDrainDeps(body: string, acks: string[]): OutboxTickDeps {
+  const storage = fakeStorage()
+  return {
+    roomCode: "RDV-TEST",
+    fetchImpl: async (input) => {
+      const url = String(input)
+      if (url.includes("/outbox/cursor")) {
+        acks.push(url)
+        return new Response("{}", { status: 200 })
+      }
+      return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } })
+    },
+    getName: () => "Priya",
+    getStoredClaim: (key) => storage.get(key),
+    setStoredClaim: (key, value) => storage.set(key, value),
+    removeStoredClaim: (key) => storage.remove(key),
+    onNameConflict: () => {},
+    now: () => 1_000,
+  }
+}
+
+function sse(...events: readonly Record<string, unknown>[]): string {
+  return events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")
+}
+
+test("a run carrying RUN_ERROR is a failed tick, never an empty-but-fine one — a partial transcript rendered as a complete one is what RUN_ERROR exists to prevent", async () => {
+  const acks: string[] = []
+  const state = freshOutboxTickState()
+  state.memberToken = "token"
+  const outcome = await runOutboxTick(
+    state,
+    cannedDrainDeps(sse({ type: "RUN_STARTED" }, { type: "RUN_ERROR", message: "room has no active session" }), acks),
+  )
+  assert.equal(outcome.status, "drain-failed")
+  assert.equal(state.drainFailureStreak, 1, "it must count toward the visible failure banner")
+})
+
+test("a body with no RUN_STARTED is a failed tick — zero records from a non-run must not render as 'nothing new'", async () => {
+  const acks: string[] = []
+  const state = freshOutboxTickState()
+  state.memberToken = "token"
+  for (const body of ["", "<html>proxy error</html>", sse({ type: "TEXT_MESSAGE_CONTENT", messageId: "d1", delta: "orphan" })]) {
+    state.drainFailureStreak = 0
+    const outcome = await runOutboxTick(state, cannedDrainDeps(body, acks))
+    assert.equal(outcome.status, "drain-failed", `expected a failed tick for body: ${JSON.stringify(body.slice(0, 30))}`)
+  }
+})
+
+test("a well-formed empty run IS a success and still acks — the ack is the liveness signal, not a side effect of having something to render (§5)", async () => {
+  const acks: string[] = []
+  const state = freshOutboxTickState()
+  state.memberToken = "token"
+  const outcome = await runOutboxTick(state, cannedDrainDeps(sse({ type: "RUN_STARTED" }, { type: "RUN_FINISHED" }), acks))
+  assert.equal(outcome.status, "ok")
+  assert.equal(acks.length, 1, "an empty run must still post its cursor")
+  assert.equal(state.drainFailureStreak, 0)
+})
+
+test("the cursor advances from the ids actually rendered, never from STATE_SNAPSHOT.cursor (brief F: the room-wide seq can sit past this member's own pending records)", async () => {
+  const acks: string[] = []
+  const state = freshOutboxTickState()
+  state.memberToken = "token"
+  await runOutboxTick(
+    state,
+    cannedDrainDeps(
+      sse(
+        { type: "RUN_STARTED" },
+        { type: "TEXT_MESSAGE_CONTENT", messageId: "d4", delta: "mine" },
+        { type: "STATE_SNAPSHOT", snapshot: { cursor: 99, roomCode: "RDV-TEST" } },
+        { type: "RUN_FINISHED" },
+      ),
+      acks,
+    ),
+  )
+  assert.equal(state.outboxSince, 4, "the cursor must be 4 (the record rendered), not 99 (the room's seq)")
 })
