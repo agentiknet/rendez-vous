@@ -25,6 +25,24 @@ sources:
         print-color-adjust: exact;
       }
 
+      /* SCREEN ONLY. The `* { margin: 0; padding: 0 }` reset above leaves the
+         body flush to the viewport edge, which reads as broken when the
+         artifact is shown in a pane or an iframe rather than as a page.
+         Scoped to `screen` deliberately: the PDF export's page margins come
+         from canvakit's print spec, and padding here would stack on top of
+         them and shrink the printed text block. */
+      @media screen {
+        body {
+          max-width: 52rem;
+          margin: 0 auto;
+          padding: 2.5rem 3rem 3.5rem;
+        }
+      }
+
+      @media screen and (max-width: 640px) {
+        body { padding: 1.5rem 1.25rem 2.5rem; }
+      }
+
       .title-block {
         border-bottom: 2px solid var(--color-accent, #C25E3A);
         padding-bottom: 1.5rem;
