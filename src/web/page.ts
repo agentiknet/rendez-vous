@@ -55,6 +55,30 @@ export const SIZE_CHANGED_METHOD = "ui/notifications/size-changed"
 const OUTBOX_GAP_TEXT =
   "Some earlier messages were lost while this tab was away — the room no longer holds them."
 
+/** Brief 14, defect 1: a tab with no name claimed is a genuine spectator —
+ *  it is not a recipient and never will be until it has a name — and must
+ *  say so rather than sitting there looking exactly like a live member. */
+const OUTBOX_NOT_MEMBER_TEXT = "Not receiving private replies — enter your name below to join as a member."
+
+/** Brief 14, defect 4: a `catch (e) {}` that calls the failure transient is
+ *  indistinguishable from a permanent one — which is what every pull
+ *  member's outbox has been, for the life of the project (docs/OUTBOX.md
+ *  §1's table, last row). Surfaced once the tick has failed enough times in
+ *  a row that it is no longer plausibly a single dropped packet. */
+const OUTBOX_FAILURE_TEXT = "This tab can't confirm it's receiving mail — retrying, but replies may be delayed."
+
+/** Bounded backoff for re-claiming after a lost token (brief 14, defect 2):
+ *  doubles on every failed attempt so a downed service is not hammered with
+ *  a `/claim` POST every 2 s forever, capped well under `PULL_STALE_MS`
+ *  (types.ts) so a real recovery still lands before the floor would release. */
+const CLAIM_RETRY_BASE_MS = 1000
+const CLAIM_RETRY_MAX_MS = 30_000
+
+/** Consecutive failed ticks (claim, drain, or ack) before defect 4's banner
+ *  shows — enough to rule out one dropped packet, short enough that it still
+ *  fires long before `PULL_STALE_MS` would silently declare the tab away. */
+const OUTBOX_FAILURE_VISIBLE_AFTER = 3
+
 /** The member-facing artifact is live only when the room is active and the
  *  last boot/liveness probe confirmed the box is actually serving it —
  *  `artifactReady: false` or a paused room means NO iframe and NO clickable
@@ -104,6 +128,8 @@ const STYLE = `
   .agent-status { font-weight: 600; color: #1a1c23; }
   #updated-ago { font-size: 11px; }
   #connection-lost { color: #b42318; font-weight: 600; display: none; }
+  #member-status { color: var(--grey); font-weight: 600; display: none; }
+  #outbox-failure { color: #b42318; font-weight: 600; display: none; }
   #members { font-size: 13px; color: var(--grey); max-width: 640px; }
   .member { display: inline-flex; align-items: center; gap: 5px; }
   .member-name { font-weight: 600; color: #1a1c23; }
@@ -370,114 +396,70 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     // member's bearer token. The token is never in the page HTML — the server
     // hands it only across this exchange, to a visitor who presented the
     // name's claim.
-    function claimKey(name) {
-      return "rdv-claim:" + ROOM_CODE + ":" + name.trim().toLowerCase();
-    }
+    // The SAME pure functions the tests exercise, embedded via their own
+    // JavaScript source (brief 14, same trick as planOutboxRender above): one
+    // claim-and-drain plan, tested and shipped from one source.
+    const CLAIM_RETRY_BASE_MS = ${embedJson(CLAIM_RETRY_BASE_MS)};
+    const CLAIM_RETRY_MAX_MS = ${embedJson(CLAIM_RETRY_MAX_MS)};
+    const OUTBOX_FAILURE_VISIBLE_AFTER = ${embedJson(OUTBOX_FAILURE_VISIBLE_AFTER)};
+    const isRecord = ${isRecord.toString()};
+    const outboxRecordOf = ${outboxRecordOf.toString()};
+    const outboxPayloadOf = ${outboxPayloadOf.toString()};
+    const claimStorageKey = ${claimStorageKey.toString()};
+    const claimMember = ${claimMember.toString()};
+    const freshOutboxTickState = ${freshOutboxTickState.toString()};
+    const runOutboxTick = ${runOutboxTick.toString()};
+    const outboxFailureVisible = ${outboxFailureVisible.toString()};
 
-    let memberTokenValue = null;
-    let outboxSince = 0;
-    const seenDeliveries = {};
-    const gapState = {};
+    const memberStatusEl = document.getElementById("member-status");
+    const outboxFailureEl = document.getElementById("outbox-failure");
+    const OUTBOX_NOT_MEMBER_TEXT = ${embedJson(OUTBOX_NOT_MEMBER_TEXT)};
+    const OUTBOX_FAILURE_TEXT = ${embedJson(OUTBOX_FAILURE_TEXT)};
+    memberStatusEl.textContent = OUTBOX_NOT_MEMBER_TEXT;
+    outboxFailureEl.textContent = OUTBOX_FAILURE_TEXT;
 
-    async function ensureClaimed() {
-      const name = nameInput.value.trim();
-      if (!name) return false;
-      const key = claimKey(name);
-      const stored = localStorage.getItem(key);
-      let res;
-      try {
-        res = await fetch("/rooms/" + ROOM_CODE + "/claim", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(stored ? { displayName: name, claim: stored } : { displayName: name }),
-        });
-      } catch (e) { return false; }
-      if (res.status === 409) {
-        // The name is claimed and we could not prove it is ours: say so,
-        // visibly, and forget the stale secret.
-        localStorage.removeItem(key);
-        nameErrorEl.style.display = "";
-        return false;
+    const claimDeps = {
+      roomCode: ROOM_CODE,
+      fetchImpl: fetch,
+      getName: function () { return nameInput.value; },
+      getStoredClaim: function (key) { return localStorage.getItem(key); },
+      setStoredClaim: function (key, value) { localStorage.setItem(key, value); },
+      removeStoredClaim: function (key) { localStorage.removeItem(key); },
+      onNameConflict: function () { nameErrorEl.style.display = ""; },
+    };
+    const outboxDeps = Object.assign({ now: function () { return Date.now(); } }, claimDeps);
+    const outboxState = freshOutboxTickState();
+
+    // Brief 14, defect 4: an ack or drain that fails repeatedly must surface
+    // in the page — the same rule the gap marker already follows. A silent
+    // catch on the one mechanism that proves a recipient exists is the
+    // defect this whole brief is about, wearing the costume of politeness.
+    function renderOutboxOutcome(outcome) {
+      memberStatusEl.style.display = outcome.status === "unclaimed" ? "" : "none";
+      outboxFailureEl.style.display = outboxFailureVisible(outboxState) ? "" : "none";
+      if (outcome.status !== "ok") return;
+      if (outcome.gap) {
+        const gapEl = document.createElement("div");
+        gapEl.className = "outbox-gap";
+        gapEl.textContent = outcome.gap;
+        transcriptEl.appendChild(gapEl);
       }
-      if (!res.ok) return false;
-      let body;
-      try { body = await res.json(); } catch (e) { return false; }
-      if (typeof body.claim === "string") localStorage.setItem(key, body.claim);
-      memberTokenValue = typeof body.memberToken === "string" ? body.memberToken : null;
-      if (memberTokenValue !== null) nameErrorEl.style.display = "none";
-      return memberTokenValue !== null;
-    }
-
-    // The drain is a POLL, not the EventSource the transcript uses: an
-    // EventSource cannot carry an Authorization header, and the ?t= query
-    // carrier is /mcp/room's mount workaround (PLAN-02 §4.1) — not something
-    // to propagate. The endpoint answers both readings (SSE or JSON); poll
-    // is the one a browser can authenticate.
-    // The cursor ack (PLAN-02 step 4, brief A): POSTed to its own endpoint
-    // AFTER this batch has been rendered into the DOM — acking on receipt
-    // would claim receipt of things the visitor may never see, re-creating
-    // exactly the confusion the transport/recipient distinction exists to
-    // prevent. On empty polls the current cursor is re-asserted unchanged:
-    // the ack doubles as the liveness signal that keeps this tab's retention
-    // floor held and the roster honest (a tab that never acks anything would
-    // be declared stale and its backlog reclaimed after PULL_STALE_MS).
-    async function ackOutbox() {
-      if (memberTokenValue === null || outboxSince <= 0) return;
-      try {
-        await fetch("/rooms/" + ROOM_CODE + "/outbox/cursor", {
-          method: "POST",
-          headers: { "content-type": "application/json", authorization: "Bearer " + memberTokenValue },
-          body: JSON.stringify({ seq: outboxSince }),
-        });
-      } catch (e) {
-        // Transient — the next drain tick re-acks from the same cursor.
-      }
+      outcome.items.forEach(function (item) {
+        const el = bubble(item.kind === "whisper" ? "assistant whisper" : item.kind === "system" ? "assistant system" : "assistant");
+        const badge = document.createElement("span");
+        badge.className = "badge";
+        badge.textContent = item.kind === "whisper" ? "whisper · private, to you" : item.kind === "system" ? "room · to you" : "agent · to you";
+        const body = document.createElement("div");
+        body.textContent = item.text;
+        el.appendChild(badge);
+        el.appendChild(body);
+      });
+      if (outcome.items.length > 0) transcriptEl.scrollTop = transcriptEl.scrollHeight;
     }
 
     async function drainOutbox() {
-      if (memberTokenValue === null) return;
-      try {
-        const res = await fetch("/rooms/" + ROOM_CODE + "/outbox?since=" + outboxSince, {
-          headers: { authorization: "Bearer " + memberTokenValue },
-        });
-        if (res.status === 401) { memberTokenValue = null; return; }
-        if (!res.ok) return;
-        const payload = await res.json();
-        const plan = planOutboxRender(payload, seenDeliveries, outboxSince, gapState);
-        if (plan.gap) {
-          const el = document.createElement("div");
-          el.className = "outbox-gap";
-          el.textContent = plan.gap;
-          transcriptEl.appendChild(el);
-        }
-        plan.items.forEach(function (item) {
-          const el = bubble(item.kind === "whisper" ? "assistant whisper" : item.kind === "system" ? "assistant system" : "assistant");
-          const badge = document.createElement("span");
-          badge.className = "badge";
-          badge.textContent = item.kind === "whisper" ? "whisper · private, to you" : item.kind === "system" ? "room · to you" : "agent · to you";
-          const body = document.createElement("div");
-          body.textContent = item.text;
-          el.appendChild(badge);
-          el.appendChild(body);
-        });
-        // Cursor semantics (brief F): the cursor advances to the HIGHEST SEQ
-        // ACTUALLY RENDERED — never to payload.cursor (the room-wide
-        // deliverySeq), which can sit past records still pending for anyone;
-        // a since advanced past a still-pending record would skip it once it
-        // is delivered, and the ack would claim a receipt that never
-        // happened. The cursor may only move past records this tab received.
-        const deliveries = payload.deliveries === undefined || payload.deliveries === null ? [] : payload.deliveries;
-        deliveries.forEach(function (record) {
-          if (!record || typeof record.id !== "string") return;
-          const m = /^d(\d+)$/.exec(record.id);
-          const seq = m ? parseInt(m[1], 10) : 0;
-          if (seq > outboxSince) outboxSince = seq;
-        });
-        transcriptEl.scrollTop = transcriptEl.scrollHeight;
-        await ackOutbox();
-      } catch (e) {
-        // Transient network error — the next tick retries from the same cursor.
-      }
+      const outcome = await runOutboxTick(outboxState, outboxDeps);
+      renderOutboxOutcome(outcome);
     }
 
     async function sendMessage() {
@@ -486,14 +468,18 @@ function script(code: string, room: Room, agentBusy: boolean): string {
       if (!displayName || !text) return;
       // Claim BEFORE sending: the send refuses a claimed name whose secret we
       // cannot present, so the exchange (which may mint one) runs first.
-      const claimed = await ensureClaimed();
-      if (!claimed) return;
+      const token = await claimMember(claimDeps);
+      if (token === null) return;
+      outboxState.memberToken = token;
+      outboxState.claimBackoffMs = CLAIM_RETRY_BASE_MS;
+      outboxState.claimNotBeforeMs = 0;
+      memberStatusEl.style.display = "none";
       localStorage.setItem("rdv-name", displayName);
       textInput.value = "";
       await fetch("/rooms/" + ROOM_CODE + "/send", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ displayName: displayName, text: text, claim: localStorage.getItem(claimKey(displayName)) || undefined }),
+        body: JSON.stringify({ displayName: displayName, text: text, claim: localStorage.getItem(claimStorageKey(ROOM_CODE, displayName)) || undefined }),
       });
       pollState();
     }
@@ -536,11 +522,11 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     renderState(INITIAL_STATE);
     connectStream();
     pollState();
-    if (nameInput.value) {
-      ensureClaimed().then(function (ok) {
-        if (ok) drainOutbox();
-      });
-    }
+    // Claim on load, not on first send (brief 14, defect 1): a visitor with
+    // a name becomes a member and starts draining without having to speak.
+    // Runs unconditionally — with no name yet, the first tick reports
+    // "unclaimed" and the page says so visibly instead of looking live.
+    drainOutbox();
   `
 }
 
@@ -588,6 +574,239 @@ export const planOutboxRender = (
   const isNewGap = payload.pruned === true && (gapState.lastReportedSince === undefined || since > gapState.lastReportedSince)
   if (isNewGap) gapState.lastReportedSince = since
   return { gap: isNewGap ? OUTBOX_GAP_TEXT : undefined, items }
+}
+
+/** Storage key for a room-web member's one-time join secret (PLAN-02
+ *  §3-D3 amended): opaque, keyed by room code + the claimed name (lower-
+ *  cased/trimmed, matching `slugify`'s identity) so two rooms or two names
+ *  in the same browser never collide. */
+export function claimStorageKey(roomCode: string, name: string): string {
+  return "rdv-claim:" + roomCode + ":" + name.trim().toLowerCase()
+}
+
+/** `res.json()` answers `unknown`, not `any` — these read it back into the
+ *  shapes `claimMember` and `planOutboxRender` need without ever asserting
+ *  the shape with `as`. A field that isn't what it should be is dropped or
+ *  defaulted, exactly like the inline validation these replace used to do. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function outboxRecordOf(value: unknown): { id: string; kind: string; text: string } | undefined {
+  if (!isRecord(value) || typeof value.id !== "string") return undefined
+  return {
+    id: value.id,
+    kind: typeof value.kind === "string" ? value.kind : "say",
+    text: typeof value.text === "string" ? value.text : "",
+  }
+}
+
+function outboxPayloadOf(value: unknown): {
+  pruned?: boolean
+  deliveries?: { id: string; kind: string; text: string }[]
+} {
+  if (!isRecord(value)) return {}
+  const deliveries = Array.isArray(value.deliveries)
+    ? value.deliveries
+        .map(outboxRecordOf)
+        .filter((record): record is { id: string; kind: string; text: string } => record !== undefined)
+    : undefined
+  return {
+    ...(typeof value.pruned === "boolean" ? { pruned: value.pruned } : {}),
+    ...(deliveries !== undefined ? { deliveries } : {}),
+  }
+}
+
+/** What claiming needs from its environment: real `fetch` and real
+ *  `localStorage` in the page, fakes of both in tests — an explicit
+ *  dependency object rather than a closure over page globals, so
+ *  `claimMember` and `runOutboxTick` below survive `toString()` AND run
+ *  against a real test server with no DOM at all (same reasoning as
+ *  `planOutboxRender`'s doc comment). */
+export interface ClaimDeps {
+  roomCode: string
+  fetchImpl: typeof fetch
+  getName: () => string
+  getStoredClaim: (key: string) => string | null
+  setStoredClaim: (key: string, value: string) => void
+  removeStoredClaim: (key: string) => void
+  onNameConflict: () => void
+}
+
+/** `POST /rooms/:code/claim` — mints or confirms this browser's bearer
+ *  token for the name currently typed. Returns `null` on every failure (no
+ *  name, network error, 409, unparseable response): the caller decides what
+ *  "no token yet" means. Brief 14 defects 1 and 2 both resolve to exactly
+ *  this one call — the first claim on load, and every reclaim after a
+ *  401 — which is why both now share it instead of the old two divergent
+ *  paths (`ensureClaimed` on load only, nothing at all after a 401). */
+export async function claimMember(deps: ClaimDeps): Promise<string | null> {
+  const name = deps.getName().trim()
+  if (name === "") return null
+  const key = claimStorageKey(deps.roomCode, name)
+  const stored = deps.getStoredClaim(key)
+  let res: Response
+  try {
+    res = await deps.fetchImpl("/rooms/" + deps.roomCode + "/claim", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(stored !== null ? { displayName: name, claim: stored } : { displayName: name }),
+    })
+  } catch (e) {
+    return null
+  }
+  if (res.status === 409) {
+    // The name is claimed and we could not prove it is ours: say so,
+    // visibly, and forget the stale secret.
+    deps.removeStoredClaim(key)
+    deps.onNameConflict()
+    return null
+  }
+  if (!res.ok) return null
+  let rawBody: unknown
+  try {
+    rawBody = await res.json()
+  } catch (e) {
+    return null
+  }
+  if (!isRecord(rawBody)) return null
+  if (typeof rawBody.claim === "string") deps.setStoredClaim(key, rawBody.claim)
+  return typeof rawBody.memberToken === "string" ? rawBody.memberToken : null
+}
+
+/** One tab's outbox drain state (brief 14). `claimBackoffMs` /
+ *  `claimNotBeforeMs` are defect 2's bounded backoff; `drainFailureStreak`
+ *  is defect 4's failure-visibility counter — incremented by ANY tick that
+ *  fails to get all the way through (a failed claim, a failed drain fetch,
+ *  or a failed ack) and reset only by one that does. */
+export interface OutboxTickState {
+  memberToken: string | null
+  outboxSince: number
+  seenDeliveries: Record<string, boolean>
+  gapState: { lastReportedSince?: number }
+  claimBackoffMs: number
+  claimNotBeforeMs: number
+  drainFailureStreak: number
+}
+
+export function freshOutboxTickState(): OutboxTickState {
+  return {
+    memberToken: null,
+    outboxSince: 0,
+    seenDeliveries: {},
+    gapState: {},
+    claimBackoffMs: CLAIM_RETRY_BASE_MS,
+    claimNotBeforeMs: 0,
+    drainFailureStreak: 0,
+  }
+}
+
+export interface OutboxTickDeps extends ClaimDeps {
+  now: () => number
+}
+
+export type OutboxTickOutcome =
+  | { status: "unclaimed" }
+  | { status: "claim-backoff" }
+  | { status: "claim-failed" }
+  | { status: "auth-lost" }
+  | { status: "drain-failed" }
+  | { status: "ok"; gap: string | undefined; items: { id: string; kind: string; text: string }[] }
+
+/** One 2 s drain tick (brief 14) — the single place that claims-if-needed,
+ *  drains, and acks, replacing three functions that used to fail
+ *  independently and silently: `ensureClaimed` (ran on load only),
+ *  `drainOutbox` (no path back from a 401), `ackOutbox` (gated on a
+ *  non-empty outbox, so it could never be the liveness signal §5 asks for).
+ *
+ *  A member with a name and no token — whether it never claimed at all or
+ *  just lost its token to a 401 — takes the exact same branch below: try to
+ *  claim, subject to backoff, and on success fall straight through to the
+ *  drain in the SAME tick. That is defect 2's "recover from 401": nulling
+ *  the token here is enough, because the next tick (or this one, once
+ *  backoff clears) tries to claim again instead of giving up forever.
+ *
+ *  The ack is unconditional (defect 3): even an outbox with nothing new
+ *  still re-posts its cursor — `0` is a legitimate cursor — because the ack
+ *  IS the liveness signal (docs/OUTBOX.md §5), not a side effect of having
+ *  something to render. */
+export async function runOutboxTick(state: OutboxTickState, deps: OutboxTickDeps): Promise<OutboxTickOutcome> {
+  if (state.memberToken === null) {
+    if (deps.getName().trim() === "") return { status: "unclaimed" }
+    if (deps.now() < state.claimNotBeforeMs) return { status: "claim-backoff" }
+    const token = await claimMember(deps)
+    if (token === null) {
+      state.claimBackoffMs = Math.min(state.claimBackoffMs * 2, CLAIM_RETRY_MAX_MS)
+      state.claimNotBeforeMs = deps.now() + state.claimBackoffMs
+      state.drainFailureStreak += 1
+      return { status: "claim-failed" }
+    }
+    state.memberToken = token
+    state.claimBackoffMs = CLAIM_RETRY_BASE_MS
+    state.claimNotBeforeMs = 0
+  }
+
+  let res: Response
+  try {
+    res = await deps.fetchImpl("/rooms/" + deps.roomCode + "/outbox?since=" + state.outboxSince, {
+      headers: { authorization: "Bearer " + state.memberToken },
+    })
+  } catch (e) {
+    state.drainFailureStreak += 1
+    return { status: "drain-failed" }
+  }
+  if (res.status === 401) {
+    // No path back used to end here (defect 2). Now: null the token and
+    // report it — the very next tick re-claims, subject to backoff above.
+    state.memberToken = null
+    state.claimNotBeforeMs = deps.now() + state.claimBackoffMs
+    state.drainFailureStreak += 1
+    return { status: "auth-lost" }
+  }
+  if (!res.ok) {
+    state.drainFailureStreak += 1
+    return { status: "drain-failed" }
+  }
+  let rawPayload: unknown
+  try {
+    rawPayload = await res.json()
+  } catch (e) {
+    state.drainFailureStreak += 1
+    return { status: "drain-failed" }
+  }
+
+  const payload = outboxPayloadOf(rawPayload)
+  const plan = planOutboxRender(payload, state.seenDeliveries, state.outboxSince, state.gapState)
+  // Cursor semantics (brief F): the cursor advances to the HIGHEST SEQ
+  // ACTUALLY RENDERED — never to payload.cursor (the room-wide deliverySeq),
+  // which can sit past records still pending for anyone.
+  const deliveries = payload.deliveries ?? []
+  for (const record of deliveries) {
+    const m = /^d(\d+)$/.exec(record.id)
+    const seq = m !== null && m[1] !== undefined ? parseInt(m[1], 10) : 0
+    if (seq > state.outboxSince) state.outboxSince = seq
+  }
+
+  try {
+    const ackRes = await deps.fetchImpl("/rooms/" + deps.roomCode + "/outbox/cursor", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer " + state.memberToken },
+      body: JSON.stringify({ seq: state.outboxSince }),
+    })
+    if (!ackRes.ok) throw new Error("ack failed: " + ackRes.status)
+    state.drainFailureStreak = 0
+  } catch (e) {
+    state.drainFailureStreak += 1
+  }
+
+  return { status: "ok", gap: plan.gap, items: plan.items }
+}
+
+/** Defect 4: whether the failure banner should show — enough consecutive
+ *  failed ticks in a row that this is no longer plausibly one dropped
+ *  packet. */
+export function outboxFailureVisible(state: OutboxTickState): boolean {
+  return state.drainFailureStreak >= OUTBOX_FAILURE_VISIBLE_AFTER
 }
 
 /** One button per configured surface, in the fidelity-ladder order
@@ -642,6 +861,8 @@ export function renderRoomPage(room: Room, links: JoinLinks, agentBusy = false):
     <span id="agent-status" class="agent-status">${agentStatus}</span>
     <span id="updated-ago"></span>
     <span id="connection-lost">connection lost, retrying</span>
+    <span id="member-status"></span>
+    <span id="outbox-failure"></span>
   </div>
   <div id="members">${membersHtml(room)}</div>
 </header>

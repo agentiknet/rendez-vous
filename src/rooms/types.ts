@@ -262,10 +262,32 @@ export function retentionFloors(room: Room, nowMs: number): ReadonlyMap<string, 
   const floors = new Map<string, number>()
   for (const member of room.members) {
     if (deliveryModeOf(member) !== "pull") continue
-    if (pullMemberStale(member, nowMs)) continue
+    if (pullMemberStale(member, nowMs)) {
+      warnIfNeverAcked(room.code, member)
+      continue
+    }
     floors.set(member.id, member.ackedSeq ?? 0)
   }
   return floors
+}
+
+/** Brief 14, defect 5: `pullMemberStale` alone cannot tell "the tab is
+ *  gone" (it acked, then stopped) from "the tab never acked because of a
+ *  client bug" — the failure this whole brief exists to describe, which
+ *  produced zero acks across the entire live store before it was fixed.
+ *  Logged once per member (deduped here, not by the caller — this runs on
+ *  every mint and every drain) so a room full of never-acking tabs doesn't
+ *  flood the log, while still catching the defect on day one instead of
+ *  needing a manual store scan to notice. */
+const neverAckedStaleWarned = new Set<string>()
+function warnIfNeverAcked(roomCode: string, member: Member): void {
+  if (member.ackedAt !== undefined) return
+  const key = `${roomCode}:${member.id}`
+  if (neverAckedStaleWarned.has(key)) return
+  neverAckedStaleWarned.add(key)
+  console.warn(
+    `pull member ${member.id} (${member.displayName}) in room ${roomCode} went stale having never acked at all — its outbox was drained without the client ever calling POST /outbox/cursor (docs/OUTBOX.md §5)`,
+  )
 }
 
 export interface Room {

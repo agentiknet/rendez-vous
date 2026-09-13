@@ -133,6 +133,14 @@ test("renderRoomPage's inline script no longer parses whisper markers — whispe
   assert.ok(html.includes("outbox-gap"))
 })
 
+test("renderRoomPage gives a visitor with no name yet a visible 'not a member' status, and a repeatedly-failing drain a visible failure banner (brief 14, defects 1+4)", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks())
+  assert.ok(html.includes('id="member-status"'), "a spectator with no name must be told, visibly, that it is not receiving private replies")
+  assert.ok(html.includes('id="outbox-failure"'), "an ack/drain that fails repeatedly must surface in the page, not just a silent catch")
+  assert.ok(html.includes("const runOutboxTick ="), "the tested claim-and-drain tick is embedded verbatim, same trick as planOutboxRender")
+  assert.ok(html.includes("const claimMember ="))
+})
+
 test("planOutboxRender dedupes on Delivery.id (at-least-once) and never repeats an item", () => {
   const seen: Record<string, boolean> = {}
   const first = planOutboxRender(
