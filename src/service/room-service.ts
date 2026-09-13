@@ -77,7 +77,15 @@ export type RoomWebSendOutcome =
   | { kind: "delivered"; member: Member; text: string }
   | { kind: "unknown-code" }
   | { kind: "no-session" }
-  | { kind: "name-claimed" }
+  | { kind: "name-claimed"; reason: NameClaimedReason }
+
+/** BRIEF-21: `name-claimed` was one refusal for two different situations —
+ *  someone else holds the name (a real conflict), or this tab holds it and
+ *  lost the proof (its stored secret is stale or was never sent). The server
+ *  can tell them apart (it knows whether `presented` arrived at all and
+ *  whether it matched), so it names which one rather than handing both the
+ *  same pessimistic answer. */
+export type NameClaimedReason = "taken" | "stale"
 
 /** `POST /rooms/:code/claim`'s outcome (PLAN-02 §3-D3 amended): the browser
  *  exchanges the name it typed (plus the join secret it holds, if any) for
@@ -87,7 +95,7 @@ export type RoomWebSendOutcome =
 export type RoomWebClaimOutcome =
   | { kind: "claimed"; member: Member; token: string; claim?: string }
   | { kind: "unknown-code" }
-  | { kind: "name-claimed" }
+  | { kind: "name-claimed"; reason: NameClaimedReason }
 
 const RESUMING_TEXT = "Resuming room, one moment…"
 
@@ -547,7 +555,11 @@ export class RoomService {
 
     if (local !== undefined && local.claim !== undefined) {
       if (presented === undefined || !tokensMatch(presented, local.claim)) {
-        return { kind: "name-claimed" }
+        // No secret sent at all → this browser never held the name: a real
+        // conflict, someone else has it. A secret that was sent and did not
+        // match → this browser once held it and its proof is stale — a
+        // different situation the server can name because it saw `presented`.
+        return { kind: "name-claimed", reason: presented === undefined ? "taken" : "stale" }
       }
       const { member } = await ensureMembership(this.store, code, {
         displayName,
@@ -602,7 +614,7 @@ export class RoomService {
       return { kind: "unknown-code" }
     }
     if (resolved.kind === "name-claimed") {
-      return { kind: "name-claimed" }
+      return { kind: "name-claimed", reason: resolved.reason }
     }
     const { member } = resolved
 

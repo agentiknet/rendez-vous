@@ -1682,6 +1682,33 @@ test("POST /rooms/:code/claim mints the join secret once and returns it exactly 
   void alice
 })
 
+test("BRIEF-21: name_claimed names WHICH situation it is — no secret presented at all (someone else's name) reads differently from a wrong secret (this browser's own stale proof)", async () => {
+  const { baseUrl, code } = await outboxHarness()
+  const first = await postClaim(baseUrl, code, "Priya")
+  assert.equal(first.status, 200)
+
+  // No secret at all: a stranger typing a name that is already held.
+  const noSecret = await postClaim(baseUrl, code, "Priya")
+  assert.equal(noSecret.status, 409)
+  assert.equal(noSecret.body.error, "name_claimed")
+  assert.equal(noSecret.body.reason, "taken", "the server saw nothing presented — a real conflict, not this browser's own history")
+
+  // A secret WAS presented but does not match: this browser (or one exactly
+  // like it) once held the name and its proof is stale — a different fact
+  // than "someone else has it", and the server can tell because it saw
+  // `presented` arrive and fail to match.
+  const staleSecret = await postClaim(baseUrl, code, "Priya", "not-the-real-secret")
+  assert.equal(staleSecret.status, 409)
+  assert.equal(staleSecret.body.error, "name_claimed")
+  assert.equal(staleSecret.body.reason, "stale")
+
+  assert.notEqual(
+    noSecret.body.message,
+    staleSecret.body.message,
+    "the pair is the point: one alone would pass with both branches hard-wired to the same message",
+  )
+})
+
 test("the grandfather path adopts a pre-claim member exactly once (brief A)", async () => {
   const { baseUrl, code, alice } = await outboxHarness()
   // `alice` (Chloe) was persisted by the harness WITHOUT a claim — the live

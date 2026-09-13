@@ -22,7 +22,15 @@ import { createHttpServer } from "../../src/service/http.ts"
 import { MediaStore } from "../../src/service/media-store.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
-import { claimMember, freshOutboxTickState, runOutboxTick, type OutboxTickDeps } from "../../src/web/page.ts"
+import {
+  claimMember,
+  claimStorageKey,
+  connectStreamOnce,
+  freshOutboxTickState,
+  outboxFailureVisible,
+  runOutboxTick,
+  type OutboxTickDeps,
+} from "../../src/web/page.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "../service/fake-daemon-extra.ts"
 
 const dirs: string[] = []
@@ -188,6 +196,72 @@ test("claimMember refuses to name-conflict silently: a claim mismatch clears the
   const impostorToken = await claimMember(impostor)
   assert.equal(impostorToken, null, "a claim with no matching secret must not mint a token")
   assert.ok(conflicted, "the conflict must be reported so the page can show it")
+})
+
+test("BRIEF-21: a name_claimed refusal with no stored secret and one with a stale secret report different sentences to onNameConflict — the pair the server's reason field exists for", async () => {
+  const { baseUrl, code } = await harness()
+  const owner = makeDeps(baseUrl, code, "Zoe")
+  const claimed = await claimMember(owner)
+  assert.ok(claimed !== null, "Zoe must actually hold the name for the two refusals below to mean anything")
+
+  // Situation one: nothing presented at all — a stranger typing the name.
+  let noSecretMessage: string | undefined
+  const stranger = makeDeps(baseUrl, code, "Zoe")
+  stranger.onNameConflict = (message) => {
+    noSecretMessage = message
+  }
+  const strangerToken = await claimMember(stranger)
+  assert.equal(strangerToken, null)
+  assert.ok(typeof noSecretMessage === "string" && noSecretMessage.length > 0, "the no-secret refusal must still say something")
+
+  // Situation two: a secret WAS presented, but it does not match — a tab
+  // that once held the name and lost its proof, the DIFFERENT situation
+  // brief 21 names separately from "someone else already has this name".
+  let staleMessage: string | undefined
+  const staleTab = makeDeps(baseUrl, code, "Zoe")
+  staleTab.setStoredClaim(claimStorageKey(code, "Zoe"), "not-the-real-secret")
+  staleTab.onNameConflict = (message) => {
+    staleMessage = message
+  }
+  const staleToken = await claimMember(staleTab)
+  assert.equal(staleToken, null)
+  assert.ok(typeof staleMessage === "string" && staleMessage.length > 0, "the stale-secret refusal must still say something")
+
+  assert.notEqual(
+    noSecretMessage,
+    staleMessage,
+    "one alone would pass with both branches hard-wired to the same string — the pair is the point",
+  )
+})
+
+function streamDeps(baseUrl: string, code: string): { roomCode: string; fetchImpl: typeof fetch } {
+  return { roomCode: code, fetchImpl: (input, init) => fetch(baseUrl + String(input), init) }
+}
+
+test("BRIEF-21: connectStreamOnce reads the REAL server's 409 no_session body and resolves the actual named sentence, over a real socket — a fresh room has no session until someone speaks to it", async () => {
+  const { baseUrl, code } = await harness()
+  const state = freshOutboxTickState()
+
+  const outcome = await connectStreamOnce(0, streamDeps(baseUrl, code), state)
+  assert.equal(outcome.status, "failed", "a brand-new room has no live session yet — the stream must refuse, not silently open")
+  assert.equal(state.streamFailureStreak, 1, "a failed connection attempt must count toward the reused failure banner")
+  assert.ok(
+    outcome.status === "failed" && typeof outcome.text === "string" && outcome.text.toLowerCase().includes("send a message"),
+    "the real 409 body's error field must resolve to the actual named sentence, not nothing",
+  )
+})
+
+test("BRIEF-21: three consecutive stream failures make the reused failure banner visible, over a real socket — one alone must not", async () => {
+  const { baseUrl, code } = await harness()
+  const state = freshOutboxTickState()
+  const deps = streamDeps(baseUrl, code)
+
+  await connectStreamOnce(0, deps, state)
+  assert.equal(outboxFailureVisible(state), false, "one failed connection attempt is plausibly a single dropped packet")
+
+  await connectStreamOnce(0, deps, state)
+  await connectStreamOnce(0, deps, state)
+  assert.equal(outboxFailureVisible(state), true, "three consecutive real 409s in a row must escalate to the visible banner")
 })
 
 test("BRIEF-15: a tool record survives the REAL drain path with its toolName — runOutboxTick, over a real socket, through the AG-UI frame parser (a planOutboxRender-only test passes against a parser that drops the field)", async () => {

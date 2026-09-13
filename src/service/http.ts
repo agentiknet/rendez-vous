@@ -32,7 +32,7 @@ import { createMcpCanvakitHandler, defaultMcpCanvakitDeps, type McpResponse } fr
 import { bearerOf, createMcpRoomHandler, memberToken, tokensMatch } from "./mcp-room.ts"
 import { createMcpPersonalHandler } from "./mcp-personal.ts"
 import { getSessionBusy, type DaemonExtraOptions } from "./daemon-extra.ts"
-import type { RoomService, RoomWebSendOutcome } from "./room-service.ts"
+import type { NameClaimedReason, RoomService, RoomWebSendOutcome } from "./room-service.ts"
 import { MediaStore, type IngressMediaRecord } from "./media-store.ts"
 
 /** The `Room` shape handed to any client-facing surface — the JSON API and
@@ -579,7 +579,7 @@ async function handleRoomSend(
     return
   }
   if (outcome.kind === "name-claimed") {
-    sendJson(res, 409, { error: "name_claimed", message: NAME_TAKEN_MESSAGE })
+    sendJson(res, 409, { error: "name_claimed", reason: outcome.reason, message: nameClaimedMessage(outcome.reason) })
     return
   }
   if (outcome.kind === "delivered") {
@@ -589,10 +589,22 @@ async function handleRoomSend(
   sendJson(res, 200, outcome.result)
 }
 
-/** The one refusal message a claimed name produces, shared by the claim
+/** The refusal message for a name someone else holds, shared by the claim
  *  exchange and the send path so the page renders it from either (brief A:
  *  a distinct outcome the UI can render, not a generic 500). */
 const NAME_TAKEN_MESSAGE = "ce nom est déjà pris dans cette room — choisis-en un autre"
+
+/** BRIEF-21: the OTHER `name-claimed` situation — this browser once held the
+ *  name, but the secret it presented did not match. Rendered as a different
+ *  sentence from `NAME_TAKEN_MESSAGE`, because "pick another name" is the
+ *  wrong instruction for someone who already owns this one; a wrong-secret
+ *  refusal names the state without building the recovery path (brief 23). */
+const NAME_STALE_MESSAGE =
+  "ce nom est le tien, mais ce navigateur ne peut plus le prouver — choisis un autre nom pour l'instant"
+
+function nameClaimedMessage(reason: NameClaimedReason): string {
+  return reason === "stale" ? NAME_STALE_MESSAGE : NAME_TAKEN_MESSAGE
+}
 
 /** `POST /rooms/:code/claim` (PLAN-02 §3-D3 amended) — the browser's join
  *  handshake. The page sends the name it typed plus the join secret it holds
@@ -677,7 +689,7 @@ async function handleRoomClaim(
     return
   }
   if (outcome.kind === "name-claimed") {
-    sendJson(res, 409, { error: "name_claimed", message: NAME_TAKEN_MESSAGE })
+    sendJson(res, 409, { error: "name_claimed", reason: outcome.reason, message: nameClaimedMessage(outcome.reason) })
     return
   }
   sendJson(res, 200, {
@@ -878,7 +890,7 @@ function sendFailureMessage(outcome: RoomWebSendOutcome): string | undefined {
     case "no-session":
       return "room has no active session"
     case "name-claimed":
-      return NAME_TAKEN_MESSAGE
+      return nameClaimedMessage(outcome.reason)
   }
 }
 

@@ -84,6 +84,29 @@ const CLAIM_RETRY_MAX_MS = 30_000
  *  fires long before `PULL_STALE_MS` would silently declare the tab away. */
 const OUTBOX_FAILURE_VISIBLE_AFTER = 3
 
+/** BRIEF-21: `GET /rooms/:code/stream` answering `409 {"error":"no_session"}`
+ *  is a NAMED, known state — the room's agent session died (or never
+ *  started) and nobody has sent it a message yet — not a network blip. It is
+ *  rendered immediately, not gated behind a failure count, because unlike a
+ *  dropped packet this is not transient: the console repeats it forever
+ *  until acted on, and the incident this brief fixes was exactly that repeat
+ *  going unseen. Actionable, not just diagnostic: writing to a paused room
+ *  already triggers `doResume` (`room-service.ts`), so "send a message"
+ *  is true today, not a promise. */
+const STREAM_NO_SESSION_TEXT = "This room has no live agent right now — send a message to wake it."
+
+/** BRIEF-21, non-negotiable 4: branch on the `error` field the server named,
+ *  never on the status code that carried it — the SAME 409 the stream uses
+ *  for `no_session` is what `/claim` uses for an unrelated `name_claimed`,
+ *  and a page that keyed off the number alone could not tell them apart
+ *  (which is exactly how the incident this brief fixes was misread once
+ *  already, by a human). `undefined` for anything else: an unrecognised or
+ *  transient failure has no sentence to show here, and stays covered by the
+ *  reused repeated-failure banner instead (`outboxFailureVisible`). */
+export function streamFailureText(errorCode: string | undefined): string | undefined {
+  return errorCode === "no_session" ? STREAM_NO_SESSION_TEXT : undefined
+}
+
 /** The member-facing artifact is live only when the room is active and the
  *  last boot/liveness probe confirmed the box is actually serving it —
  *  `artifactReady: false` or a paused room means NO iframe and NO clickable
@@ -135,6 +158,7 @@ const STYLE = `
   #connection-lost { color: #b42318; font-weight: 600; display: none; }
   #member-status { color: var(--grey); font-weight: 600; display: none; }
   #outbox-failure { color: #b42318; font-weight: 600; display: none; }
+  #stream-status { color: #b42318; font-weight: 600; display: none; }
   #members { font-size: 13px; color: var(--grey); max-width: 640px; }
   .member { display: inline-flex; align-items: center; gap: 5px; }
   .member-name { font-weight: 600; color: #1a1c23; }
@@ -377,23 +401,6 @@ function script(code: string, room: Room, agentBusy: boolean): string {
       transcriptEl.scrollTop = transcriptEl.scrollHeight;
     }
 
-    let since = 0;
-    let source = null;
-    function connectStream() {
-      if (source) source.close();
-      source = new EventSource("/rooms/" + ROOM_CODE + "/stream?since=" + since);
-      source.onmessage = function (event) {
-        let record;
-        try { record = JSON.parse(event.data); } catch (e) { return; }
-        if (typeof record.seq === "number") since = record.seq;
-        render(record);
-      };
-      source.onerror = function () {
-        source.close();
-        setTimeout(connectStream, 1000);
-      };
-    }
-
     // --- the member half: claim a name, drain the outbox (PLAN-02 §3-D5) ---
     // Spectator and member are two roles. Watching the transcript above takes
     // no name and no credential — that is what a projected display is. A tab
@@ -419,9 +426,16 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     const freshOutboxTickState = ${freshOutboxTickState.toString()};
     const runOutboxTick = ${runOutboxTick.toString()};
     const outboxFailureVisible = ${outboxFailureVisible.toString()};
+    // BRIEF-21: the stream's own known-failure sentence and its incremental
+    // SSE parser, the SAME trick as the rest of this block — one
+    // tested-and-shipped source, run here verbatim.
+    const streamFailureText = ${streamFailureText.toString()};
+    const sseSplitFrames = ${sseSplitFrames.toString()};
+    const connectStreamOnce = ${connectStreamOnce.toString()};
 
     const memberStatusEl = document.getElementById("member-status");
     const outboxFailureEl = document.getElementById("outbox-failure");
+    const streamStatusEl = document.getElementById("stream-status");
     const OUTBOX_NOT_MEMBER_TEXT = ${embedJson(OUTBOX_NOT_MEMBER_TEXT)};
     const OUTBOX_FAILURE_TEXT = ${embedJson(OUTBOX_FAILURE_TEXT)};
     memberStatusEl.textContent = OUTBOX_NOT_MEMBER_TEXT;
@@ -434,10 +448,54 @@ function script(code: string, room: Room, agentBusy: boolean): string {
       getStoredClaim: function (key) { return localStorage.getItem(key); },
       setStoredClaim: function (key, value) { localStorage.setItem(key, value); },
       removeStoredClaim: function (key) { localStorage.removeItem(key); },
-      onNameConflict: function () { nameErrorEl.style.display = ""; },
+      onNameConflict: function (message) { nameErrorEl.textContent = message; nameErrorEl.style.display = ""; },
     };
     const outboxDeps = Object.assign({ now: function () { return Date.now(); } }, claimDeps);
     const outboxState = freshOutboxTickState();
+
+    // --- the transcript stream (PLAN-02 §3-D — BRIEF-21: a plain fetch, not
+    // EventSource, because EventSource never exposes a failed response's
+    // status or body, and the one thing this whole brief is about is reading
+    // that body's error field instead of throwing it away). Unlike the
+    // bounded AG-UI drain above, a live room's stream never ends on its own,
+    // so the body is read incrementally with a reader loop instead of one
+    // text() call — sseSplitFrames carries a trailing partial frame across
+    // read() calls the same way the browser's own SSE parser would. ---
+    let since = 0;
+    async function connectStream() {
+      const outcome = await connectStreamOnce(since, { roomCode: ROOM_CODE, fetchImpl: fetch }, outboxState);
+      outboxFailureEl.style.display = outboxFailureVisible(outboxState) ? "" : "none";
+      if (outcome.status === "failed" || !outcome.body) {
+        const text = outcome.status === "failed" ? outcome.text : undefined;
+        streamStatusEl.textContent = text || "";
+        streamStatusEl.style.display = text ? "" : "none";
+        setTimeout(connectStream, 1000);
+        return;
+      }
+      streamStatusEl.style.display = "none";
+      const reader = outcome.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, { stream: true });
+          const split = sseSplitFrames(buffer);
+          buffer = split.rest;
+          split.frames.forEach(function (data) {
+            let record;
+            try { record = JSON.parse(data); } catch (e) { return; }
+            if (typeof record.seq === "number") since = record.seq;
+            render(record);
+          });
+        }
+      } catch (e) {
+        // The connection dropped mid-stream — reconnect below, same as a
+        // clean end; either way there is nothing more to read from this one.
+      }
+      setTimeout(connectStream, 1000);
+    }
 
     // Brief 14, defect 4: an ack or drain that fails repeatedly must surface
     // in the page — the same rule the gap marker already follows. A silent
@@ -721,6 +779,84 @@ export function aguiSseFrames(body: string): AguiFrame[] {
   return frames
 }
 
+/** BRIEF-21: incremental sibling of `aguiSseFrames` above, for the ONE stream
+ *  in this page that is genuinely unbounded (`GET /rooms/:code/stream`) and
+ *  so cannot be read with a single `.text()` the way the bounded AG-UI run
+ *  can — a live room never ends the response. `buffer` is whatever bytes
+ *  have arrived so far (this call's leftover `rest` plus the newest chunk);
+ *  every COMPLETE `\n\n`-terminated frame is parsed out, and a trailing
+ *  partial frame is carried forward in `rest` rather than dropped — a chunk
+ *  boundary landing mid-record must not lose it, unlike `aguiSseFrames`'s
+ *  bounded case where a partial frame at the very end is genuinely never
+ *  coming. */
+export function sseSplitFrames(buffer: string): { frames: string[]; rest: string } {
+  const blocks = buffer.split("\n\n")
+  const rest = blocks.pop() ?? ""
+  const frames = blocks
+    .map((block) =>
+      block
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+        .join(""),
+    )
+    .filter((data) => data !== "")
+  return { frames, rest }
+}
+
+/** BRIEF-21: what `connectStreamOnce` needs from its environment — the same
+ *  shape of dependency object `ClaimDeps`/`OutboxTickDeps` use, so this can
+ *  be driven against a REAL http server in a test exactly the way
+ *  `runOutboxTick` already is, instead of leaving the one place that reads
+ *  the stream's 409 body untested. */
+export interface StreamConnectDeps {
+  roomCode: string
+  fetchImpl: typeof fetch
+}
+
+export type StreamConnectOutcome =
+  | { status: "failed"; text: string | undefined }
+  | { status: "connected"; body: ReadableStream<Uint8Array> | null }
+
+/** One connection attempt for the transcript stream, factored out of the
+ *  embedded script exactly like `runOutboxTick` was for the outbox drain
+ *  (brief 14) — testable in isolation, and shared by both the shipped page
+ *  and its tests from the one source. Only the CONNECT decision lives here:
+ *  a stream that opens successfully hands its body back for the caller's
+ *  own reader loop to keep rendering records from for as long as the room
+ *  stays live — that part has no single outcome to return, since it renders
+ *  forever until the connection ends, so it is not this function's job. */
+export async function connectStreamOnce(
+  since: number,
+  deps: StreamConnectDeps,
+  state: OutboxTickState,
+): Promise<StreamConnectOutcome> {
+  let res: Response
+  try {
+    res = await deps.fetchImpl("/rooms/" + deps.roomCode + "/stream?since=" + since)
+  } catch (e) {
+    state.streamFailureStreak += 1
+    return { status: "failed", text: undefined }
+  }
+  if (!res.ok) {
+    let body: unknown
+    try {
+      body = await res.json()
+    } catch (e) {
+      body = undefined
+    }
+    // BRIEF-21, non-negotiable 4: the `error` field decides the sentence,
+    // never the status code — a 409 here means `no_session`, a 409 on
+    // `/claim` means something unrelated, and this function must not read
+    // "409" as either one.
+    const errorCode = isRecord(body) && typeof body.error === "string" ? body.error : undefined
+    state.streamFailureStreak += 1
+    return { status: "failed", text: streamFailureText(errorCode) }
+  }
+  state.streamFailureStreak = 0
+  return { status: "connected", body: res.body }
+}
+
 /** BRIEF-15 step 2: an AG-UI run read back into the SAME `{pruned,
  *  deliveries}` shape `outboxPayloadOf` produces, so `planOutboxRender` —
  *  and with it the gap de-duplication, the `seenDeliveries` dedupe and the
@@ -823,8 +959,19 @@ export interface ClaimDeps {
   getStoredClaim: (key: string) => string | null
   setStoredClaim: (key: string, value: string) => void
   removeStoredClaim: (key: string) => void
-  onNameConflict: () => void
+  /** BRIEF-21: the server names WHICH `name_claimed` situation this is (a
+   *  real conflict, or this browser's own stale proof) and hands over the
+   *  sentence that says so in `message` — passed straight through here
+   *  rather than re-derived, so the two situations can never drift onto the
+   *  same hard-wired string on the client side. */
+  onNameConflict: (message: string) => void
 }
+
+/** Fallback for a `name_claimed` refusal whose body carried no `message` —
+ *  should not happen against this project's own server, but a page that
+ *  renders nothing here on a malformed body is the exact silence this brief
+ *  exists to remove. */
+const NAME_CLAIMED_FALLBACK_TEXT = "This name is already in use in this room — choose another."
 
 /** `POST /rooms/:code/claim` — mints or confirms this browser's bearer
  *  token for the name currently typed. Returns `null` on every failure (no
@@ -848,30 +995,47 @@ export async function claimMember(deps: ClaimDeps): Promise<string | null> {
   } catch (e) {
     return null
   }
-  if (res.status === 409) {
-    // The name is claimed and we could not prove it is ours: say so,
-    // visibly, and forget the stale secret.
-    deps.removeStoredClaim(key)
-    deps.onNameConflict()
-    return null
-  }
-  if (!res.ok) return null
   let rawBody: unknown
   try {
     rawBody = await res.json()
   } catch (e) {
+    rawBody = undefined
+  }
+  const body = isRecord(rawBody) ? rawBody : undefined
+  // BRIEF-21, non-negotiable 4: branch on `error`, never on the status code
+  // — a `name_claimed` body is what this means, whatever number carried it,
+  // and a 409 with a DIFFERENT `error` (there is one: `/stream`'s
+  // `no_session`) must never be read as a name conflict here.
+  if (body !== undefined && body.error === "name_claimed") {
+    // The name is claimed and we could not prove it is ours: say so,
+    // visibly, with the sentence naming WHICH situation this is, and forget
+    // the stale secret either way.
+    deps.removeStoredClaim(key)
+    deps.onNameConflict(typeof body.message === "string" ? body.message : NAME_CLAIMED_FALLBACK_TEXT)
     return null
   }
-  if (!isRecord(rawBody)) return null
-  if (typeof rawBody.claim === "string") deps.setStoredClaim(key, rawBody.claim)
-  return typeof rawBody.memberToken === "string" ? rawBody.memberToken : null
+  if (!res.ok) return null
+  if (body === undefined) return null
+  if (typeof body.claim === "string") deps.setStoredClaim(key, body.claim)
+  return typeof body.memberToken === "string" ? body.memberToken : null
 }
 
 /** One tab's outbox drain state (brief 14). `claimBackoffMs` /
  *  `claimNotBeforeMs` are defect 2's bounded backoff; `drainFailureStreak`
  *  is defect 4's failure-visibility counter — incremented by ANY tick that
  *  fails to get all the way through (a failed claim, a failed drain fetch,
- *  or a failed ack) and reset only by one that does. */
+ *  or a failed ack) and reset only by one that does.
+ *
+ *  `streamFailureStreak` (BRIEF-21) is the SAME kind of counter for the
+ *  transcript stream's own reconnect loop, kept SEPARATE from
+ *  `drainFailureStreak` rather than folded into it: the outbox drain
+ *  (`/agui`) does not depend on the room having a live session, so a room
+ *  with no live agent fails the stream every attempt while the drain keeps
+ *  succeeding — a shared counter would have the drain's successes erase the
+ *  stream's failures and the banner would never reach `outboxFailureVisible`
+ *  no matter how long the stream kept failing. Both counters drive the ONE
+ *  reused banner (`outboxFailureVisible` below), which is the reuse the
+ *  brief asks for: one visible escalation, not a second banner. */
 export interface OutboxTickState {
   memberToken: string | null
   outboxSince: number
@@ -880,6 +1044,7 @@ export interface OutboxTickState {
   claimBackoffMs: number
   claimNotBeforeMs: number
   drainFailureStreak: number
+  streamFailureStreak: number
 }
 
 export function freshOutboxTickState(): OutboxTickState {
@@ -891,6 +1056,7 @@ export function freshOutboxTickState(): OutboxTickState {
     claimBackoffMs: CLAIM_RETRY_BASE_MS,
     claimNotBeforeMs: 0,
     drainFailureStreak: 0,
+    streamFailureStreak: 0,
   }
 }
 
@@ -1033,10 +1199,11 @@ export async function runOutboxTick(state: OutboxTickState, deps: OutboxTickDeps
 }
 
 /** Defect 4: whether the failure banner should show — enough consecutive
- *  failed ticks in a row that this is no longer plausibly one dropped
+ *  failed ticks in a row (of EITHER kind — the outbox drain, BRIEF-21's
+ *  stream reconnect, or both) that this is no longer plausibly one dropped
  *  packet. */
 export function outboxFailureVisible(state: OutboxTickState): boolean {
-  return state.drainFailureStreak >= OUTBOX_FAILURE_VISIBLE_AFTER
+  return state.drainFailureStreak >= OUTBOX_FAILURE_VISIBLE_AFTER || state.streamFailureStreak >= OUTBOX_FAILURE_VISIBLE_AFTER
 }
 
 /** One button per configured surface, in the fidelity-ladder order
@@ -1093,6 +1260,7 @@ export function renderRoomPage(room: Room, links: JoinLinks, agentBusy = false):
     <span id="connection-lost">connection lost, retrying</span>
     <span id="member-status"></span>
     <span id="outbox-failure"></span>
+    <span id="stream-status"></span>
   </div>
   <div id="members">${membersHtml(room)}</div>
 </header>
@@ -1108,7 +1276,7 @@ export function renderRoomPage(room: Room, links: JoinLinks, agentBusy = false):
   </section>
 </main>
 <footer>
-  <div id="name-error">ce nom est déjà pris dans cette room — choisis-en un autre</div>
+  <div id="name-error"></div>
   <input id="name-input" placeholder="Your name" autocomplete="off" />
   <input id="text-input" placeholder="Say something…" autocomplete="off" />
   <button id="send-button">Send</button>

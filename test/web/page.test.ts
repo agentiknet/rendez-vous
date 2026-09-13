@@ -2,7 +2,17 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { JoinLinks } from "../../src/links/index.ts"
 import type { Room } from "../../src/rooms/types.ts"
-import { aguiPayloadOf, aguiSseFrames, planOutboxRender, renderRoomNotFoundPage, renderRoomPage } from "../../src/web/page.ts"
+import {
+  aguiPayloadOf,
+  aguiSseFrames,
+  freshOutboxTickState,
+  outboxFailureVisible,
+  planOutboxRender,
+  renderRoomNotFoundPage,
+  renderRoomPage,
+  sseSplitFrames,
+  streamFailureText,
+} from "../../src/web/page.ts"
 
 function fakeLinks(overrides: Partial<JoinLinks> = {}): JoinLinks {
   return {
@@ -451,4 +461,54 @@ test("the embedded pure-function block EVALUATES and runs standalone — the fre
   const payload = result.payload
   assert.ok(payload !== null && typeof payload === "object" && "deliveries" in payload)
   assert.deepEqual(payload.deliveries, [{ id: "d7", kind: "tool", text: "{}", toolName: "render_artifact" }])
+})
+
+// --- BRIEF-21: the stream's own 409 no_session must read as words, not console noise ---
+
+test("streamFailureText renders the no_session state as a readable sentence naming the fix, keyed on the error field alone", () => {
+  const text = streamFailureText("no_session")
+  assert.ok(typeof text === "string" && text.length > 0, "a named, known failure must never render as nothing")
+  assert.ok(text!.toLowerCase().includes("no live agent"), "the sentence must say what is actually wrong")
+  assert.ok(text!.toLowerCase().includes("send a message"), "the sentence must name the actual fix: writing wakes the room")
+})
+
+test("streamFailureText renders nothing for an error code it does not recognise — an unrecognised failure is not this brief's to invent a sentence for", () => {
+  assert.equal(streamFailureText("some_future_error"), undefined)
+  assert.equal(streamFailureText(undefined), undefined)
+})
+
+test("sseSplitFrames extracts every complete data: frame from a buffer and carries a trailing partial frame forward as rest, never dropping it", () => {
+  const whole = sseSplitFrames('data: {"seq":1,"kind":"text-delta"}\n\ndata: {"seq":2,"kind":"turn-end"}\n\n')
+  assert.deepEqual(whole.frames, ['{"seq":1,"kind":"text-delta"}', '{"seq":2,"kind":"turn-end"}'])
+  assert.equal(whole.rest, "")
+
+  // A chunk boundary landing mid-record: the second frame is not yet
+  // terminated by a blank line, so it must come back as `rest`, not be lost.
+  const partial = sseSplitFrames('data: {"seq":1,"kind":"text-delta"}\n\ndata: {"seq":2,"ki')
+  assert.deepEqual(partial.frames, ['{"seq":1,"kind":"text-delta"}'])
+  assert.equal(partial.rest, 'data: {"seq":2,"ki')
+
+  // Feeding the rest of the bytes into a second call, with the carried
+  // `rest` prepended, completes the frame the first call held back.
+  const completed = sseSplitFrames(partial.rest + 'nd":"turn-end"}\n\n')
+  assert.deepEqual(completed.frames, ['{"seq":2,"kind":"turn-end"}'])
+})
+
+test("a repeated stream failure escalates to the reused failure banner, and one alone does not — the same threshold defect 4 already built", () => {
+  const state = freshOutboxTickState()
+  assert.equal(outboxFailureVisible(state), false, "a fresh tab must not shout before anything has failed")
+
+  state.streamFailureStreak = 1
+  assert.equal(outboxFailureVisible(state), false, "one failed connection attempt is plausibly a single dropped packet")
+
+  state.streamFailureStreak = 3
+  assert.equal(outboxFailureVisible(state), true, "three in a row is no longer plausibly transient — the banner must show")
+})
+
+test("renderRoomPage ships the stream's failure text and reconnect parser verbatim, and a status line to render them into", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks())
+  assert.ok(html.includes('id="stream-status"'), "the no_session sentence needs somewhere visible to land")
+  assert.ok(html.includes("const streamFailureText ="), "the tested classifier is embedded verbatim, same trick as planOutboxRender")
+  assert.ok(html.includes("const sseSplitFrames ="), "the incremental SSE parser is embedded verbatim")
+  assert.ok(!html.includes("new EventSource"), "EventSource never exposes a failed response's body, so it cannot carry the error field")
 })
