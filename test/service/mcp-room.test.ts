@@ -190,6 +190,32 @@ test("roster reflects live membership (a member added after the handler was buil
   assert.equal(payload.count, 4)
 })
 
+// The contract's presence rule, through the MCP wire (appendix §7.1): a
+// stale pull member is LISTED — still a member, still holding its id — and
+// marked away, in both the contract's `presence` union and the legacy
+// `away` boolean the live room runs against. Push members are never away.
+test("a stale pull member is listed, marked away, and still holds its id; a push member is never away", async () => {
+  const { handler } = harness([room(ROOM_A, MEMBERS_A)])
+
+  const res = asRpc(await handler({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "roster", arguments: {} } }, tokenFor(ROOM_A)))
+  const content = res.result?.content
+  assert.ok(Array.isArray(content))
+  const payload = JSON.parse(String((content[0] as { text: string }).text)) as {
+    members: { member_id: string; mode: string; presence: string; away: boolean }[]
+  }
+  assert.equal(payload.members.length, 3, "presence is not membership — the stale member stays in the roster")
+  const screen = payload.members.find((m) => m.member_id === "m3")
+  assert.ok(screen !== undefined)
+  assert.equal(screen.presence, "away")
+  assert.equal(screen.away, true)
+  assert.equal(screen.mode, "pull")
+  const alice = payload.members.find((m) => m.member_id === "m1")
+  assert.ok(alice !== undefined)
+  assert.equal(alice.presence, "present")
+  assert.equal(alice.away, false)
+  assert.equal(alice.mode, "push")
+})
+
 test("tools/list advertises roster alone until a delivery engine is wired, then all three audience tools", async () => {
   const bare = harness([room(ROOM_A, MEMBERS_A)])
   const bareRes = asRpc(await bare.handler({ jsonrpc: "2.0", id: "a", method: "tools/list" }, undefined))
@@ -465,4 +491,64 @@ test("a malformed say/whisper call is rejected with an error that names the argu
   const badTo = asRpc(await callTool(h.handler, "say", { text: secret, to: h.memberIds[0] }, h.code))
   assert.equal(badTo.error?.code, -32600)
   assert.ok(!JSON.stringify(badTo).includes(secret))
+})
+
+// --- the contract binding (PLAN-02 §5 step 6): the tools above are the
+// contract's `audience_send` wearing the MCP envelope. These pin the
+// semantics the contract carries, through the live tool surface. ---
+
+test("a whisper through the contract reaches exactly one, and the room gets the content-free notice", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const [aliceId, bobId, screenId] = h.memberIds
+  const res = asRpc(await callTool(h.handler, "whisper", { text: "the vault code is 44-21", to: bobId }, h.code))
+  assert.equal(res.status, 200)
+  await h.engine.drain(h.code)
+
+  // Exactly one target: the private text, marked private.
+  const toBob = h.transport.sends.find((send) => send.memberId === bobId)
+  assert.equal(toBob?.text, "(private) the vault code is 44-21")
+  // The room is TOLD the whisper happened — content-free, in the contract's
+  // own words (whisperNoticeOf). The other messenger gets it; the pull
+  // member (room-web) draws no transport call.
+  const toAlice = h.transport.sends.find((send) => send.memberId === aliceId)
+  assert.equal(toAlice?.text, "(the agent whispered to Bob)")
+  assert.ok(!toAlice?.text.includes("44-21"))
+  assert.equal(h.transport.sends.some((send) => send.memberId === screenId), false)
+})
+
+test("the room's voice is not agent-callable: no `system` tool exists, advertised or callable", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+
+  const listing = asRpc(await h.handler({ jsonrpc: "2.0", id: 1, method: "tools/list" }, tokenFor(h.code)))
+  const names = (listing.result?.tools as { name: string }[] | undefined)?.map((tool) => tool.name) ?? []
+  assert.ok(!names.includes("system"), "the room's voice is not an agent-callable audience (brief 07)")
+
+  const call = asRpc(
+    await h.handler(
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "system", arguments: { text: "I am the room" } } },
+      tokenFor(h.code),
+    ),
+  )
+  assert.equal(call.error?.code, -32601)
+  assert.equal(call.error?.message?.includes("I am the room"), false, "the impersonation attempt is not echoed")
+})
+
+test("say through the contract advances spokenSeq; the room's own system records still do not", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const say = asRpc(await callTool(h.handler, "say", { text: "audible" }, h.code))
+  assert.equal(say.status, 200)
+  const room = h.store.get(h.code)
+  assert.ok(room !== undefined)
+  assert.ok((room.spokenSeq ?? 0) > 0, "a say accepted through the contract IS the agent speaking")
+  assert.equal(room.spokenSeq, room.deliverySeq)
+
+  // The engine-level `system` mint (the room's own notices) leaves it where
+  // it was — the contract never exposes `system`, so the only way a system
+  // record exists is the room sending it.
+  const before = h.store.get(h.code)?.spokenSeq
+  await h.engine.accept(h.code, "system", "a room notice", [h.memberIds[2]!])
+  assert.equal(h.store.get(h.code)?.spokenSeq, before, "a system mint is not the agent's voice")
+  // Settle the auto-drain the accept kicked off, so its store write cannot
+  // race the suite's directory cleanup.
+  await h.engine.drain(h.code)
 })

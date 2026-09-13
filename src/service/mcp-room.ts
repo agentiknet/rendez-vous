@@ -35,22 +35,30 @@
 
 import { createHmac, timingSafeEqual } from "node:crypto"
 import { env } from "../env.ts"
-import { type Room, deliveryModeOf, pullMemberStale } from "../rooms/types.ts"
+import {
+  listAudience,
+  parseAudienceSendArgs,
+  sendAudience,
+  type AudienceSendBackend,
+  type AudienceSendOutcome,
+} from "../audience/contract.ts"
+import type { Room } from "../rooms/types.ts"
 import type { McpResponse, McpServerMount } from "./mcp-canvakit.ts"
 
 /** The delivery half of the audience tools (PLAN §3.2): the `say`/`whisper`
  *  handlers below only ACCEPT — validation, `pending` `Delivery` records and
  *  the actual provider sends live in the engine, off the agent's turn.
  *  Injectable so tests can run the tools against a real engine and a fake
- *  transport. */
-export interface McpRoomDeliveries {
-  accept(
-    code: string,
-    kind: "say" | "whisper",
-    text: string,
-    memberIds: readonly string[],
-  ): Promise<{ accepted: readonly string[]; unknown: readonly string[] }>
-}
+ *  transport.
+ *
+ *  Since the contract step (PLAN-02 §5 step 6, Option C) this is the
+ *  contract's `AudienceSendBackend`: the tool surface owns NOTHING but the
+ *  MCP envelope — the shapes, the validation, the outcome vocabulary and
+ *  the semantics live in src/audience/contract.ts, and a second
+ *  implementation (daemon builtin, HTTP driver) can consume the contract
+ *  without ever hearing of MCP. `DeliveryEngine` satisfies this
+ *  structurally. */
+export type McpRoomDeliveries = AudienceSendBackend
 
 /** The per-room bearer token for `POST /mcp/room`. Deterministic in the
  *  secret, so the booter can compute the mount's header at spawn time and
@@ -147,7 +155,7 @@ const METHOD_NOT_FOUND = -32601
 const ROSTER_TOOL = {
   name: "roster",
   description:
-    "List the members of THIS room (fixed by your credentials — no argument). One entry per member: member_id (use this to address them — display names can collide and change), display_name (for prose only), surface (the channel they are on: telegram, whatsapp, email, room-web), tier (messenger/email/room-web — a room-web member is a screen, not a phone), joined_at, away (true = a room-web member whose tab has not drained its outbox for over 90 seconds — nobody is there; do not address them and do not expect an answer). Re-read it when you need to address someone; do not cache ids across turns — a member who leaves and rejoins gets a new id.",
+    "List the members of THIS room (fixed by your credentials — no argument). One entry per member: member_id (use this to address them — display names can collide and change), display_name (for prose only), surface (the channel they are on: telegram, whatsapp, email, room-web), tier (messenger/email/room-web — a room-web member is a screen, not a phone), mode (push = a phone whose provider holds the address for them; pull = a screen that drains its outbox from the room), joined_at, presence/away (away = a room-web member whose tab has not drained its outbox for over 90 seconds — nobody is there; do not address them and do not expect an answer; the member itself is NOT gone — its id stays valid). Re-read it when you need to address someone; do not cache ids across turns — a messenger/email member who leaves and rejoins gets a new id (a room-web member's id is stable across its tab closing and reopening).",
   inputSchema: { type: "object", properties: {} },
 } as const
 
@@ -243,21 +251,31 @@ function resolveRoom(
   return undefined
 }
 
-/** The `roster` result. Ids and surfaces only — see the file-top HARD RULE:
- *  this result is projected on the room's shared screen. `away` (brief D):
- *  a stale pull member is marked so the agent stops addressing a ghost —
- *  the `Ecran` failure solved once; push members are never away (their
- *  transport hand-off is the whole story). The stale member stays in the
- *  roster — only its liveness claim is withdrawn. */
+/** The `roster` result: the contract's `listAudience` mapped onto the MCP
+ *  wire. Ids and surfaces only — see the file-top HARD RULE: this result is
+ *  projected on the room's shared screen.
+ *
+ *  Presence (brief D / contract `AudiencePresence`): a stale pull member is
+ *  `away`, STILL a member, still holding its id — the agent stops
+ *  addressing a ghost, the `Ecran` failure solved once; push members are
+ *  never away. The wire carries BOTH the contract's `presence` union and
+ *  the legacy `away` boolean: the boolean predates the contract and a live
+ *  room runs against it (removing a key is a change an agent can observe),
+ *  while `presence` is the shape a second implementation renders. Neither
+ *  is an invitation to treat away as gone — the member stays in the
+ *  roster; only its liveness claim is withdrawn. `mode` is the contract's
+ *  push/pull axis, exposed since the contract step. */
 function rosterResult(room: Room): Record<string, unknown> {
-  const nowMs = Date.now()
-  const members = room.members.map((member) => ({
-    member_id: member.id,
+  const listed = listAudience(room, Date.now())
+  const members = listed.members.map((member) => ({
+    member_id: member.memberId,
     display_name: member.displayName,
-    surface: member.address.provider,
+    mode: member.mode,
+    surface: member.surface,
     tier: member.tier,
     joined_at: member.joinedAt,
-    away: deliveryModeOf(member) === "pull" && pullMemberStale(member, nowMs),
+    presence: member.presence,
+    away: member.presence === "away",
   }))
   return {
     content: [{ type: "text", text: JSON.stringify({ members, count: members.length }) }],
@@ -265,53 +283,25 @@ function rosterResult(room: Room): Record<string, unknown> {
   }
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string")
-}
-
-/** The `say`/`whisper` result: member ids and counts ONLY (file-top HARD
- *  RULE). `accepted` entries carry the id and `ok: true` — "accepted for
- *  delivery", never the text, never a per-member delivery claim. */
-function acceptResult(accepted: readonly string[], unknown_: readonly string[]): Record<string, unknown> {
+/** The `say`/`whisper` result, from the contract's outcome: member ids and
+ *  counts ONLY (file-top HARD RULE). `accepted` entries carry the id and
+ *  `ok: true` — "accepted for delivery", never the text, never a
+ *  per-member delivery claim, and NO confirmation field: confirmation is
+ *  three-valued on the delivery record (appendix §6), and a send result
+ *  that claimed `delivered: true` would be absence reading as delivery. */
+function acceptResult(outcome: Extract<AudienceSendOutcome, { ok: true }>): Record<string, unknown> {
   return {
     content: [
       {
         type: "text",
         text: JSON.stringify({
-          accepted: accepted.map((memberId) => ({ member_id: memberId, ok: true })),
-          unknown: [...unknown_],
+          accepted: outcome.accepted.map((memberId) => ({ member_id: memberId, ok: true })),
+          unknown: [...outcome.unknown],
         }),
       },
     ],
     isError: false,
   }
-}
-
-/** Validate `say`/`whisper` arguments. Error strings name the ARGUMENT, never
- *  its value — a bad call must not project the message onto the shared
- *  screen. Returns `undefined` (caller replies with `message`) or a parsed
- *  shape. */
-function parseAudienceArgs(
-  args: Record<string, unknown>,
-  kind: "say" | "whisper",
-): { text: string; to: string[] | undefined } | { error: string } {
-  const text = args.text
-  if (typeof text !== "string" || text.trim().length === 0) {
-    return { error: `invalid arguments: ${kind} requires a non-empty text string` }
-  }
-  if (kind === "whisper") {
-    const to = args.to
-    if (typeof to !== "string" || to.trim().length === 0) {
-      return { error: "invalid arguments: whisper requires a `to` member_id string (from roster)" }
-    }
-    return { text, to: [to] }
-  }
-  const to = args.to
-  if (to === undefined) return { text, to: undefined }
-  if (!isStringArray(to) || to.some((id) => id.trim().length === 0)) {
-    return { error: "invalid arguments: say's `to` must be an array of member_id strings (from roster)" }
-  }
-  return { text, to: to.map((id) => id.trim()) }
 }
 
 /**
@@ -366,16 +356,19 @@ export function createMcpRoomHandler(
         if (deliveries === undefined) {
           return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(params.name)}`)
         }
-        const kind = params.name === SAY_TOOL.name ? "say" : "whisper"
+        // `whisper` is the contract's private send, not a separate verb:
+        // same envelope, one id, and the content-free notice semantics live
+        // in the contract (`whisperNoticeOf`), not in this adapter.
+        const privacy = params.name === WHISPER_TOOL.name ? ("private" as const) : ("public" as const)
         const args = isRecord(params.arguments) ? params.arguments : {}
-        const parsed = parseAudienceArgs(args, kind)
+        const parsed = parseAudienceSendArgs(args, privacy)
         if ("error" in parsed) return fail(id, INVALID_REQUEST, parsed.error)
-        // `to` omitted = every current member, explicitly. Resolution against
-        // the roster happens inside the engine's accept — an unknown id is
-        // reported, never broadcast to.
-        const targets = parsed.to ?? room.members.map((member) => member.id)
-        const outcome = await deliveries.accept(room.code, kind, parsed.text, targets)
-        return ok(id, acceptResult(outcome.accepted, outcome.unknown))
+        // Target resolution (`to` omitted = every current member,
+        // deliberately) and the unroutable-outcome conversion are the
+        // contract's (`sendAudience`), never the envelope's.
+        const outcome = await sendAudience(room, deliveries, parsed.input)
+        if (!outcome.ok) return fail(id, INVALID_REQUEST, `unroutable delivery: ${outcome.message}`)
+        return ok(id, acceptResult(outcome))
       }
 
       return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(params.name)}`)
