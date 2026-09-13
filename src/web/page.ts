@@ -39,7 +39,9 @@ export function embedJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, "\\u003c")
 }
 
-const ARTIFACT_PAUSED_TEXT = "artifact paused, the link will come back when the room wakes"
+// Exported: the render_artifact MCP App panel (src/service/artifact-view.html.ts,
+// BRIEF-02) shows the same paused text rather than retyping the string.
+export const ARTIFACT_PAUSED_TEXT = "artifact paused, the link will come back when the room wakes"
 
 /** The gap notice (PLAN-02 §3-D6): a `pruned: true` outbox response means the
  *  server destroyed records the tab's cursor still points at. Never let that

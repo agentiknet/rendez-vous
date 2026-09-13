@@ -37,6 +37,7 @@ function harness(overrides?: Partial<Pick<McpCanvakitDeps, "roomExists" | "rende
   const renderCalls: string[] = []
   const deps: McpCanvakitDeps = {
     roomExists: (code) => code === ROOM,
+    rooms: () => [],
     renders,
     renderHtml: async (dataPath, outPath) => {
       renderCalls.push(`html:${outPath}`)
@@ -61,7 +62,7 @@ test("initialize answers with a protocol version, the tool capability, and the e
   assert.equal(res.status, 200)
   assert.ok(isRecord(res.result))
   assert.equal(typeof res.result?.protocolVersion, "string")
-  assert.deepEqual(res.result?.capabilities, { tools: {} })
+  assert.deepEqual(res.result?.capabilities, { tools: {}, resources: {} })
   assert.ok(isRecord(res.result?.serverInfo) && res.result.serverInfo.name === "rdv-canvakit")
   assert.equal(res.result?.hasOwnProperty("id"), false)
 })

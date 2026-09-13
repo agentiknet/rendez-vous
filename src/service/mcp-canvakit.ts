@@ -19,6 +19,11 @@
  * tunnel and renders whatever it is handed into the page members watch — an
  * unauthenticated version of that is not acceptable. The token binds a call
  * to its room code: a token for room A cannot render room B's artifact.
+ *
+ * `resources/list`/`resources/read` (BRIEF-02) are `mcp-room.ts`'s
+ * `room_view` resources' deliberate sibling: same shape, same reasoning,
+ * serving `render_artifact`'s MCP Apps panel (`ui://render_artifact/view`,
+ * `artifact-view.html.ts`) instead of `room_view`'s.
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto"
@@ -27,6 +32,8 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { env } from "../env.ts"
+import type { Room } from "../rooms/types.ts"
+import { artifactViewHtml } from "./artifact-view.html.ts"
 import { publicArtifactUrl } from "./artifact-proxy.ts"
 import { renderArtifactHtml, renderArtifactPdf } from "./artifact-render.ts"
 import type { ArtifactRenderStore } from "./artifact-renders.ts"
@@ -75,6 +82,13 @@ export interface McpCanvakitDeps {
   /** Room existence check — a token proves knowledge of the room code, but
    *  the room must still exist in the store for the render to be servable. */
   readonly roomExists: (code: string) => boolean
+  /** All rooms this endpoint can serve, read fresh per call (BRIEF-02, D3):
+   *  `resources/read` has no argument to carry a `roomCode` (unlike
+   *  `render_artifact` — see D2's doc on `RENDER_ARTIFACT_TOOL`), so the
+   *  bearer is the only signal, resolved by recompute-and-compare over this
+   *  list — exactly `mcp-room.ts`'s `resolveRoom`, against `roomRenderToken`
+   *  instead of `roomAudienceToken`. */
+  readonly rooms: () => readonly Room[]
   readonly renders: ArtifactRenderStore
   /** Render the data file to `outPath` as HTML; resolve with the bytes.
    *  Throw with canvakit's verbatim error text on failure. */
@@ -85,11 +99,12 @@ export interface McpCanvakitDeps {
 }
 
 /** The real deps for production wiring (`http.ts`): the seeded template,
- *  the real canvakit CLI, the real render store. The `roomExists` closure is
- *  supplied by http.ts over its `RoomService` — set `roomExists` there. */
+ *  the real canvakit CLI, the real render store. The `roomExists` and `rooms`
+ *  closures are supplied by http.ts over its `RoomService` — set them there. */
 export function defaultMcpCanvakitDeps(renders: ArtifactRenderStore): McpCanvakitDeps {
   return {
     roomExists: () => false,
+    rooms: () => [],
     renders,
     renderHtml: async (dataPath, outPath) => {
       await renderArtifactHtml(ARTIFACT_TEMPLATE_PATH, dataPath, outPath)
@@ -127,9 +142,27 @@ export interface McpErrorBody {
   readonly error: { readonly code: number; readonly message: string }
 }
 
+/** The MCP Apps resource this server serves (BRIEF-02, same spec brief 01's
+ *  `ROOM_VIEW_RESOURCE_URI` documents): a host that recognises it renders
+ *  `render_artifact`'s tool as a panel instead of (or alongside) its text
+ *  result. */
+const RENDER_ARTIFACT_RESOURCE_URI = "ui://render_artifact/view"
+
 /** The one tool this server advertises. The input schema mirrors
  *  `apps/room-artifact/.agentproto/ui/data.json`'s shape (a list of typed
- *  blocks) plus the room the render belongs to. */
+ *  blocks) plus the room the render belongs to.
+ *
+ *  D2: `roomCode` stays an argument, unlike `mcp-room.ts`'s no-argument
+ *  tools — the asymmetry is out of scope (BRIEF-02) because a live room's
+ *  agent is running against the current schema and changing a tool's
+ *  arguments is a change it can observe mid-room. It is bound anyway: the
+ *  handler recomputes `roomRenderToken(roomCode, …)` and rejects a mismatch,
+ *  so a token for room A cannot render room B.
+ *
+ *  `_meta.ui.resourceUri` is carried BOTH here (the `tools/list` definition)
+ *  AND on the `tools/call` result — deliberately redundant, for the same
+ *  reason `ROOM_VIEW_TOOL`'s doc comment in mcp-room.ts gives: hosts differ
+ *  on which one they read. */
 const RENDER_ARTIFACT_TOOL = {
   name: "render_artifact",
   description:
@@ -146,6 +179,7 @@ const RENDER_ARTIFACT_TOOL = {
     },
     required: ["roomCode", "data"],
   },
+  _meta: { ui: { resourceUri: RENDER_ARTIFACT_RESOURCE_URI } },
 } as const
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -170,6 +204,32 @@ function ok(id: string | number | null, result: Record<string, unknown>): McpRes
 
 function fail(id: string | number | null, code: number, message: string): McpResponse {
   return { status: 200, body: { jsonrpc: "2.0", id, error: { code, message } } }
+}
+
+function unauthorized(id: string | number | null): McpResponse {
+  return {
+    status: 401,
+    body: {
+      jsonrpc: "2.0",
+      id,
+      error: { code: INVALID_REQUEST, message: "unauthorized: missing or invalid bearer token for this room" },
+    },
+  }
+}
+
+/** Resolve the room `resources/read`'s bearer names (D3): recompute-and-
+ *  compare over every known room's `roomRenderToken`, exactly
+ *  `mcp-room.ts`'s `resolveRoom` against `roomAudienceToken` — the token is
+ *  not reversible, so this is the only honest binding. `render_artifact`
+ *  itself does not use this: its own `roomCode` argument is bound directly
+ *  in `callRenderTool` (D2). */
+function resolveRoom(deps: McpCanvakitDeps, authorization: string | undefined): Room | undefined {
+  const provided = bearerOf(authorization)
+  if (provided === undefined) return undefined
+  for (const room of deps.rooms()) {
+    if (tokensMatch(provided, roomRenderToken(room.code, env.roomTokenSecret))) return room
+  }
+  return undefined
 }
 
 /** Validate the tool's `arguments` into the pieces the renderer needs.
@@ -250,6 +310,9 @@ async function callRenderTool(
             },
           ],
           isError: false,
+          // Redundant with the `tools/list` definition's `_meta` — see
+          // `RENDER_ARTIFACT_TOOL`'s doc comment for why both are written.
+          _meta: { ui: { resourceUri: RENDER_ARTIFACT_RESOURCE_URI } },
         },
       },
     }
@@ -267,6 +330,7 @@ async function callRenderTool(
             },
           ],
           isError: true,
+          _meta: { ui: { resourceUri: RENDER_ARTIFACT_RESOURCE_URI } },
         },
       },
     }
@@ -277,8 +341,9 @@ async function callRenderTool(
 
 /**
  * Handle one JSON-RPC 2.0 request body (already JSON.parse'd) with its
- * `Authorization` header value. Implements exactly what an MCP client needs:
- * `initialize`, `notifications/initialized`, `tools/list`, `tools/call`.
+ * `Authorization` header value: `initialize`, `notifications/initialized`,
+ * `tools/list`, `tools/call`, plus `resources/list`/`resources/read`
+ * (BRIEF-02), the MCP Apps half `render_artifact`'s panel is served from.
  * Unknown methods are `-32601`; notifications (`id` absent) get `202`.
  */
 export function createMcpCanvakitHandler(
@@ -302,13 +367,54 @@ export function createMcpCanvakitHandler(
     if (method === "initialize") {
       return ok(id, {
         protocolVersion: "2025-06-18",
-        capabilities: { tools: {} },
+        // `resources: {}` (BRIEF-02, mirroring mcp-room.ts's BRIEF-01
+        // capability) advertises `render_artifact`'s panel. A host that does
+        // not see this capability never calls `resources/list`, so a client
+        // stuck on the plain-tools reading of this server keeps working
+        // exactly as before.
+        capabilities: { tools: {}, resources: {} },
         serverInfo: { name: "rdv-canvakit", version: "1.0.0" },
       })
     }
 
     if (method === "tools/list") {
       return ok(id, { tools: [RENDER_ARTIFACT_TOOL] })
+    }
+
+    if (method === "resources/list") {
+      return ok(id, {
+        resources: [
+          { uri: RENDER_ARTIFACT_RESOURCE_URI, name: "render_artifact", mimeType: "text/html;profile=mcp-app" },
+        ],
+      })
+    }
+
+    if (method === "resources/read") {
+      // Bearer checked before the uri, same reason `tools/call` checks it
+      // first: a rejected call must reveal nothing, not even that a room
+      // exists.
+      const room = resolveRoom(deps, authorization)
+      if (room === undefined) return unauthorized(id)
+
+      if (params.uri !== RENDER_ARTIFACT_RESOURCE_URI) {
+        return fail(id, INVALID_PARAMS, `unknown resource uri: ${String(params.uri)}`)
+      }
+
+      return ok(id, {
+        contents: [
+          {
+            uri: RENDER_ARTIFACT_RESOURCE_URI,
+            mimeType: "text/html;profile=mcp-app",
+            text: artifactViewHtml(room.code, env.publicUrl),
+            // Load-bearing, not decoration: the panel polls `env.publicUrl`
+            // itself and (D1's fetch fallback) may fetch the artifact from
+            // it too — a host that sandboxes the panel without this
+            // allowlist renders it once and then never updates, the exact
+            // silent-stop failure this repo exists to avoid.
+            _meta: { ui: { csp: { connectDomains: [env.publicUrl], resourceDomains: [env.publicUrl] } } },
+          },
+        ],
+      })
     }
 
     if (method === "tools/call") {

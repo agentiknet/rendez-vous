@@ -1196,6 +1196,7 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
   const mcpCanvakit = createMcpCanvakitHandler({
     ...defaultMcpCanvakitDeps(media.renders),
     roomExists: (code) => service.getRoom(code) !== undefined,
+    rooms: () => service.listRooms(),
   })
   const mcpRoom = createMcpRoomHandler({
     rooms: () => service.listRooms(),
