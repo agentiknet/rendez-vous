@@ -10,6 +10,8 @@ import type { Transport } from "../../src/fanout/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import { MAX_DELIVERY_ATTEMPTS, type Delivery, type Member } from "../../src/rooms/types.ts"
 import { LocalBooter } from "../../src/service/booter.ts"
+import { ArtifactRenderStore } from "../../src/service/artifact-renders.ts"
+import { MediaStore } from "../../src/service/media-store.ts"
 import {
   DELIVERED_RETENTION_MS,
   DeliveryEngine,
@@ -776,10 +778,11 @@ test("GET /rooms/:code exposes no Delivery text for a room holding a whisper del
     booter,
     transport: new MemoryTransport(),
     daemon: { baseUrl: dead, token: undefined },
+    mediaStore: new MediaStore(dir),
   })
   services.push(service)
 
-  const server = createHttpServer(service)
+  const server = createHttpServer(service, { mediaStore: new MediaStore(dir), renders: new ArtifactRenderStore(dir) })
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   servers.push({ close: () => new Promise<void>((resolve) => server.close(() => resolve())) })
   const address = server.address()

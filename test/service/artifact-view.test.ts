@@ -1,5 +1,8 @@
 import assert from "node:assert/strict"
-import { test } from "node:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { after, test } from "node:test"
 import { env } from "../../src/env.ts"
 import type { Member, Room } from "../../src/rooms/types.ts"
 import { ArtifactRenderStore } from "../../src/service/artifact-renders.ts"
@@ -54,11 +57,24 @@ function room(code: string): Room {
 const ROOM_A = "RDV-AAAA"
 const ROOM_B = "RDV-BBBB"
 
+// ArtifactRenderStore falls back to env.mediaDir (the LIVE store) when built
+// with no directory — renderHtml/renderPdf below throw, so nothing here ever
+// actually saves, but the store must still never point at the live dir.
+const dirs: string[] = []
+after(() => {
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
+})
+
+function trackDir(dir: string): string {
+  dirs.push(dir)
+  return dir
+}
+
 function harness(rooms: readonly Room[]) {
   const deps: McpCanvakitDeps = {
     roomExists: (code) => rooms.some((r) => r.code === code),
     rooms: () => rooms,
-    renders: new ArtifactRenderStore(),
+    renders: new ArtifactRenderStore(trackDir(mkdtempSync(join(tmpdir(), "rdv-artifact-view-")))),
     renderHtml: async () => {
       throw new Error("not used by these tests")
     },

@@ -178,8 +178,11 @@ function resolveMediaIngress(hooks: HttpMediaHooks | undefined): MediaIngress {
   const openaiKey = env.openaiApiKey
   const telegramToken = env.telegramBotToken
   return {
-    store: hooks?.mediaStore ?? new MediaStore(),
-    renders: hooks?.renders ?? new ArtifactRenderStore(),
+    // env.mediaDir is the live runtime store the running service serves
+    // media from; a test must inject its own MediaStore/ArtifactRenderStore,
+    // never rely on this.
+    store: hooks?.mediaStore ?? new MediaStore(env.mediaDir),
+    renders: hooks?.renders ?? new ArtifactRenderStore(env.mediaDir),
     stt: hooks?.stt ?? (openaiKey !== undefined ? new OpenAiSttProvider(openaiKey) : NullProviders.stt),
     vision: hooks?.vision ?? (openaiKey !== undefined ? new OpenAiVisionProvider(openaiKey) : NullProviders.vision),
     fetch: hooks?.fetch,

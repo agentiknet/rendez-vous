@@ -12,9 +12,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-/** Throwaway render-store directories, swept once at the end — the
- *  `read_artifact` tests below write real files, and the default store points
- *  at `env.mediaDir`. */
+/** Throwaway render-store directories, swept once at the end — `render_artifact`
+ *  and `read_artifact` both write real files, and `ArtifactRenderStore` falls
+ *  back to `env.mediaDir` (the LIVE store) when built with no directory. */
 const dirs: string[] = []
 after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true })
@@ -69,7 +69,7 @@ interface Harness {
 }
 
 function harness(overrides?: Partial<Pick<McpCanvakitDeps, "roomExists" | "rooms" | "renderHtml" | "renderPdf">>): Harness {
-  const renders = new ArtifactRenderStore()
+  const renders = new ArtifactRenderStore(trackDir(mkdtempSync(join(tmpdir(), "rdv-canvakit-render-"))))
   const renderCalls: string[] = []
   const deps: McpCanvakitDeps = {
     roomExists: (code) => code === ROOM,

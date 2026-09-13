@@ -10,6 +10,7 @@ import { RoomStore } from "../../src/rooms/store.ts"
 import type { Address, Member, Tier } from "../../src/rooms/types.ts"
 import { publicArtifactUrl } from "../../src/service/artifact-proxy.ts"
 import { LocalBooter, type SessionBooter } from "../../src/service/booter.ts"
+import { MediaStore } from "../../src/service/media-store.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport, type RecordedSend } from "../../src/service/transports.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
@@ -43,6 +44,13 @@ async function freshDaemon(): Promise<ExtendedFakeDaemon> {
   return daemon
 }
 
+// Every RoomService in this file must get its own MediaStore, backed by a
+// temp dir — RoomService falls back to env.mediaDir (the LIVE store) when
+// none is given, and a "new" command mints a join QR unconditionally.
+async function freshMediaStore(): Promise<MediaStore> {
+  return new MediaStore(await freshDir())
+}
+
 interface Harness {
   service: RoomService
   store: RoomStore
@@ -63,6 +71,7 @@ async function buildHarness(opts: { probeUrl?: (url: string) => Promise<boolean>
     booter,
     transport,
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
     ...(opts.probeUrl !== undefined ? { probeUrl: opts.probeUrl } : {}),
   })
   services.push(service)
@@ -77,7 +86,14 @@ async function buildHarnessWithTransport<T extends Transport>(
   const store = await RoomStore.open(dir)
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
-  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service)
   return { service, store, transport, daemon }
 }
@@ -457,7 +473,14 @@ test("doResume resets the cursor when the session id changes, so a turn on the n
       return { sessionId: "sess-new", sandboxId: undefined, artifactUrl: undefined, artifactReady: undefined }
     },
   }
-  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service)
 
   const created = await service.handleInbound(alice("new"))
@@ -503,7 +526,14 @@ test("the raw artifactUrl never reaches a member: replies carry the room-code-ke
       throw new Error("not exercised")
     },
   }
-  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service)
 
   const created = await service.handleInbound(alice("new"))
@@ -535,7 +565,14 @@ test("resuming onto a replaced box notifies every member once, in addition to th
       return { sessionId: "sess-new", sandboxId: "box-new", artifactUrl: "https://3210-boxnew.e2b.app", artifactReady: true }
     },
   }
-  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service)
 
   const created = await service.handleInbound(alice("new"))
@@ -578,7 +615,14 @@ test("resuming onto the SAME box sends no box-replaced notice", async () => {
       return { sessionId: "sess-new", sandboxId: "box-1", artifactUrl: "https://3210-box1.e2b.app", artifactReady: true }
     },
   }
-  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service)
 
   const created = await service.handleInbound(alice("new"))
@@ -687,7 +731,14 @@ test("start() after reopening the store resumes fan-out from the persisted curso
 
   const store1 = await RoomStore.open(dir)
   const transport1 = new MemoryTransport()
-  const service1 = new RoomService({ store: store1, client, booter, transport: transport1, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service1 = new RoomService({
+    store: store1,
+    client,
+    booter,
+    transport: transport1,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service1)
 
   const created = await service1.handleInbound(alice("new"))
@@ -715,7 +766,14 @@ test("start() after reopening the store resumes fan-out from the persisted curso
 
   const store2 = await RoomStore.open(dir)
   const transport2 = new MemoryTransport()
-  const service2 = new RoomService({ store: store2, client, booter, transport: transport2, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service2 = new RoomService({
+    store: store2,
+    client,
+    booter,
+    transport: transport2,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service2)
   service2.start()
 
@@ -763,6 +821,7 @@ test("sweepIdleRooms marks a room whose box is confirmed gone as paused with art
     booter,
     transport,
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
     checkBoxLiveness: async (sandboxId) => (sandboxId === "box-1" ? "gone" : "alive"),
   })
   services.push(service)
@@ -818,6 +877,7 @@ test("sweepIdleRooms does not treat an unknown box-liveness probe as gone", asyn
     booter,
     transport,
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
     checkBoxLiveness: async () => "unknown",
   })
   services.push(service)
@@ -855,6 +915,7 @@ test("sweepIdleRooms probes a room's box at most once per boxProbeMinutes, not o
     booter,
     transport,
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
     boxProbeMinutes: 10,
     checkBoxLiveness: async () => {
       probeCalls++
@@ -885,7 +946,14 @@ test("a box confirmed gone during resume gets the precise 'previous box expired'
       return { sessionId: "sess-new", sandboxId: "box-2", artifactUrl: "https://box-2.example", artifactReady: true, boxWasGone: true }
     },
   }
-  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service)
 
   const created = await service.handleInbound(alice("new"))
@@ -952,7 +1020,14 @@ test("two concurrent fan-ins to a room with a dead session trigger exactly one r
       return { sessionId: spawned.id, sandboxId: `box-resumed-${resumeCalls}`, artifactUrl: undefined, artifactReady: undefined }
     },
   }
-  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service)
 
   const created = await service.handleInbound(alice("new"))

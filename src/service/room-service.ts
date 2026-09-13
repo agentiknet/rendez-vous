@@ -277,7 +277,9 @@ export class RoomService {
     this.idleSweepMs = (opts.idleSweepSeconds ?? env.idleSweepSeconds) * 1000
     this.boxProbeMs = (opts.boxProbeMinutes ?? env.boxProbeMinutes) * 60_000
     this.checkBoxLiveness = opts.checkBoxLiveness ?? ((sandboxId) => isSandboxAlive(sandboxId))
-    this.mediaStore = opts.mediaStore ?? new MediaStore()
+    // env.mediaDir is the live runtime store the running service serves
+    // media from; a test must inject its own MediaStore, never rely on this.
+    this.mediaStore = opts.mediaStore ?? new MediaStore(env.mediaDir)
     this.deliverable =
       opts.deliverable ??
       new DeliverableService({

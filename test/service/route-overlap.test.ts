@@ -44,6 +44,7 @@ import type { AddressInfo } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, test } from "node:test"
+import { MediaStore } from "../../src/service/media-store.ts"
 import type { RoomService } from "../../src/service/room-service.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
 
@@ -92,16 +93,23 @@ async function buildServer(): Promise<{ baseUrl: string; daemon: ExtendedFakeDae
   const store = await RoomStore.open(dir)
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  // RoomService falls back to env.mediaDir (the LIVE store) when no
+  // mediaStore is given, and a "new" command mints a join QR unconditionally.
+  // createHttpServer falls back the same way for mediaStore/renders when no
+  // hooks are given — both must be pointed at the same temp dir.
+  const mediaStore = new MediaStore(await freshDir())
   const service = new RoomServiceCtor({
     store,
     client,
     booter,
     transport: new MemoryTransport(),
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore,
   })
   services.push(service)
 
-  const server = createHttpServer(service)
+  const { ArtifactRenderStore } = await import("../../src/service/artifact-renders.ts")
+  const server = createHttpServer(service, { mediaStore, renders: new ArtifactRenderStore(dir) })
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const address = server.address()
   if (!isAddressInfo(address)) throw new Error("failed to bind http server")

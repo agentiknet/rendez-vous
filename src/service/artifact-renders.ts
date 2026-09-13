@@ -34,7 +34,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { randomUUID } from "node:crypto"
 import { join } from "node:path"
-import { env } from "../env.ts"
 
 export interface ArtifactRenderRecord {
   readonly roomCode: string
@@ -52,7 +51,7 @@ export class ArtifactRenderStore {
   private readonly baseDir: string
   private readonly records = new Map<string, ArtifactRenderRecord>()
 
-  constructor(baseDir: string = env.mediaDir) {
+  constructor(baseDir: string) {
     this.baseDir = baseDir
   }
 

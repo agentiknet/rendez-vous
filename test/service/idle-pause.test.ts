@@ -7,6 +7,7 @@ import { DaemonClient } from "../../src/daemon/client.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import type { Address, Tier } from "../../src/rooms/types.ts"
 import { LocalBooter } from "../../src/service/booter.ts"
+import { MediaStore } from "../../src/service/media-store.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
@@ -58,6 +59,9 @@ async function buildHarness(idlePauseMinutes: number): Promise<Harness> {
     transport,
     idlePauseMinutes,
     daemon: { baseUrl: daemon.url, token: undefined },
+    // RoomService falls back to env.mediaDir (the LIVE store) when no
+    // mediaStore is given, and a "new" command mints a join QR unconditionally.
+    mediaStore: new MediaStore(await freshDir()),
   })
   services.push(service)
   return { service, store, transport, daemon }

@@ -8,6 +8,7 @@ import { DaemonClient } from "../../src/daemon/client.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import type { Address, Delivery, Tier } from "../../src/rooms/types.ts"
 import { LocalBooter } from "../../src/service/booter.ts"
+import { MediaStore } from "../../src/service/media-store.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
 import type { McpResponse } from "../../src/service/mcp-canvakit.ts"
@@ -74,12 +75,15 @@ async function buildSendHarness(): Promise<SendHarness> {
   daemons.push(daemon)
   const store = await RoomStore.open(dir)
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  // RoomService falls back to env.mediaDir (the LIVE store) when no
+  // mediaStore is given, and a "new" command mints a join QR unconditionally.
   const service = new RoomService({
     store,
     client,
     booter: new LocalBooter(client, { baseUrl: daemon.url, token: undefined }),
     transport: new MemoryTransport(),
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: new MediaStore(trackDir(await freshDir())),
   })
   services.push(service)
   const handler = createMcpPersonalHandler({

@@ -19,7 +19,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { randomUUID } from "node:crypto"
 import { join } from "node:path"
-import { env } from "../env.ts"
 
 export interface MediaRecord {
   readonly id: string
@@ -76,7 +75,7 @@ export class MediaStore {
   private readonly records = new Map<string, MediaRecord>()
   private readonly ingress = new Map<string, IngressMediaRecord>()
 
-  constructor(baseDir: string = env.mediaDir) {
+  constructor(baseDir: string) {
     this.baseDir = baseDir
   }
 

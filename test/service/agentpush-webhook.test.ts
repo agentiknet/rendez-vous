@@ -63,19 +63,26 @@ async function buildServer(
   const store = await RoomStore.open(dir)
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  // Shared with the http server's own media hooks below (same temp dir): the
+  // QR handleInbound("new") mints, and any render, must not leak into
+  // env.mediaDir either.
+  const { MediaStore: MediaStoreCtor } = await import("../../src/service/media-store.ts")
+  const { ArtifactRenderStore: ArtifactRenderStoreCtor } = await import("../../src/service/artifact-renders.ts")
+  const mediaStore = new MediaStoreCtor(dir)
+  const renders = new ArtifactRenderStoreCtor(dir)
   const service = new RoomServiceCtor({
     store,
     client,
     booter,
     transport: new MemoryTransport(),
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore,
   })
   services.push(service)
 
-  const { MediaStore: MediaStoreCtor } = await import("../../src/service/media-store.ts")
-  const mediaStore = new MediaStoreCtor(dir)
   const server = await createHttpServer(service, {
     mediaStore,
+    renders,
     ...(opts.vision !== undefined ? { vision: { caption: opts.vision } } : {}),
   })
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))

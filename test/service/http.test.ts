@@ -12,6 +12,7 @@ import { RoomStore } from "../../src/rooms/store.ts"
 import { ArtifactRenderStore } from "../../src/service/artifact-renders.ts"
 import { LocalBooter, type SessionBooter } from "../../src/service/booter.ts"
 import { createHttpServer } from "../../src/service/http.ts"
+import { MediaStore } from "../../src/service/media-store.ts"
 import { memberToken } from "../../src/service/mcp-room.ts"
 import { RoomService, type RoomWebSendOutcome } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
@@ -47,6 +48,13 @@ async function freshDaemon(): Promise<ExtendedFakeDaemon> {
   return daemon
 }
 
+// Every RoomService in this file must get its own MediaStore, backed by a
+// temp dir — RoomService falls back to env.mediaDir (the LIVE store) when
+// none is given, and a "new" command mints a join QR unconditionally.
+async function freshMediaStore(): Promise<MediaStore> {
+  return new MediaStore(await freshDir())
+}
+
 function isAddressInfo(value: string | AddressInfo | null): value is AddressInfo {
   return value !== null && typeof value === "object"
 }
@@ -78,7 +86,14 @@ test("GET /health reports ok, the room count, and the daemon's own health when i
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
   const transport = new MemoryTransport()
-  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service)
 
   const created = await service.handleInbound({
@@ -112,7 +127,14 @@ test("GET /health reports the daemon as unreachable when it cannot be reached", 
 
   const store = await RoomStore.open(dir)
   const transport = new MemoryTransport()
-  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: deadDaemon.url, token: undefined } })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: deadDaemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service)
 
   const baseUrl = await listenOnRandomPort(service)
@@ -138,7 +160,14 @@ async function newRoomHarness(renders?: ArtifactRenderStore): Promise<{
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
   const transport = new MemoryTransport()
-  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service)
 
   const created = await service.handleInbound({
@@ -325,6 +354,7 @@ test("GET /rooms/:code/stream returns 409 when the room has no live session", as
     booter,
     transport: new MemoryTransport(),
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
   })
   services.push(service)
   const room = await store.create()
@@ -500,7 +530,14 @@ async function newRoomHarnessWithArtifact(
     },
   }
   const transport = new MemoryTransport()
-  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: daemon.url, token: undefined } })
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
   services.push(service)
 
   const created = await service.handleInbound({
@@ -593,7 +630,17 @@ test("GET /r/:code/media/:id serves an ingress record with its stored mime type,
   const store = await RoomStore.open(dir)
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
-  const service = new RoomService({ store, client, booter, transport: new MemoryTransport(), daemon: { baseUrl: daemon.url, token: undefined } })
+  // Shared with `RoomService.mediaStore` below (same temp dir): the QR
+  // `handleInbound("new")` mints must not leak into env.mediaDir either.
+  const mediaStore = new MediaStore(dir)
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport: new MemoryTransport(),
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore,
+  })
   services.push(service)
   const created = await service.handleInbound({
     address: { provider: "whatsapp", source: "agentpush", contactRef: "+1" },
@@ -604,8 +651,6 @@ test("GET /r/:code/media/:id serves an ingress record with its stored mime type,
   assert.equal(created.kind, "created")
   if (created.kind !== "created") throw new Error("unreachable")
 
-  const { MediaStore: MediaStoreCtor } = await import("../../src/service/media-store.ts")
-  const mediaStore = new MediaStoreCtor(dir)
   const bytes = new Uint8Array([1, 2, 3, 4])
   const record = await mediaStore.saveIngress(bytes, {
     kind: "image",
@@ -616,7 +661,7 @@ test("GET /r/:code/media/:id serves an ingress record with its stored mime type,
   const assigned = await mediaStore.assignRoom(record.mediaId, created.room.code)
   assert.ok(assigned !== undefined)
 
-  const server = createHttpServer(service, { mediaStore })
+  const server = createHttpServer(service, { mediaStore, renders: new ArtifactRenderStore(dir) })
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const address = server.address()
   if (!isAddressInfo(address)) throw new Error("failed to bind http server")
@@ -828,6 +873,7 @@ async function outboxHarness(): Promise<{
     booter,
     transport: new MemoryTransport(),
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
   })
   services.push(service)
 
@@ -1384,6 +1430,7 @@ test("GET /rooms/:code/outbox fires the gap marker from the room-wide oldest, bu
     booter,
     transport: new MemoryTransport(),
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
   })
   services.push(service)
   const baseUrl = await listenOnRandomPort(service)
@@ -1441,6 +1488,7 @@ test("GET /rooms/:code/outbox: a legacy room that still retains d1 has provably 
     booter,
     transport: new MemoryTransport(),
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
   })
   services.push(service)
   const baseUrl = await listenOnRandomPort(service)
@@ -1488,6 +1536,7 @@ test("GET /rooms/:code/outbox: a legacy room that does NOT retain d1 keeps the w
     booter,
     transport: new MemoryTransport(),
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
   })
   services.push(service)
   const baseUrl = await listenOnRandomPort(service)

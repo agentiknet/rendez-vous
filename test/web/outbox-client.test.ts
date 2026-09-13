@@ -17,7 +17,9 @@ import { DaemonClient } from "../../src/daemon/client.ts"
 import { PULL_STALE_MS, pullMemberStale } from "../../src/rooms/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import { LocalBooter } from "../../src/service/booter.ts"
+import { ArtifactRenderStore } from "../../src/service/artifact-renders.ts"
 import { createHttpServer } from "../../src/service/http.ts"
+import { MediaStore } from "../../src/service/media-store.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
 import { claimMember, freshOutboxTickState, runOutboxTick, type OutboxTickDeps } from "../../src/web/page.ts"
@@ -49,10 +51,11 @@ async function harness(): Promise<{ store: RoomStore; baseUrl: string; code: str
     booter,
     transport: new MemoryTransport(),
     daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: new MediaStore(dir),
   })
   services.push(service)
 
-  const server = createHttpServer(service)
+  const server = createHttpServer(service, { mediaStore: new MediaStore(dir), renders: new ArtifactRenderStore(dir) })
   const baseUrl = await new Promise<string>((resolve, reject) => {
     server.listen(0, "127.0.0.1", () => {
       const address = server.address()
