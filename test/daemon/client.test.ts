@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { DaemonClient } from "../../src/daemon/client.ts"
+import { DaemonClient, SpawnAgentUnauthorizedError } from "../../src/daemon/client.ts"
 import { startFakeDaemon, type FakeDaemon } from "./fake-daemon.ts"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -167,6 +167,19 @@ test("prompt() sends the bearer when a token is configured", async () => {
     const client = new DaemonClient({ baseUrl: daemon.url, token: "secret-token" })
     const result = await client.prompt("sess_any", { prompt: "hi", queue: true, origin: "user" })
     assert.equal(result.ok, true)
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("spawnAgent() against a bearer-mode daemon with no/wrong token throws SpawnAgentUnauthorizedError, distinct from other failures", async () => {
+  const daemon = await startFakeDaemon({ requireAuth: "secret-token" })
+  try {
+    const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+    await assert.rejects(
+      client.spawnAgent({ adapter: "claude-code", model: "claude-sonnet-5", cwd: "/tmp", label: "test" }),
+      SpawnAgentUnauthorizedError,
+    )
   } finally {
     await daemon.close()
   }

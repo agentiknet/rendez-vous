@@ -1,4 +1,4 @@
-import type { DaemonClient, HealthResult, PromptResult } from "../daemon/client.ts"
+import { SpawnAgentUnauthorizedError, type DaemonClient, type HealthResult, type PromptResult } from "../daemon/client.ts"
 import type { TranscriptRecord } from "../daemon/records.ts"
 import { randomBytes } from "node:crypto"
 import { AgentpushToolClient } from "../channels/agentpush/tools-client.ts"
@@ -90,6 +90,13 @@ export type RoomWebClaimOutcome =
   | { kind: "name-claimed" }
 
 const RESUMING_TEXT = "Resuming room, one moment…"
+
+/** BRIEF-22: the one thing a member is told when `spawnAgent` 401s — the
+ *  daemon rejected the bearer this service sent. Never transient (a retry
+ *  will not make a stale token valid), and invisible from the member's own
+ *  side without this line: the room otherwise just goes quiet. */
+const SPAWN_UNAUTHORIZED_TEXT =
+  "This room could not get an agent — the connection to the daemon was rejected. An operator needs to check it."
 
 /** The one line of "how to use me" every member gets: that the room is
  *  shared, and that privacy is available by ASKING for it.
@@ -670,7 +677,17 @@ export class RoomService {
       // "new" never fails at the command layer; this branch only exists for exhaustiveness.
       return { kind: "unknown-code" }
     }
-    const booted = await this.booter.boot(result.room, { label: `rdv-${result.room.code}` })
+    let booted
+    try {
+      booted = await this.booter.boot(result.room, { label: `rdv-${result.room.code}` })
+    } catch (error) {
+      if (!(error instanceof SpawnAgentUnauthorizedError)) throw error
+      // BRIEF-22: the room row exists (the command layer already created
+      // it) but never got a working session — say so plainly rather than
+      // sending the "Room created" reply with join links nothing yet backs.
+      await this.notifySpawnUnauthorized(result.room)
+      return { kind: "created", room: result.room, member: result.member }
+    }
     const room = await this.store.update(result.room.code, {
       sessionId: booted.sessionId,
       sandboxId: booted.sandboxId,
@@ -873,6 +890,13 @@ export class RoomService {
     }
 
     const resumed = await this.doResume(room)
+    // BRIEF-22: a resume that failed on auth already got its own room-visible
+    // notice (`notifySpawnUnauthorized`, from inside `doResume`) and left
+    // `sessionId` unset — sending "Resumed room" on top of that would tell
+    // this member the opposite of what actually happened.
+    if (resumed.sessionId === undefined) {
+      return { kind: "resumed", room: resumed, member: result.member }
+    }
     await this.sender.send(result.room.code, result.member, {
       text: welcomeText("Resumed room", resumed),
       artifactUrl: memberFacingArtifactUrl(resumed),
@@ -1064,7 +1088,17 @@ export class RoomService {
     // the history is a working resume, a resume that hangs is not.
     const priorSessionId = room.sessionId ?? room.lastSessionId
     const recap = priorSessionId === undefined ? undefined : await buildSessionRecap(this.client, priorSessionId)
-    const booted = await this.booter.resume(room, recap !== undefined ? { recap } : {})
+    let booted
+    try {
+      booted = await this.booter.resume(room, recap !== undefined ? { recap } : {})
+    } catch (error) {
+      if (!(error instanceof SpawnAgentUnauthorizedError)) throw error
+      // BRIEF-22: the room stays exactly as it was (still paused, no
+      // session) — a spawn that failed on auth must not be recorded as a
+      // resume, and must not be retried here (it will not become valid).
+      await this.notifySpawnUnauthorized(room)
+      return room
+    }
     // A new sessionId restarts the daemon's own seq numbering near 1, while
     // `room.cursor` is still whatever seq the *previous* session last
     // flushed at — the fan-out reader would then open the new session's
@@ -1093,6 +1127,22 @@ export class RoomService {
       await this.notifyBoxReplaced(updated, booted.boxWasGone === true)
     }
     return updated
+  }
+
+  /** BRIEF-22: the member who wrote and got nothing is the one who needs to
+   *  know the room could not get an agent — but by the time a spawn fails
+   *  here, more than one person may be waiting on the same room, so this
+   *  broadcasts to everyone currently in it, the same reach `notifyBoxReplaced`
+   *  uses for its own room-visible notice. Routed through `this.sender`
+   *  (the one send path outside the delivery engine) so a pull member gets
+   *  it as a `system` outbox record and a push member gets it on their own
+   *  channel, exactly like every other room-authored notice. */
+  private async notifySpawnUnauthorized(room: Room): Promise<void> {
+    await Promise.allSettled(
+      room.members.map((member) =>
+        this.sender.send(room.code, member, { text: SPAWN_UNAUTHORIZED_TEXT, artifactUrl: undefined }),
+      ),
+    )
   }
 
   /** The single explicit notice architecture.md §9.3b asks for: broadcast to

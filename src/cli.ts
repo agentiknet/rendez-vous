@@ -1,5 +1,6 @@
 import { AgentpushTransport, EmailTransport } from "./channels/index.ts"
 import { DaemonClient } from "./daemon/client.ts"
+import { defaultRuntimeCandidatePaths, portFromDaemonUrl, resolveDaemonToken } from "./daemon/token.ts"
 import { env } from "./env.ts"
 import type { Transport } from "./fanout/types.ts"
 import { RoomStore } from "./rooms/store.ts"
@@ -21,23 +22,43 @@ function buildTransport(): { transport: Transport; description: string } {
   }
 }
 
-function buildBooter(client: DaemonClient, store: RoomStore): { booter: SessionBooter; description: string } {
-  const daemonOpts = { baseUrl: env.daemonUrl, token: env.daemonToken }
+function buildBooter(client: DaemonClient, store: RoomStore, token: string | undefined): { booter: SessionBooter; description: string } {
+  const daemonOpts = { baseUrl: env.daemonUrl, token }
   if (env.booter === "e2b") {
     return { booter: new E2bBooter(client, daemonOpts, store), description: "e2b (sandbox + artifact)" }
   }
   return { booter: new LocalBooter(client, daemonOpts), description: "local (no sandbox, no artifact)" }
 }
 
+/** `RDV_DAEMON_TOKEN` is an override, not the source (BRIEF-22): the real
+ *  source is the daemon's own `runtime.json`, read fresh at every boot of
+ *  THIS service so a daemon restart's regenerated token is picked up
+ *  without anyone editing a file. A resolution failure refuses to start
+ *  rather than booting a service that would 401 on every room. */
+function requireDaemonToken(): string {
+  const port = portFromDaemonUrl(env.daemonUrl)
+  const resolution = resolveDaemonToken({
+    override: env.daemonToken,
+    port,
+    candidatePaths: defaultRuntimeCandidatePaths(port),
+  })
+  if (!resolution.ok) {
+    console.error(resolution.message)
+    process.exit(1)
+  }
+  return resolution.token
+}
+
 async function serve(): Promise<void> {
+  const token = requireDaemonToken()
   const store = await RoomStore.open(env.dataDir)
-  const client = new DaemonClient({ baseUrl: env.daemonUrl, token: env.daemonToken })
-  const { booter, description: booterDescription } = buildBooter(client, store)
+  const client = new DaemonClient({ baseUrl: env.daemonUrl, token })
+  const { booter, description: booterDescription } = buildBooter(client, store, token)
   const { transport, description } = buildTransport()
-  const service = new RoomService({ store, client, booter, transport })
+  const service = new RoomService({ store, client, booter, transport, daemon: { baseUrl: env.daemonUrl, token } })
 
   service.start()
-  const server = startHttpServer(service)
+  const server = startHttpServer(service, { daemon: { baseUrl: env.daemonUrl, token } })
   console.log(`rendez-vous service listening on :${env.port}`)
   console.log(`booter: ${booterDescription}`)
   console.log(`transport: ${description}`)

@@ -85,6 +85,19 @@ export interface SpawnAgentResult {
   readonly appServe: AppServeResultInfo | undefined
 }
 
+/** Thrown by `spawnAgent` specifically for a `401` — the bearer the daemon
+ *  currently expects does not match the one this request sent (BRIEF-22).
+ *  Distinguished from every other `spawnAgent` failure so a caller can
+ *  answer it with a room-visible notice instead of a generic throw: it is
+ *  never transient (retrying will not make a stale token valid), and it is
+ *  the one failure mode a member has no way to diagnose from their own side. */
+export class SpawnAgentUnauthorizedError extends Error {
+  constructor(body: string) {
+    super(`spawnAgent failed: 401 ${body}`)
+    this.name = "SpawnAgentUnauthorizedError"
+  }
+}
+
 export interface PromptInput {
   readonly prompt: string
   readonly queue: boolean
@@ -200,7 +213,9 @@ export class DaemonClient {
     const body: unknown = await res.json()
     if (!isRecord(body)) throw new Error("malformed /sessions/agent response")
     if (!res.ok) {
-      throw new Error(`spawnAgent failed: ${res.status} ${JSON.stringify(body).slice(0, 200)}`)
+      const detail = JSON.stringify(body).slice(0, 200)
+      if (res.status === 401) throw new SpawnAgentUnauthorizedError(detail)
+      throw new Error(`spawnAgent failed: ${res.status} ${detail}`)
     }
     const id = stringField(body, "id")
     const status = stringField(body, "status")

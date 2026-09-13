@@ -1499,8 +1499,8 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
   })
 }
 
-export function startHttpServer(service: RoomService): Server {
-  const server = createHttpServer(service)
+export function startHttpServer(service: RoomService, stateHooks?: HttpStateHooks): Server {
+  const server = createHttpServer(service, undefined, stateHooks)
   server.listen(env.port)
   return server
 }
