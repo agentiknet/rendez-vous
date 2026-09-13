@@ -216,19 +216,19 @@ test("a stale pull member is listed, marked away, and still holds its id; a push
   assert.equal(alice.mode, "push")
 })
 
-test("tools/list advertises roster alone until a delivery engine is wired, then all three audience tools", async () => {
+test("tools/list advertises roster and room_view alone until a delivery engine is wired, then all four audience tools", async () => {
   const bare = harness([room(ROOM_A, MEMBERS_A)])
   const bareRes = asRpc(await bare.handler({ jsonrpc: "2.0", id: "a", method: "tools/list" }, undefined))
   const bareTools = bareRes.result?.tools
-  assert.ok(Array.isArray(bareTools) && bareTools.length === 1)
-  assert.equal((bareTools[0] as { name: string }).name, "roster")
+  assert.ok(Array.isArray(bareTools))
+  assert.deepEqual(bareTools.map((tool) => (tool as { name: string }).name), ["roster", "room_view"])
 
   const { handler } = harnessWithDeliveries([room(ROOM_A, MEMBERS_A)])
   const res = asRpc(await handler({ jsonrpc: "2.0", id: "a", method: "tools/list" }, undefined))
   assert.equal(res.status, 200)
   const tools = res.result?.tools
   assert.ok(Array.isArray(tools))
-  assert.deepEqual(tools.map((tool) => (tool as { name: string }).name), ["roster", "say", "whisper"])
+  assert.deepEqual(tools.map((tool) => (tool as { name: string }).name), ["roster", "room_view", "say", "whisper"])
   // `say`'s `to` is optional (omitted = every member); `whisper`'s is not.
   const say = tools.find((tool) => (tool as { name: string }).name === "say") as { inputSchema: Record<string, unknown> }
   assert.deepEqual(say.inputSchema.required, ["text"])
@@ -253,7 +253,9 @@ test("an unknown tool or method is a JSON-RPC failure, not a roster call", async
   assert.equal(unknownTool.status, 200)
   assert.equal(unknownTool.error?.code, -32601, "ask is step 4 — it must not appear advertised or callable")
 
-  const unknownMethod = asRpc(await handler({ jsonrpc: "2.0", id: 2, method: "resources/list" }, tokenFor(ROOM_A)))
+  // `resources/list` is now a real method (BRIEF-01) — probe with a method
+  // that stays unknown.
+  const unknownMethod = asRpc(await handler({ jsonrpc: "2.0", id: 2, method: "prompts/list" }, tokenFor(ROOM_A)))
   assert.equal(unknownMethod.error?.code, -32601)
 })
 

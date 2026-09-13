@@ -22,7 +22,9 @@ import type { JoinLinks } from "../links/index.ts"
 import { qrSvg } from "../links/index.ts"
 import { type Member, type Room, deliveryModeOf, pullMemberStale } from "../rooms/types.ts"
 
-function escapeHtml(value: string): string {
+// Exported: the room_view MCP App panel (src/service/room-view.html.ts) is a
+// sibling render with the same escaping story — one copy, two callers.
+export function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -33,7 +35,7 @@ function escapeHtml(value: string): string {
 
 /** JSON embedded inside a `<script>` tag: escape `<` so a value containing
  *  literal `</script>` can never break out of the tag. */
-function embedJson(value: unknown): string {
+export function embedJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, "\\u003c")
 }
 

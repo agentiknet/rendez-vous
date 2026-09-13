@@ -43,6 +43,7 @@ import {
   type AudienceSendOutcome,
 } from "../audience/contract.ts"
 import type { Room } from "../rooms/types.ts"
+import { roomViewHtml } from "./room-view.html.ts"
 import type { McpResponse, McpServerMount } from "./mcp-canvakit.ts"
 
 /** The delivery half of the audience tools (PLAN §3.2): the `say`/`whisper`
@@ -148,6 +149,12 @@ export interface McpRoomDeps {
 const PARSE_ERROR = -32700
 const INVALID_REQUEST = -32600
 const METHOD_NOT_FOUND = -32601
+const INVALID_PARAMS = -32602
+
+/** The MCP Apps resource this server serves (spec `2026-01-26`,
+ *  `modelcontextprotocol/ext-apps`): a host that recognises it renders
+ *  `room_view`'s tool as a panel instead of (or alongside) its text result. */
+const ROOM_VIEW_RESOURCE_URI = "ui://room_view/view"
 
 /** The roster tool. NO arguments: the room is fixed by the bearer token,
  *  and an argument naming a room would be a way to address another room —
@@ -157,6 +164,29 @@ const ROSTER_TOOL = {
   description:
     "List the members of THIS room (fixed by your credentials — no argument). One entry per member: member_id (use this to address them — display names can collide and change), display_name (for prose only), surface (the channel they are on: telegram, whatsapp, email, room-web), tier (messenger/email/room-web — a room-web member is a screen, not a phone), mode (push = a phone whose provider holds the address for them; pull = a screen that drains its outbox from the room), joined_at, presence/away (away = a room-web member whose tab has not drained its outbox for over 90 seconds — nobody is there; do not address them and do not expect an answer; the member itself is NOT gone — its id stays valid). Re-read it when you need to address someone; do not cache ids across turns — a messenger/email member who leaves and rejoins gets a new id (a room-web member's id is stable across its tab closing and reopening).",
   inputSchema: { type: "object", properties: {} },
+} as const
+
+/** The `room_view` tool (BRIEF-01). NO arguments, same reasoning as
+ *  `roster`: the room is fixed by the bearer, and an argument naming a room
+ *  would address another one. It is the SPECTATOR projection only (D1) — no
+ *  whisper, no addressed traffic, nothing `memberToken` would gate — so it
+ *  needs no `deliveries` dependency and is always advertised, unlike
+ *  `say`/`whisper` below.
+ *
+ *  `_meta.ui.resourceUri` is carried BOTH here (the `tools/list` definition)
+ *  AND on the `tools/call` result (`roomViewResult`) — deliberately
+ *  redundant. Hosts differ on which one they read: the sibling
+ *  `agentik-studio` monorepo's `@agstudio/mcp-apps` puts it on the
+ *  definition only, because Mastra 1.11 JSON-stringifies handler results and
+ *  a result-level `_meta` is invisible there. This server is hand-rolled —
+ *  we own the envelope on both ends, so satisfying both readings costs
+ *  nothing and breaks no host either way. */
+const ROOM_VIEW_TOOL = {
+  name: "room_view",
+  description:
+    "Render THIS room as a live panel for whoever is looking at this conversation. It shows the SHARED view every member and spectator can already see — code, state, roster, artifact — and nothing private: no whispers, no addressed traffic.",
+  inputSchema: { type: "object", properties: {} },
+  _meta: { ui: { resourceUri: ROOM_VIEW_RESOURCE_URI } },
 } as const
 
 /** `say` — address members BY ID (PLAN §3.1). `to` omitted means every
@@ -283,6 +313,31 @@ function rosterResult(room: Room): Record<string, unknown> {
   }
 }
 
+/** The `room_view` result (D2): ids-and-counts only, same file-top HARD
+ *  RULE as `roster` — this result is projected on the room's shared screen
+ *  too. `state` is normalised to the page's own vocabulary ("live"/"paused"),
+ *  not the internal `RoomState` union, so the result reads the same as the
+ *  panel it points at. No member name, no transcript fragment: the panel
+ *  fetches its own data from the spectator endpoint instead. */
+function roomViewResult(room: Room): Record<string, unknown> {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({
+          code: room.code,
+          state: room.state === "paused" ? "paused" : "live",
+          member_count: room.members.length,
+        }),
+      },
+    ],
+    isError: false,
+    // Redundant with the `tools/list` definition's `_meta` — see
+    // `ROOM_VIEW_TOOL`'s doc comment for why both are written.
+    _meta: { ui: { resourceUri: ROOM_VIEW_RESOURCE_URI } },
+  }
+}
+
 /** The `say`/`whisper` result, from the contract's outcome: member ids and
  *  counts ONLY (file-top HARD RULE). `accepted` entries carry the id and
  *  `ok: true` — "accepted for delivery", never the text, never a
@@ -306,9 +361,11 @@ function acceptResult(outcome: Extract<AudienceSendOutcome, { ok: true }>): Reco
 
 /**
  * Handle one JSON-RPC 2.0 request body (already JSON.parse'd) with its
- * `Authorization` header value. Same method surface as canvakit's handler:
- * `initialize`, `notifications/initialized`, `tools/list`, `tools/call`.
- * Unknown methods are `-32601`; notifications (`id` absent) get `202`.
+ * `Authorization` header value. Canvakit's method surface
+ * (`initialize`, `notifications/initialized`, `tools/list`, `tools/call`)
+ * plus `resources/list` / `resources/read` (BRIEF-01), the MCP Apps half
+ * `room_view`'s panel is served from. Unknown methods are `-32601`;
+ * notifications (`id` absent) get `202`.
  */
 export function createMcpRoomHandler(
   deps: McpRoomDeps,
@@ -331,14 +388,57 @@ export function createMcpRoomHandler(
     if (method === "initialize") {
       return ok(id, {
         protocolVersion: "2025-06-18",
-        capabilities: { tools: {} },
+        // `resources: {}` (BRIEF-01) advertises `room_view`'s panel. A host
+        // that does not see this capability never calls `resources/list`,
+        // so a client stuck on the plain-tools reading of this server keeps
+        // working exactly as before.
+        capabilities: { tools: {}, resources: {} },
         serverInfo: { name: "rdv-room", version: "1.0.0" },
       })
     }
 
     if (method === "tools/list") {
-      const tools = deps.deliveries === undefined ? [ROSTER_TOOL] : [ROSTER_TOOL, SAY_TOOL, WHISPER_TOOL]
+      // `room_view` has no `deliveries` dependency (D1: it is the spectator
+      // projection, never member-scoped) so it is always advertised, unlike
+      // `say`/`whisper` below.
+      const base = [ROSTER_TOOL, ROOM_VIEW_TOOL]
+      const tools = deps.deliveries === undefined ? base : [...base, SAY_TOOL, WHISPER_TOOL]
       return ok(id, { tools })
+    }
+
+    if (method === "resources/list") {
+      return ok(id, {
+        resources: [
+          { uri: ROOM_VIEW_RESOURCE_URI, name: "room_view", mimeType: "text/html;profile=mcp-app" },
+        ],
+      })
+    }
+
+    if (method === "resources/read") {
+      // Bearer checked before the uri, same reason `tools/call` checks it
+      // first: a rejected call must reveal nothing, not even that a room
+      // exists.
+      const room = resolveRoom(deps, authorization, queryToken)
+      if (room === undefined) return unauthorized(id)
+
+      if (params.uri !== ROOM_VIEW_RESOURCE_URI) {
+        return fail(id, INVALID_PARAMS, `unknown resource uri: ${String(params.uri)}`)
+      }
+
+      return ok(id, {
+        contents: [
+          {
+            uri: ROOM_VIEW_RESOURCE_URI,
+            mimeType: "text/html;profile=mcp-app",
+            text: roomViewHtml(room.code, env.publicUrl),
+            // Load-bearing, not decoration: the panel polls `env.publicUrl`
+            // itself, and a host that sandboxes the iframe without this
+            // allowlist renders the panel once and then never updates it —
+            // the exact silent-stop failure this repo exists to avoid.
+            _meta: { ui: { csp: { connectDomains: [env.publicUrl] } } },
+          },
+        ],
+      })
     }
 
     if (method === "tools/call") {
@@ -349,6 +449,10 @@ export function createMcpRoomHandler(
 
       if (params.name === ROSTER_TOOL.name) {
         return ok(id, rosterResult(room))
+      }
+
+      if (params.name === ROOM_VIEW_TOOL.name) {
+        return ok(id, roomViewResult(room))
       }
 
       if (params.name === SAY_TOOL.name || params.name === WHISPER_TOOL.name) {
