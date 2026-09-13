@@ -173,6 +173,14 @@ const RENDER_ARTIFACT_TOOL = {
       roomCode: { type: "string", description: "This room's code, e.g. RDV-7F3K." },
       data: {
         type: "array",
+        // Deliberately loose: OpenAI's tool-schema validator rejects an
+        // array with no `items` before the model ever runs ("Array type
+        // must have items property"), making this tool uncallable — but the
+        // blocks are a heterogeneous union already described in prose below,
+        // and `parseRenderArgs` validates only that `data` is an array. A
+        // tighter schema here would claim a contract the handler does not
+        // enforce.
+        items: { type: "object" },
         description:
           "The document as a list of typed blocks. Each block is one of: {isTitle:true,title,subtitle,date}, {isProse:true,heading,paragraphs:[...]}, {isBullets:true,heading,items:[...]}, {isTable:true,heading,head:[3 strings],rows:[{col1,col2,col3}]}, {isFigures:true,items:[{value,label}]}. Blocks are optional and repeatable, in any order.",
       },
@@ -417,7 +425,24 @@ export function createMcpCanvakitHandler(
             // it too — a host that sandboxes the panel without this
             // allowlist renders it once and then never updates, the exact
             // silent-stop failure this repo exists to avoid.
-            _meta: { ui: { csp: { connectDomains: [env.publicUrl], resourceDomains: [env.publicUrl] } } },
+            //
+            // `frameDomains` is equally load-bearing, for a different reason:
+            // this panel renders the live artifact through an inner
+            // `<iframe src="…/r/:code/artifact/">`, and the CSP schema's own
+            // rule is "empty or omitted → no nested iframes allowed
+            // (`frame-src 'none'`)". A host that enforces that (unlike the
+            // CopilotKit build this was verified against, which wildcards
+            // `frame-src` and never reads this field) would otherwise block
+            // the inner frame with no recourse.
+            _meta: {
+              ui: {
+                csp: {
+                  connectDomains: [env.publicUrl],
+                  resourceDomains: [env.publicUrl],
+                  frameDomains: [env.publicUrl],
+                },
+              },
+            },
           },
         ],
       })

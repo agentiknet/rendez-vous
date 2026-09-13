@@ -95,6 +95,18 @@ test("tools/list advertises exactly the render_artifact tool with an input schem
   assert.ok(isRecord(tool.inputSchema), "the tool must describe its input so the agent can fill it first try")
 })
 
+test("tools/list's data property carries an items schema (an array with none is uncallable from OpenAI function-calling)", async () => {
+  const { handler } = harness()
+  const res = asRpc(await handler({ jsonrpc: "2.0", id: "a", method: "tools/list" }, undefined))
+  const tools = res.result?.tools
+  assert.ok(Array.isArray(tools))
+  const tool = tools[0]
+  assert.ok(isRecord(tool) && isRecord(tool.inputSchema))
+  const properties = (tool.inputSchema as Record<string, unknown>).properties
+  assert.ok(isRecord(properties) && isRecord(properties.data))
+  assert.deepEqual(properties.data.items, { type: "object" })
+})
+
 test("a call with the room's valid token renders both formats and returns the artifact URL", async () => {
   const { handler, renders, renderCalls } = harness()
 

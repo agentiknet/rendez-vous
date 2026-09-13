@@ -164,6 +164,18 @@ test("resources/read's result carries _meta.ui.csp.connectDomains containing env
   assert.ok(contents[0]?._meta?.ui?.csp?.connectDomains?.includes(env.publicUrl))
 })
 
+test("resources/read's result carries _meta.ui.csp.frameDomains containing env.publicUrl (BRIEF-03: the panel frames the live artifact in an inner iframe)", async () => {
+  const { handler } = harness([room(ROOM_A)])
+  const res = asRpc(
+    await handler(
+      { jsonrpc: "2.0", id: 1, method: "resources/read", params: { uri: "ui://render_artifact/view" } },
+      renderTokenFor(ROOM_A),
+    ),
+  )
+  const contents = res.result?.contents as { _meta?: { ui?: { csp?: { frameDomains?: string[] } } } }[]
+  assert.ok(contents[0]?._meta?.ui?.csp?.frameDomains?.includes(env.publicUrl))
+})
+
 test("artifactViewHtml escapes a code containing < and \" so it cannot break out of the HTML", () => {
   const html = artifactViewHtml(`RDV-<script>"`, env.publicUrl)
   assert.ok(!html.includes(`RDV-<script>"`), "the raw contrived code must not appear unescaped")

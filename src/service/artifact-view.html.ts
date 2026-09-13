@@ -15,14 +15,14 @@
  * and page.ts use) for `artifact.ready`, and shows the LIVE artifact once it
  * flips true.
  *
- * How the shell shows the artifact (D1, unresolved by design until tested
- * against a real host): the MCP Apps CSP vocabulary has `connectDomains` and
- * `resourceDomains` but no `frame-src` key, so a host that sandboxes the
- * panel may block an inner `<iframe>` with no declaration able to allow it.
- * This ships the iframe as the primary path — `src` set only once the
- * artifact is ready — with a `fetch`-and-inject fallback wired to the
- * iframe's `error` event, reachable via `connect-src` (`connectDomains`).
- * Neither path is host-verified; see BRIEF-02's report.
+ * How the shell shows the artifact (D1): this panel renders the live artifact
+ * through an inner `<iframe>`, which `resources/read`'s `_meta.ui.csp` now
+ * allows via `frameDomains` (BRIEF-03) — a host that enforces the CSP schema's
+ * default of `frame-src 'none'` on an undeclared domain would otherwise block
+ * it outright. This still ships the iframe as the primary path — `src` set
+ * only once the artifact is ready — with a `fetch`-and-inject fallback wired
+ * to the iframe's `error` event, reachable via `connect-src` (`connectDomains`),
+ * for hosts stricter than the one this was verified against.
  */
 import { ARTIFACT_PAUSED_TEXT, embedJson, escapeHtml } from "../web/page.ts"
 

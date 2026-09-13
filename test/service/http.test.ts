@@ -478,6 +478,25 @@ test("GET /r/:code/artifact/* appends the sub-path and preserves the query on th
   assert.equal(await res.text(), "artifact:/deep/page?x=1")
 })
 
+test("GET /r/:code/artifact/ carries Access-Control-Allow-Origin: * — the panel's fetch-and-inject fallback runs from the host application's origin (BRIEF-03)", async () => {
+  const upstreamUrl = await startFakeArtifactUpstream()
+  const { baseUrl, code } = await newRoomHarnessWithArtifact(upstreamUrl)
+
+  const res = await fetch(`${baseUrl}/r/${code}/artifact/`)
+  assert.equal(res.headers.get("access-control-allow-origin"), "*")
+})
+
+test("OPTIONS /r/:code/artifact/ answers the CORS preflight with 204 and the method/header allowances", async () => {
+  const upstreamUrl = await startFakeArtifactUpstream()
+  const { baseUrl, code } = await newRoomHarnessWithArtifact(upstreamUrl)
+
+  const res = await fetch(`${baseUrl}/r/${code}/artifact/`, { method: "OPTIONS" })
+  assert.equal(res.status, 204)
+  assert.equal(res.headers.get("access-control-allow-origin"), "*")
+  assert.equal(res.headers.get("access-control-allow-methods"), "GET, HEAD, OPTIONS")
+  assert.equal(res.headers.get("access-control-allow-headers"), "content-type")
+})
+
 test("GET /r/:code/artifact/ returns 404 for an unknown room code — nothing to self-heal toward", async () => {
   const res = await fetch(`${(await newRoomHarness()).baseUrl}/r/RDV-ZZZZ/artifact/`)
   assert.equal(res.status, 404)
@@ -627,6 +646,21 @@ test("GET /r/:code/state returns 404 JSON for an unknown room", async () => {
   assert.equal(body.error, "not_found")
 })
 
+test("GET /r/:code/state carries Access-Control-Allow-Origin: * — the panel polls it from the host application's origin, not ours (BRIEF-03)", async () => {
+  const { baseUrl, code } = await newRoomHarness()
+  const res = await fetch(`${baseUrl}/r/${code}/state`)
+  assert.equal(res.headers.get("access-control-allow-origin"), "*")
+})
+
+test("OPTIONS /r/:code/state answers the CORS preflight with 204 and the method/header allowances", async () => {
+  const { baseUrl, code } = await newRoomHarness()
+  const res = await fetch(`${baseUrl}/r/${code}/state`, { method: "OPTIONS" })
+  assert.equal(res.status, 204)
+  assert.equal(res.headers.get("access-control-allow-origin"), "*")
+  assert.equal(res.headers.get("access-control-allow-methods"), "GET, HEAD, OPTIONS")
+  assert.equal(res.headers.get("access-control-allow-headers"), "content-type")
+})
+
 test("GET /r/:code embeds the polling state script, member badges and the artifact section while active", async () => {
   const upstreamUrl = await startFakeArtifactUpstream()
   const { baseUrl, code } = await newRoomHarnessWithArtifact(upstreamUrl)
@@ -744,6 +778,13 @@ test("GET /rooms/:code/outbox refuses a wrong or absent member token, and 404s a
 
   const unknown = await fetch(`${baseUrl}/rooms/RDV-ZZZZ/outbox`, { headers: aliceHeaders(code, alice) })
   assert.equal(unknown.status, 404)
+})
+
+test("GET /rooms/:code/outbox does NOT carry Access-Control-Allow-Origin — bearer-authenticated and member-scoped, unlike /r/:code/state and the artifact proxy (BRIEF-03 scope boundary)", async () => {
+  const { baseUrl, code, alice } = await outboxHarness()
+  const res = await fetch(`${baseUrl}/rooms/${code}/outbox`, { headers: aliceHeaders(code, alice) })
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get("access-control-allow-origin"), null)
 })
 
 test("GET /rooms/:code/outbox never puts another member's record on the wire (D4, filtered before the bytes leave)", async () => {

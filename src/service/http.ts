@@ -100,6 +100,37 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body))
 }
 
+/** `Access-Control-Allow-Origin: *`, scoped to exactly two routes (BRIEF-03):
+ *  `GET /r/:code/state` and the artifact proxy. Both panels' `fetch` runs
+ *  from the HOST APPLICATION's origin, not ours, so the browser's CORS check
+ *  blocks the read independent of CSP `connectDomains` — every panel sits on
+ *  "Loading…" forever in any browser-based host without this. Safe here
+ *  specifically because both payloads are already unauthenticated: the room
+ *  code IS the capability, so a browser reading either cross-origin learns
+ *  nothing it could not learn with `curl`. Deliberately NOT used on
+ *  `/rooms/:code/outbox`, `/outbox/cursor`, `/rooms/:code/send`, or `/mcp/*`
+ *  — those are bearer-authenticated and member-scoped, and `ACAO: *` on a
+ *  credentialed endpoint is a different, much worse decision. Never paired
+ *  with `Access-Control-Allow-Credentials`: the browser rejects that
+ *  combination anyway, and it is the classic way a public endpoint becomes
+ *  credentialed by accident. */
+function setPublicCorsHeader(res: ServerResponse): void {
+  res.setHeader("Access-Control-Allow-Origin", "*")
+}
+
+/** Preflight response for the same two public routes `setPublicCorsHeader`
+ *  covers. A plain `GET` with no custom headers never preflights, but the
+ *  panel's `fetch`-and-inject fallback may add one — and a missing `OPTIONS`
+ *  handler here would 404, which reads exactly like the route not existing. */
+function sendCorsPreflight(res: ServerResponse): void {
+  res.writeHead(204, {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Access-Control-Allow-Headers": "content-type",
+  })
+  res.end()
+}
+
 /** Injectable media-ingress pieces for the webhook handlers and the media
  *  route (docs/MULTIMODAL.md). Every default is the degraded-but-visible one,
  *  and each is upgraded only when the matching credential is configured. */
@@ -1074,7 +1105,12 @@ async function handle(
   }
 
   const artifactMatch = /^\/r\/([^/]+)\/artifact(\/.*)?$/.exec(url.pathname)
+  if (artifactMatch !== null && req.method === "OPTIONS") {
+    sendCorsPreflight(res)
+    return
+  }
   if (artifactMatch !== null && (req.method === "GET" || req.method === "HEAD")) {
+    setPublicCorsHeader(res)
     const encodedCode = artifactMatch[1]
     if (encodedCode === undefined) {
       sendJson(res, 400, { error: "invalid_code" })
@@ -1108,7 +1144,12 @@ async function handle(
   }
 
   const stateMatch = /^\/r\/([^/]+)\/state$/.exec(url.pathname)
+  if (stateMatch !== null && req.method === "OPTIONS") {
+    sendCorsPreflight(res)
+    return
+  }
   if (stateMatch !== null && req.method === "GET") {
+    setPublicCorsHeader(res)
     const encodedCode = stateMatch[1]
     if (encodedCode === undefined) {
       sendJson(res, 400, { error: "invalid_code" })
