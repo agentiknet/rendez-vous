@@ -46,8 +46,17 @@ export function deliveryFromAddress(address: Address): MemberDelivery {
     case "room-web":
       return { mode: "pull" }
   }
-  throw new Error(`unrouted delivery: no delivery mode for provider "${address.provider}"`)
+  throw new UnroutedDeliveryError(`unrouted delivery: no delivery mode for provider "${address.provider}"`)
 }
+
+/** Thrown when a member (or address) has no delivery mode to route to —
+ *  either a provider nobody routes (`deliveryFromAddress`) or a pull
+ *  recipient handed to a push transport (`CompositeTransport`). Loud by
+ *  design (D1): the failure this names must never be swallowed into a
+ *  console write. Being loud does not mean taking the caller down: the room
+ *  lifecycle boundary (`RoomService.handleInbound`) catches this class and
+ *  answers an `undeliverable` outcome instead of letting it 500 (brief D). */
+export class UnroutedDeliveryError extends Error {}
 
 export interface Member {
   id: string
@@ -170,7 +179,12 @@ export const MAX_DELIVERY_ATTEMPTS = 5
 export interface Delivery {
   readonly id: string
   readonly memberId: string
-  readonly kind: "say" | "whisper"
+  /** Who is speaking (brief B): `"say"`/`"whisper"` are the agent's audience
+   *  tools; `"system"` is the ROOM's own voice — join links, the QR caption,
+   *  join/resume/paused notices, the fan-out's turn text to a pull member.
+   *  A join link attributed to the agent is a small lie the page would
+   *  render; system is per-member but not secret, and never a whisper. */
+  readonly kind: "say" | "whisper" | "system"
   readonly text: string
   readonly status: "pending" | "delivered" | "failed"
   /** Failure count, not attempt count: it only moves when a send fails, and

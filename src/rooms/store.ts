@@ -202,7 +202,7 @@ function isDelivery(value: unknown): value is Delivery {
   return (
     isString(value.id) &&
     isString(value.memberId) &&
-    (value.kind === "say" || value.kind === "whisper") &&
+    (value.kind === "say" || value.kind === "whisper" || value.kind === "system") &&
     isString(value.text) &&
     isDeliveryStatus(value.status) &&
     ((typeof failures === "number" && failures >= 0) ||

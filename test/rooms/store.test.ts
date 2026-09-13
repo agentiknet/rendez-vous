@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, test } from "node:test"
 import { RoomStore } from "../../src/rooms/store.ts"
-import type { Address, Ask, Member, PendingDelivery } from "../../src/rooms/types.ts"
+import type { Address, Ask, Delivery, Member, PendingDelivery } from "../../src/rooms/types.ts"
 
 async function freshDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "rdv-store-"))
@@ -570,4 +570,34 @@ test("writes are atomic: no partial rooms.json is ever left behind", async () =>
   const raw = await readFile(join(dir, "rooms.json"), "utf8")
   const parsed: unknown = JSON.parse(raw)
   assert.ok(parsed !== null && typeof parsed === "object")
+})
+
+test('a Delivery of kind "system" round-trips through the store (brief B)', async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const web = await store.addMember(room.code, {
+    displayName: "Chloe",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+  })
+  const system: Delivery = {
+    id: "d1",
+    memberId: web.id,
+    kind: "system",
+    text: "Room created: RDV-TEST",
+    status: "delivered",
+    failures: 0,
+    lastError: undefined,
+    createdAt: "2026-09-13T00:00:00.000Z",
+    deliveredAt: "2026-09-13T00:00:01.000Z",
+  }
+  await store.update(room.code, { deliveries: [system], deliverySeq: 1 })
+
+  const reopened = await RoomStore.open(dir)
+  const loaded = reopened.get(room.code)?.deliveries?.[0]
+  assert.ok(loaded !== undefined)
+  assert.equal(loaded.kind, "system")
+  assert.equal(loaded.text, "Room created: RDV-TEST")
+  assert.equal(loaded.status, "delivered")
 })

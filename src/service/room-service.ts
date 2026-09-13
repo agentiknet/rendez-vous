@@ -9,7 +9,7 @@ import type { Transport } from "../fanout/types.ts"
 import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
 import { ensureMembership, handleCommand, parseCommand } from "../rooms/commands.ts"
 import type { RoomStore } from "../rooms/store.ts"
-import type { Address, Member, Room, Tier } from "../rooms/types.ts"
+import { UnroutedDeliveryError, deliveryModeOf, type Address, type Member, type Room, type Tier } from "../rooms/types.ts"
 import { memberToken, tokensMatch } from "./mcp-room.ts"
 import { publicArtifactUrl, publicMediaUrl } from "./artifact-proxy.ts"
 import type { SessionBooter } from "./booter.ts"
@@ -17,6 +17,7 @@ import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
 import { DeliverableAwareTransport, DeliverableService, parseDeliverableCommand } from "./deliverable.ts"
 import { DeliveryEngine } from "./delivery.ts"
+import { MemberSender } from "./member-send.ts"
 import { OpenAiTtsProvider } from "../media/openai.ts"
 import { MediaStore } from "./media-store.ts"
 import { buildSessionRecap } from "./recap.ts"
@@ -49,6 +50,14 @@ export type InboundOutcome =
   | { kind: "not-in-room" }
   | { kind: "unknown-code" }
   | { kind: "unknown-sender" }
+  /** A member nobody could route to (brief D): `deliveryFromAddress` or the
+   *  transport's pull arm threw `UnroutedDeliveryError` part-way through the
+   *  lifecycle. Loud is right — but an uncaught throw here takes room
+   *  creation down with it (the live 500 that exposed this whole bug), so
+   *  the boundary catches it and answers this instead. Whatever the room
+   *  lifecycle managed to persist before the throw stands; the caller can
+   *  act on `reason`. */
+  | { kind: "undeliverable"; reason: string }
 
 export type RoomWebSendOutcome =
   | { kind: "sent"; member: Member; result: PromptResult }
@@ -174,6 +183,11 @@ export class RoomService {
    *  agent's turn. Public because the room MCP endpoint (src/service/http.ts)
    *  hands it to the handlers. Shares the fan-out's transport. */
   readonly deliveryEngine: DeliveryEngine
+  /** The ONE send path outside the delivery engine (brief A): the room's
+   *  own voice — join links, QR, join/resume/paused notices, broadcasts —
+   *  routed by `deliveryModeOf(member)`: push members exactly as before,
+   *  pull members as `kind: "system"` outbox records. */
+  private readonly sender: MemberSender
   private readonly fanout: RoomFanout
   private readonly idlePauseMs: number
   private readonly idleSweepMs: number
@@ -259,9 +273,26 @@ export class RoomService {
     // "the SAME transport RoomFanout uses" (PLAN §3.2) is literal, not
     // structural — deliverable interception must apply to both paths alike.
     const fanoutTransport = new DeliverableAwareTransport(this.transport, this.deliverable, this.store)
+    // The delivery half of the room audience tools (PLAN §3.2/§3.3): the
+    // `say`/`whisper` MCP handlers accept into this, and it drains off the
+    // agent's turn. Built BEFORE the fan-out, because the member-send helper
+    // (brief A) needs it to write pull members' records.
+    this.deliveryEngine = new DeliveryEngine({
+      store: this.store,
+      transport: fanoutTransport,
+      reportFailure: (code, correction) => this.reportToSession(code, correction),
+    })
+    // The ONE send path outside DeliveryEngine (brief A): the room's own
+    // voice — join links, QR, join/resume notices, broadcasts — routed by
+    // the member's delivery mode instead of hitting the transport directly
+    // (which was the console-fallback swallow this whole bug came from).
+    this.sender = new MemberSender({ store: this.store, transport: this.transport, engine: this.deliveryEngine })
     this.fanout = new RoomFanout({
       store: this.store,
       transport: fanoutTransport,
+      // The reader's sends go through the same one-send-path helper, over
+      // the fan-out's own transport (deliverable interception applies).
+      sender: new MemberSender({ store: this.store, transport: fanoutTransport, engine: this.deliveryEngine }),
       source: (sessionId, since, signal) => this.client.events(sessionId, since, signal),
       isAlive: (sessionId) => isSessionAlive(this.daemon, sessionId),
       // An attachment that probed dead is fed back into the room's session
@@ -270,14 +301,6 @@ export class RoomService {
       reportUnservable: (code, correction) => this.reportUnservableArtifact(code, correction),
       ...(opts.probeUrl !== undefined ? { probeUrl: opts.probeUrl } : {}),
       ...(openaiKey !== undefined ? { tts: new OpenAiTtsProvider(openaiKey), mediaStore: this.mediaStore } : {}),
-    })
-    // Final delivery failures come back to the agent over the SAME reactive
-    // fan-in the unservable-artifact correction uses — one ingestion path
-    // stays the only path (PLAN §3.2).
-    this.deliveryEngine = new DeliveryEngine({
-      store: this.store,
-      transport: fanoutTransport,
-      reportFailure: (code, correction) => this.reportToSession(code, correction),
     })
   }
 
@@ -551,7 +574,7 @@ export class RoomService {
     }
 
     if (room.state === "paused") {
-      await this.transport.send(member, { text: RESUMING_TEXT, artifactUrl: memberFacingArtifactUrl(room) })
+      await this.sender.send(code, member, { text: RESUMING_TEXT, artifactUrl: memberFacingArtifactUrl(room) })
       room = await this.doResume(room)
     }
     if (room.sessionId === undefined) {
@@ -567,6 +590,23 @@ export class RoomService {
   }
 
   async handleInbound(input: InboundInput): Promise<InboundOutcome> {
+    // The room lifecycle boundary (brief D): `deliveryFromAddress` and the
+    // transport's pull arm throw `UnroutedDeliveryError` for a genuinely
+    // unroutable member, and `handleInboundSimulated` is not the only entry
+    // point here. Loud stays loud — the error names the member and the
+    // fault — but it is answered as an outcome, never allowed to 500 a room
+    // into nonexistence.
+    try {
+      return await this.handleInboundRouted(input)
+    } catch (error) {
+      if (error instanceof UnroutedDeliveryError) {
+        return { kind: "undeliverable", reason: error.message }
+      }
+      throw error
+    }
+  }
+
+  private async handleInboundRouted(input: InboundInput): Promise<InboundOutcome> {
     const sender = { displayName: input.displayName, tier: input.tier, address: input.address }
     const command = parseCommand(input.text)
 
@@ -607,7 +647,7 @@ export class RoomService {
     this.fanout.start(room.code)
 
     const links = currentJoinLinks(room.code)
-    await this.transport.send(result.member, { text: newRoomReplyText(room, links), artifactUrl: memberFacingArtifactUrl(room) })
+    await this.sender.send(room.code, result.member, { text: newRoomReplyText(room, links), artifactUrl: memberFacingArtifactUrl(room) })
     await this.sendJoinQr(result.member, room, links)
 
     return { kind: "created", room, member: result.member }
@@ -627,14 +667,14 @@ export class RoomService {
     await this.touchActivity(result.room.code)
 
     if (result.movedFrom !== undefined) {
-      await this.transport.send(result.member, {
+      await this.sender.send(result.room.code, result.member, {
         text: `Moved from ${result.movedFrom} to ${result.room.code}.`,
         artifactUrl: memberFacingArtifactUrl(result.room),
       })
       return { kind: "moved", room: result.room, member: result.member, from: result.movedFrom }
     }
 
-    await this.transport.send(result.member, {
+    await this.sender.send(result.room.code, result.member, {
       text: joinRoomReplyText(result.room),
       artifactUrl: memberFacingArtifactUrl(result.room),
     })
@@ -647,7 +687,7 @@ export class RoomService {
       await this.replyGuidance(input, "You're not in a room. Send `new` or `join RDV-XXXX`.")
       return { kind: "not-in-room" }
     }
-    await this.transport.send(result.member, {
+    await this.sender.send(result.room.code, result.member, {
       text: `You left ${result.room.code}. Send \`new\` or \`join RDV-XXXX\`.`,
       artifactUrl: undefined,
     })
@@ -658,7 +698,11 @@ export class RoomService {
    *  QR just encodes the same public web join link, no daemon access needed). */
   private async sendJoinQr(member: Member, room: Room, links: JoinLinks): Promise<void> {
     const transport = this.transport
-    if (!hasSendMedia(transport)) return
+    // A pull member is sent the QR as an outbox record (caption + published
+    // URL), so it needs no media-capable transport — only a push member's
+    // path is gated on the transport actually supporting images.
+    const pull = deliveryModeOf(member) === "pull"
+    if (!pull && !hasSendMedia(transport)) return
     const png = await qrPng(links.web)
     // Publish the bytes before sending. Telegram has no upload path of its
     // own and can only send media by public URL, so without this the QR
@@ -666,7 +710,7 @@ export class RoomService {
     // nothing to scan. Publishing is cheap and the URL is the same one the
     // deliverable flow already serves.
     const publicUrl = await this.publishPng(room, png)
-    await transport.sendMedia(member, png, `Scan to join ${room.code}`, publicUrl)
+    await this.sender.sendMedia(room.code, member, png, `Scan to join ${room.code}`, publicUrl)
   }
 
   /** Store a PNG against the room and return its public URL, or `undefined`
@@ -697,7 +741,7 @@ export class RoomService {
 
     const room = await this.reviveIfSessionDied(result.room)
     if (room.state === "active") {
-      await this.transport.send(result.member, {
+      await this.sender.send(result.room.code, result.member, {
         text: activeRoomStatusText(room),
         artifactUrl: memberFacingArtifactUrl(room),
       })
@@ -705,7 +749,7 @@ export class RoomService {
     }
 
     const resumed = await this.doResume(room)
-    await this.transport.send(result.member, {
+    await this.sender.send(result.room.code, result.member, {
       text: welcomeText("Resumed room", resumed),
       artifactUrl: memberFacingArtifactUrl(resumed),
     })
@@ -730,12 +774,12 @@ export class RoomService {
 
     room = await this.reviveIfSessionDied(room)
     if (room.state === "paused") {
-      await this.transport.send(member, { text: RESUMING_TEXT, artifactUrl: memberFacingArtifactUrl(room) })
+      await this.sender.send(room.code, member, { text: RESUMING_TEXT, artifactUrl: memberFacingArtifactUrl(room) })
       room = await this.doResume(room)
     }
 
     if (room.sessionId === undefined) {
-      await this.transport.send(member, {
+      await this.sender.send(room.code, member, {
         text: `This room has no live session yet — try \`resume ${room.code}\`.`,
         artifactUrl: memberFacingArtifactUrl(room),
       })
@@ -745,7 +789,7 @@ export class RoomService {
     const result = await fanIn(this.client, room.sessionId, { ...member, channel: member.address.provider }, input.text)
     await this.touchActivity(room.code)
     if (!result.ok) {
-      await this.transport.send(member, {
+      await this.sender.send(room.code, member, {
         text: `Could not deliver your message: ${result.message}`,
         artifactUrl: memberFacingArtifactUrl(room),
       })
@@ -789,7 +833,7 @@ export class RoomService {
    *  preview gate is that anyone in the room can see and confirm it. */
   private async broadcast(room: Room, text: string): Promise<void> {
     const artifactUrl = memberFacingArtifactUrl(room)
-    await Promise.allSettled(room.members.map((member) => this.transport.send(member, { text, artifactUrl })))
+    await Promise.allSettled(room.members.map((member) => this.sender.send(room.code, member, { text, artifactUrl })))
   }
 
   private async touchActivity(code: string): Promise<void> {
@@ -929,10 +973,48 @@ export class RoomService {
     const text = boxWasGone
       ? "The previous box expired; artifact restored on a new box."
       : "Artifact restored on a new box, same link."
-    await Promise.allSettled(room.members.map((member) => this.transport.send(member, { text, artifactUrl })))
+    await Promise.allSettled(room.members.map((member) => this.sender.send(room.code, member, { text, artifactUrl })))
   }
 
+  /** Reply guidance to a sender whose command could not be honoured. The
+   *  member is resolved against the store first: a member who IS in a room
+   *  (even under an id this call never saw) gets the line through the
+   *  one-send-path helper — pull members included, as an outbox record. Only
+   *  a sender in NO room goes out over the transport on a placeholder, and a
+   *  pull member with no room has no outbox to hold a record, so the miss is
+   *  logged loudly rather than swallowed. An address nobody routes throws
+   *  the loud `UnroutedDeliveryError` here, for the `handleInbound`
+   *  boundary to answer (brief D) — the same throw the transport arm made
+   *  before this helper existed. */
   private async replyGuidance(input: InboundInput, text: string): Promise<void> {
+    const found = this.store.findByAddress(input.address)
+    if (found !== undefined) {
+      await this.sender.send(found.room.code, found.member, { text, artifactUrl: undefined })
+      return
+    }
+    let mode: "push" | "pull"
+    try {
+      mode = deliveryModeOf({
+        id: `pending:${input.address.provider}:${input.address.contactRef}`,
+        displayName: input.displayName,
+        tier: input.tier,
+        address: input.address,
+        joinedAt: new Date().toISOString(),
+      })
+    } catch (error) {
+      throw error instanceof UnroutedDeliveryError
+        ? error
+        : new UnroutedDeliveryError(`unrouted delivery: no delivery mode for provider "${input.address.provider}"`)
+    }
+    if (mode === "pull") {
+      console.warn(
+        `member-send: guidance for pull member ${input.displayName} (${input.address.provider}) reached no room — nothing was delivered: ${text}`,
+      )
+      return
+    }
+    // A push member in no room still goes over the transport on a
+    // placeholder — through the helper's push arm, which is exactly this
+    // send; there is no outbox to write to.
     const placeholder: Member = {
       id: `pending:${input.address.provider}:${input.address.contactRef}`,
       displayName: input.displayName,
@@ -940,6 +1022,6 @@ export class RoomService {
       address: input.address,
       joinedAt: new Date().toISOString(),
     }
-    await this.transport.send(placeholder, { text, artifactUrl: undefined })
+    await this.sender.send("", placeholder, { text, artifactUrl: undefined })
   }
 }

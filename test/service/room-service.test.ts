@@ -895,3 +895,98 @@ test("a fan-out turn attaching a file nothing serves fans a queue:true correctio
 
   await service.stop()
 })
+
+function web(text: string): { address: Address; displayName: string; tier: Tier; text: string } {
+  return {
+    address: { provider: "room-web", source: "room-web", contactRef: "ecran" },
+    displayName: "Ecran",
+    tier: "room-web",
+    text,
+  }
+}
+
+test("creating a room whose only member is room-web succeeds, and the join links + QR land in its outbox (brief 07)", async () => {
+  const { service, store, transport } = await buildHarness()
+
+  const outcome = await service.handleInbound(web("new"))
+  assert.equal(outcome.kind, "created")
+  if (outcome.kind !== "created") return
+
+  const member = outcome.room.members[0]
+  assert.ok(member !== undefined)
+  assert.equal(member.address.provider, "room-web")
+
+  // Not a single transport push: a pull member is never handed to a
+  // transport (that was the unrouted-throw / console-fallback swallow).
+  assert.equal(transport.sends.length, 0)
+  assert.equal(transport.mediaSends.length, 0)
+
+  const records = (store.get(outcome.room.code)?.deliveries ?? []).filter((d) => d.memberId === member.id)
+  assert.ok(records.length >= 2, "the join-links reply and the QR both land as records")
+  assert.ok(records.every((record) => record.kind === "system"), "room notices are kind system, never say")
+  const linksRecord = records.find((record) => record.text.includes(`Room created: ${outcome.room.code}`))
+  assert.ok(linksRecord !== undefined, "the join-links reply record exists")
+  assert.ok(linksRecord.text.includes(`/r/${outcome.room.code}`), "the web join link is in the record text")
+  const qrRecord = records.find((record) => record.text.includes(`Scan to join ${outcome.room.code}`))
+  assert.ok(qrRecord !== undefined, "the QR caption record exists")
+  assert.ok(qrRecord.text.includes("/r/" + outcome.room.code + "/media/"), "the QR record carries the published URL")
+})
+
+test("a resume notice lands in a room-web member's outbox (brief 07)", async () => {
+  const { service, store } = await buildHarness()
+
+  const created = await service.handleInbound(web("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+  const member = created.room.members[0]
+  assert.ok(member !== undefined)
+
+  await service.pauseRoom(created.room.code)
+  const resumed = await service.handleInbound(web(`resume ${created.room.code}`))
+  assert.equal(resumed.kind, "resumed")
+
+  const records = (store.get(created.room.code)?.deliveries ?? []).filter((record) => record.memberId === member.id)
+  const resumeRecord = records.find((record) => record.text.startsWith("Resumed room") || record.text.includes("Resuming room"))
+  assert.ok(resumeRecord !== undefined, "the resume notice lands in the member's outbox")
+  assert.equal(resumeRecord.kind, "system")
+})
+
+test("a push member's path is byte-for-byte unchanged while a room-web member in the same room gets outbox records instead (brief 07)", async () => {
+  const { service, store, transport } = await buildHarness()
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+  await service.handleInbound(web(`join ${created.room.code}`))
+
+  // Alice (whatsapp, push) got exactly the same pushes the pre-helper path
+  // made: the room-created reply, then the join welcome to Bob — none of
+  // them for the web member.
+  const aliceSends = transport.sends.filter((send) => send.member.displayName === "Alice")
+  assert.equal(aliceSends.length, 1)
+  assert.ok(aliceSends[0]?.message.text.includes(`Room created: ${created.room.code}`))
+  assert.equal(transport.sends.filter((send) => send.member.displayName === "Ecran").length, 0)
+
+  const webMember = store.get(created.room.code)?.members.find((candidate) => candidate.displayName === "Ecran")
+  assert.ok(webMember !== undefined)
+  // The web member's join reply never touched a transport — it is an outbox
+  // record, kind "system".
+  const webRecords = (store.get(created.room.code)?.deliveries ?? []).filter((record) => record.memberId === webMember.id)
+  assert.ok(webRecords.length >= 1)
+  assert.ok(webRecords.every((record) => record.kind === "system"))
+  assert.ok(webRecords.some((record) => record.text.includes(`Joined room: ${created.room.code}`)))
+})
+
+test("an unroutable member is answered as an undeliverable outcome, not an uncaught throw (brief D)", async () => {
+  const { service } = await buildHarness()
+
+  const outcome = await service.handleInbound({
+    address: { provider: "smoke-signal", source: "agentpush", contactRef: "+15550000000" },
+    displayName: "Ghost",
+    tier: "messenger",
+    text: "new",
+  })
+  assert.equal(outcome.kind, "undeliverable")
+  if (outcome.kind !== "undeliverable") return
+  assert.match(outcome.reason, /unrouted delivery/)
+})

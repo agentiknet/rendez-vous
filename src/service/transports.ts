@@ -1,6 +1,6 @@
 import type { AttachmentKind } from "../fanout/attach.ts"
 import type { OutboundMessage, Transport } from "../fanout/types.ts"
-import { deliveryFromAddress, type Member, type MemberDelivery } from "../rooms/types.ts"
+import { UnroutedDeliveryError, deliveryFromAddress, type Member, type MemberDelivery } from "../rooms/types.ts"
 
 /** A file the agent asked to send (`[[attach …]]`, src/fanout/attach.ts),
  *  already addressable at a public, room-keyed URL the provider fetches
@@ -122,8 +122,12 @@ export class CompositeTransport implements MediaTransport {
       case "pull":
         // Not a fallback: a pull recipient is drained from their outbox
         // (GET /rooms/:code/outbox), never pushed. Reaching a push transport
-        // with one is a caller bug, so it fails loudly.
-        throw new Error(`unrouted delivery: member ${member.id} is a pull recipient and has no push transport`)
+        // with one is a caller bug, so it fails loudly — and as an
+        // `UnroutedDeliveryError`, so the room lifecycle boundary can answer
+        // it instead of 500-ing (brief D).
+        throw new UnroutedDeliveryError(
+          `unrouted delivery: member ${member.id} is a pull recipient and has no push transport`,
+        )
     }
     return unrouted(member, delivery)
   }

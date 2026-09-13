@@ -1,0 +1,116 @@
+import type { OutboundMessage, Transport } from "../fanout/types.ts"
+import { deliveryModeOf, type Member } from "../rooms/types.ts"
+import type { RoomStore } from "../rooms/store.ts"
+import type { DeliveryEngine } from "./delivery.ts"
+import { attachmentFallbackText, hasSendAttachment, hasSendMedia, type OutboundAttachment } from "./transports.ts"
+
+/** The ONE way anything outside `DeliveryEngine` sends to a member
+ *  (brief A): every call site branches here, and the helper branches on
+ *  `deliveryModeOf(member)` —
+ *
+ *  - **push** → `transport.send` / `sendAttachment` / `sendMedia`, exactly
+ *    as the call site did before this helper existed. Byte-for-byte.
+ *  - **pull** → a `kind: "system"` outbox record via `DeliveryEngine.accept`,
+ *    so the member's tab drains it like everything else. No transport call,
+ *    ever — `CompositeTransport` throws for pull recipients, and throwing
+ *    here would take a room lifecycle down with it (the bug this fixes).
+ *
+ *  No call site outside this helper (and the delivery engine itself) may
+ *  call `transport.send` on a member; a test greps the source for that
+ *  invariant. A second bypass is how the original bug got in: every send the
+ *  room itself makes went straight to the transport and fell into the old
+ *  console fallback, so a web member never received its own join link.
+ *
+ *  A pull record carries only text — an attachment rides as its URL spelled
+ *  out (`attachmentFallbackText`), media as caption plus the published URL.
+ *  The member's tab already reaches the artifact/media proxy; it does not
+ *  need the bytes pushed at it. */
+export class MemberSender {
+  private readonly store: RoomStore
+  private readonly transport: Transport
+  private readonly engine: DeliveryEngine
+
+  constructor(opts: { store: RoomStore; transport: Transport; engine: DeliveryEngine }) {
+    this.store = opts.store
+    this.transport = opts.transport
+    this.engine = opts.engine
+  }
+
+  /** One message to one member. `code` is the room the member belongs to —
+   *  the outbox record needs its room; for a push member it is unused. */
+  async send(code: string, member: Member, message: OutboundMessage): Promise<void> {
+    if (this.isPull(member)) {
+      // The outbox record has no separate artifact field; a notice whose
+      // artifact line the push rendering would have appended gets it spelled
+      // into the text — unless the text already carries it (the join-links
+      // reply embeds the web link itself).
+      const text =
+        message.artifactUrl !== undefined && !message.text.includes(message.artifactUrl)
+          ? `${message.text}\n${message.artifactUrl}`
+          : message.text
+      await this.acceptSystemRecord(code, member, text)
+      return
+    }
+    await this.transport.send(member, message)
+  }
+
+  /** An agent- or room-authored attachment. A push transport with no
+   *  attachment concept still gets the file — as its URL in text, the same
+   *  fallback the call sites applied themselves before this helper existed.
+   *  A pull member gets the URL as a record; their tab fetches it. */
+  async sendAttachment(code: string, member: Member, attachment: OutboundAttachment): Promise<void> {
+    if (this.isPull(member)) {
+      await this.acceptSystemRecord(code, member, attachmentFallbackText(attachment))
+      return
+    }
+    if (hasSendAttachment(this.transport)) {
+      await this.transport.sendAttachment(member, attachment)
+      return
+    }
+    await this.transport.send(member, { text: attachmentFallbackText(attachment), artifactUrl: undefined })
+  }
+
+  /** Media (the join QR). A pull member cannot be pushed bytes; the record
+   *  carries the caption and, when it published, the public URL of the
+   *  image. The join links themselves ride the room-created text record, so
+   *  a member whose QR failed to publish still has everything it needs. */
+  async sendMedia(code: string, member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<void> {
+    if (this.isPull(member)) {
+      await this.acceptSystemRecord(code, member, publicUrl !== undefined ? `${caption}\n${publicUrl}` : caption)
+      return
+    }
+    if (hasSendMedia(this.transport)) {
+      await this.transport.sendMedia(member, png, caption, publicUrl)
+      return
+    }
+    await this.transport.send(member, { text: caption, artifactUrl: undefined })
+  }
+
+  private isPull(member: Member): boolean {
+    try {
+      return deliveryModeOf(member) === "pull"
+    } catch {
+      // An unroutable address stays push-shaped here: the transport arm
+      // below throws the loud UnroutedDeliveryError for it, where it always
+      // did — the room lifecycle boundary catches that (brief D).
+      return false
+    }
+  }
+
+  /** Write the `kind: "system"` record through the same accept path as the
+   *  agent's say/whisper: one `pending` record, drained (for a pull member
+   *  that means completed into their outbox), pruned and cursored by the
+   *  exact rules the appendix specifies. A member id that matches nobody in
+   *  the room (a guidance placeholder for someone in no room at all) is not
+   *  recordable — there is no outbox to hold it — so it is logged loudly,
+   *  never silently dropped. */
+  private async acceptSystemRecord(code: string, member: Member, text: string): Promise<void> {
+    const outcome = await this.engine.accept(code, "system", text, [member.id])
+    if (outcome.unknown.includes(member.id)) {
+      const room = this.store.get(code)
+      console.warn(
+        `member-send: pull member ${member.id} is not in room ${code} (${room === undefined ? "no such room" : "roster mismatch"}) — nothing was delivered`,
+      )
+    }
+  }
+}

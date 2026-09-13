@@ -249,6 +249,13 @@ async function handleInboundSimulated(service: RoomService, req: IncomingMessage
     tier,
     text,
   })
+  // Brief D: the boundary catches a genuinely unroutable member and answers
+  // it as an outcome, never an uncaught 500. The simulated surface makes it
+  // an explicit 422 naming the fault.
+  if (outcome.kind === "undeliverable") {
+    sendJson(res, 422, { error: "undeliverable", message: outcome.reason })
+    return
+  }
   sendJson(res, 200, outcome)
 }
 

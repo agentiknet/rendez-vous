@@ -5,8 +5,6 @@ import { env } from "../env.ts"
 import { publicArtifactUrl, publicMediaUrl } from "../service/artifact-proxy.ts"
 import type { MediaRecord, SaveMediaInput } from "../service/media-store.ts"
 import {
-  attachmentFallbackText,
-  hasSendAttachment,
   type OutboundAttachment,
 } from "../service/transports.ts"
 import { attachmentUrl, parseAttachments, parseSpeech, type ParsedAttachment } from "./attach.ts"
@@ -18,6 +16,8 @@ export interface SpeechMediaStore {
 }
 import { renderForTier } from "./render.ts"
 import type { FanoutRecord, Transport } from "./types.ts"
+import { DeliveryEngine } from "../service/delivery.ts"
+import { MemberSender } from "../service/member-send.ts"
 import { askMarkerForOthers, askTextForTarget, resolveAskSegments, type ResolvedTurnSegment } from "./ask.ts"
 import { renderWhisperForMember, resolveWhisperSegments, type ResolvedSegment } from "./whisper.ts"
 
@@ -137,7 +137,12 @@ function renderTurnForMember(pieces: TurnPiece[], member: Member): string {
 
 export class RoomFanout {
   private readonly store: RoomStore
-  private readonly transport: Transport
+  /** The ONE send path (brief A): the fan-out never calls `transport.send`
+   *  on a member directly — every send branches on the member's delivery
+   *  mode, so a pull member (a room-web tab) receives its turn text,
+   *  attachments and honest unservable notices as `kind: "system"` outbox
+   *  records instead of throwing inside `CompositeTransport`. */
+  private readonly sender: MemberSender
   private readonly source: Source
   private readonly isAlive: IsAlive
   private readonly readers: Map<string, ActiveReader> = new Map()
@@ -175,6 +180,12 @@ export class RoomFanout {
   constructor(opts: {
     store: RoomStore
     transport: Transport
+    /** The one send path (brief A). Optional only so existing harnesses
+     *  keep compiling: when omitted, one is built over this fan-out's own
+     *  transport and a drain-less `DeliveryEngine` — pull members then get
+     *  their records accepted without the auto-drain, which is the honest
+     *  minimal behaviour for a test. */
+    sender?: MemberSender
     source: Source
     isAlive?: IsAlive
     tts?: TtsProvider
@@ -183,7 +194,13 @@ export class RoomFanout {
     reportUnservable?: (code: string, correction: string) => Promise<void>
   }) {
     this.store = opts.store
-    this.transport = opts.transport
+    this.sender =
+      opts.sender ??
+      new MemberSender({
+        store: opts.store,
+        transport: opts.transport,
+        engine: new DeliveryEngine({ store: opts.store, transport: opts.transport, autoDrain: false }),
+      })
     this.source = opts.source
     this.isAlive = opts.isAlive ?? (async () => true)
     this.tts = opts.tts
@@ -362,15 +379,11 @@ export class RoomFanout {
       if (attachment.url.length === 0) {
         const text = attachment.caption
         if (text !== undefined && text.length > 0) {
-          await this.transport.send(member, { text, artifactUrl: undefined })
+          await this.sender.send(code, member, { text, artifactUrl: undefined })
         }
         return
       }
-      if (hasSendAttachment(this.transport)) {
-        await this.transport.sendAttachment(member, attachment)
-        return
-      }
-      await this.transport.send(member, { text: attachmentFallbackText(attachment), artifactUrl: undefined })
+      await this.sender.sendAttachment(code, member, attachment)
     } catch (error: unknown) {
       console.error(
         `failed to deliver attachment to ${member.displayName} in ${code}: ${
@@ -413,11 +426,7 @@ export class RoomFanout {
       caption: parsed.caption,
     }
     try {
-      if (hasSendAttachment(this.transport)) {
-        await this.transport.sendAttachment(member, attachment)
-        return
-      }
-      await this.transport.send(member, { text: attachmentFallbackText(attachment), artifactUrl: undefined })
+      await this.sender.sendAttachment(code, member, attachment)
     } catch (error: unknown) {
       console.error(
         `failed to send attachment ${parsed.name} to ${member.displayName} in ${code}: ${
@@ -508,13 +517,19 @@ export class RoomFanout {
           // a pull member IS the screen — it is watching the artifact live —
           // and has no push transport at all.
           if (artifactChanged && artifactUrl !== undefined && deliveryModeOf(member) === "push") {
-            await this.transport.send(member, { text: artifactUrl, artifactUrl })
+            await this.sender.send(code, member, { text: artifactUrl, artifactUrl })
           }
         } else {
           const memberText = renderTurnForMember(pieces, member)
           const message = renderForTier(member.tier, memberText, artifactUrl, artifactChanged)
           if (message !== undefined) {
-            await this.transport.send(member, message)
+            await this.sender.send(code, member, message)
+          } else if (deliveryModeOf(member) === "pull" && memberText.trim().length > 0) {
+            // A pull member's own view of the turn, as an outbox record —
+            // what renderForTier gives a phone, the outbox gives the tab
+            // (whisper blocks already collapsed per member above; kind
+            // "system" keeps it attributed to the room, not the agent).
+            await this.sender.send(code, member, { text: memberText, artifactUrl: undefined })
           }
         }
         // Attachments go to everyone, after the text, and are independent of
@@ -527,7 +542,7 @@ export class RoomFanout {
         // members get the honest one-liner instead, because the room said it
         // was sending a file and did not.
         for (const { attachment } of unserved) {
-          await this.transport.send(member, { text: unservableNotice(attachment.name), artifactUrl: undefined })
+          await this.sender.send(code, member, { text: unservableNotice(attachment.name), artifactUrl: undefined })
         }
         for (const note of voiceNotes) {
           await this.deliverAttachment(member, code, note)

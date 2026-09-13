@@ -109,6 +109,7 @@ const STYLE = `
   .bubble.user { background: #eef2ff; margin-left: auto; }
   .bubble.assistant { background: #fff; border: 1px solid var(--border); }
   .bubble.whisper { border-color: #d8c9f0; background: #f6f1fd; }
+  .bubble.system { border-color: #c9dcef; background: #eef6fd; }
   .outbox-gap { font-size: 12px; color: #b42318; background: #fdeaea; border: 1px solid #f2c4c0; border-radius: 6px; padding: 6px 10px; margin: 0 0 10px; }
   #name-error { color: #b42318; font-size: 12px; font-weight: 600; display: none; width: 100%; }
   .badge { display: inline-block; font-size: 11px; font-weight: 600; color: var(--accent); margin-bottom: 4px; }
@@ -439,10 +440,10 @@ function script(code: string, room: Room, agentBusy: boolean): string {
           transcriptEl.appendChild(el);
         }
         plan.items.forEach(function (item) {
-          const el = bubble(item.kind === "whisper" ? "assistant whisper" : "assistant");
+          const el = bubble(item.kind === "whisper" ? "assistant whisper" : item.kind === "system" ? "assistant system" : "assistant");
           const badge = document.createElement("span");
           badge.className = "badge";
-          badge.textContent = item.kind === "whisper" ? "whisper · private, to you" : "agent · to you";
+          badge.textContent = item.kind === "whisper" ? "whisper · private, to you" : item.kind === "system" ? "room · to you" : "agent · to you";
           const body = document.createElement("div");
           body.textContent = item.text;
           el.appendChild(badge);
@@ -550,7 +551,15 @@ export const planOutboxRender = (
     if (typeof record.id !== "string") continue
     if (seenIds[record.id] === true) continue
     seenIds[record.id] = true
-    items.push({ id: record.id, kind: record.kind === "whisper" ? "whisper" : "say", text: record.text === undefined ? "" : record.text })
+    // Brief B: the room's own voice is NOT the agent speaking. `system` (a
+    // join link, a resume notice, the fan-out's turn text to this tab) is
+    // per-member but not secret, and renders distinctly from both a `say`
+    // and a `whisper`.
+    items.push({
+      id: record.id,
+      kind: record.kind === "whisper" ? "whisper" : record.kind === "system" ? "system" : "say",
+      text: record.text === undefined ? "" : record.text,
+    })
   }
   return { gap: payload.pruned === true ? OUTBOX_GAP_TEXT : undefined, items }
 }
