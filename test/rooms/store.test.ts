@@ -166,17 +166,34 @@ test("findByAddress locates the room and member for a known address", async () =
   const member = await store.addMember(room.code, aliceInput())
 
   const found = store.findByAddress(aliceInput().address)
-  assert.equal(found?.room.code, room.code)
-  assert.equal(found?.member.id, member.id)
+  assert.equal(found.kind, "one")
+  if (found.kind !== "one") return
+  assert.equal(found.room.code, room.code)
+  assert.equal(found.member.id, member.id)
 })
 
-test("findByAddress returns undefined for an unknown address", async () => {
+test("findByAddress reports 'none' for an unknown address", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)
   await store.create()
 
   const unknown: Address = { provider: "whatsapp", source: "agentpush", contactRef: "+10000000000" }
-  assert.equal(store.findByAddress(unknown), undefined)
+  assert.deepEqual(store.findByAddress(unknown), { kind: "none" })
+})
+
+test("findByAddress reports 'ambiguous' and names both codes when the same address is a member of two rooms (BRIEF-13)", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const roomA = await store.create()
+  const roomB = await store.create()
+  await store.addMember(roomA.code, aliceInput())
+  await store.addMember(roomB.code, aliceInput())
+
+  const found = store.findByAddress(aliceInput().address)
+  assert.equal(found.kind, "ambiguous")
+  if (found.kind !== "ambiguous") return
+  const codes = found.matches.map((match) => match.room.code).sort()
+  assert.deepEqual(codes, [roomA.code, roomB.code].sort())
 })
 
 test("store survives a restart: reopening the same dir sees prior writes", async () => {

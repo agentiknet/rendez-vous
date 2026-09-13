@@ -192,3 +192,53 @@ test("handleCommand join on the room the sender is already in is a no-op, not a 
   assert.equal(rejoined.member.id, created.member.id)
   assert.equal(rejoined.room.members.length, 1)
 })
+
+/** Every room across the whole store that currently lists a member at this
+ *  address — the count the bug this brief fixes actually violated. A room
+ *  merely containing a *new* member is not the same claim as the address
+ *  holding exactly one membership store-wide (BRIEF-13 rule 1/Tests). */
+function roomsContaining(store: RoomStore, address: Member["address"]): string[] {
+  return store
+    .list()
+    .filter((room) => room.members.some((member) => sameAddress(member.address, address)))
+    .map((room) => room.code)
+}
+
+function sameAddress(a: Member["address"], b: Member["address"]): boolean {
+  return a.provider === b.provider && a.source === b.source && a.contactRef === b.contactRef
+}
+
+test("BRIEF-13 R1: 'new' from an address already in a room leaves that address in exactly one room store-wide", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+
+  const first = await handleCommand(store, { kind: "new" }, alice())
+  assert.ok(first.ok)
+  if (!first.ok) return
+
+  const second = await handleCommand(store, { kind: "new" }, alice())
+  assert.ok(second.ok)
+  if (!second.ok) return
+
+  const memberships = roomsContaining(store, alice().address)
+  assert.deepEqual(memberships, [second.room.code], "alice must hold exactly one membership store-wide, in the room she just created")
+})
+
+test("BRIEF-13 R1: 'resume' on a different room than the one the address is already in leaves that address in exactly one room store-wide", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+
+  const roomA = await handleCommand(store, { kind: "new" }, alice())
+  assert.ok(roomA.ok)
+  if (!roomA.ok) return
+  const roomB = await handleCommand(store, { kind: "new" }, bob())
+  assert.ok(roomB.ok)
+  if (!roomB.ok) return
+
+  const resumed = await handleCommand(store, { kind: "resume", code: roomB.room.code }, alice())
+  assert.ok(resumed.ok)
+  if (!resumed.ok) return
+
+  const memberships = roomsContaining(store, alice().address)
+  assert.deepEqual(memberships, [roomB.room.code], "alice must hold exactly one membership store-wide, in the room she resumed into")
+})

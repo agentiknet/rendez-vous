@@ -143,7 +143,7 @@ test("a tools room: a [[say …]] voice note still delivers (caption fallback wh
 
   assert.equal(h.transport.sends.length, 2, "the spoken sentence is not agent text — it goes out")
   for (const send of h.transport.sends) {
-    assert.equal(send.message.text, "hello, the room is ready")
+    assert.equal(send.message.text, `hello, the room is ready\n[${h.code}]`)
   }
 })
 
@@ -420,5 +420,5 @@ test("a room with no protocol key at all behaves exactly as today", async () => 
   await flushTurn(h, "plain broadcast")
 
   assert.equal(h.transport.sends.length, 2)
-  assert.equal(h.transport.sends[0]?.message.text, "plain broadcast")
+  assert.equal(h.transport.sends[0]?.message.text, `plain broadcast\n[${h.code}]`)
 })

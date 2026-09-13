@@ -1,7 +1,12 @@
 import assert from "node:assert/strict"
-import { readdir, readFile } from "node:fs/promises"
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
+import { RoomStore } from "../../src/rooms/store.ts"
+import { DeliveryEngine } from "../../src/service/delivery.ts"
+import { MemberSender } from "../../src/service/member-send.ts"
+import { MemoryTransport } from "../../src/service/transports.ts"
 
 /** Files allowed to call the transport's send family on a member. The
  *  helper's push arm IS the send; the delivery engine is the other side of
@@ -36,4 +41,41 @@ test("no transport.send call survives outside the member-send helper (brief 07)"
     }
   }
   assert.deepEqual(offenders, [], `direct transport sends outside the helper: ${offenders.join(", ")}`)
+})
+
+test("BRIEF-13 R6: an outbound to a push member carries the room code; a pull member's outbox record does not", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rdv-member-send-"))
+  try {
+    const store = await RoomStore.open(dir)
+    const room = await store.create()
+    const push = await store.addMember(room.code, {
+      displayName: "Alice",
+      tier: "messenger",
+      address: { provider: "whatsapp", source: "agentpush", contactRef: "+1" },
+    })
+    const pull = await store.addMember(room.code, {
+      displayName: "Chloe",
+      tier: "room-web",
+      address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+    })
+
+    const transport = new MemoryTransport()
+    const engine = new DeliveryEngine({ store, transport })
+    const sender = new MemberSender({ store, transport, engine })
+
+    await sender.send(room.code, push, { text: "hello room", artifactUrl: undefined })
+    await sender.send(room.code, pull, { text: "hello room", artifactUrl: undefined })
+
+    assert.equal(transport.sends[0]?.message.text, `hello room\n[${room.code}]`, "a push send must carry the room code")
+
+    const record = store.get(room.code)?.deliveries?.find((delivery) => delivery.memberId === pull.id)
+    assert.ok(record !== undefined)
+    assert.equal(
+      record.text,
+      "hello room",
+      "the room-web page already shows the code — a pull member's own outbox record must not duplicate it",
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

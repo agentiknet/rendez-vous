@@ -100,6 +100,15 @@ function bob(text: string): { address: Address; displayName: string; tier: Tier;
   }
 }
 
+function carol(text: string): { address: Address; displayName: string; tier: Tier; text: string } {
+  return {
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+15557778888" },
+    displayName: "Carol",
+    tier: "messenger",
+    text,
+  }
+}
+
 async function waitFor(check: () => boolean, timeoutMs = 2000): Promise<void> {
   const start = Date.now()
   while (!check()) {
@@ -257,6 +266,105 @@ test("leave for a sender in no room replies with guidance instead of throwing", 
   assert.deepEqual(outcome, { kind: "not-in-room" })
   assert.equal(transport.sends.length, 1)
   assert.match(transport.sends[0]?.message.text ?? "", /not in a room/i)
+})
+
+test("BRIEF-13 regression, end to end: a stray duplicate membership left behind by a pre-fix 'resume' must not silently outrank an explicit 'join' — the next inbound lands in the room just joined", async () => {
+  const { service } = await buildHarness()
+
+  // STRAY: alice's first room. Oldest in the store's insertion order — the
+  // exact position `findByAddress` used to prefer on `main` when an address
+  // matched more than one room.
+  const stray = await service.handleInbound(alice("new"))
+  assert.ok(stray.kind === "created")
+  if (stray.kind !== "created") return
+
+  const target = await service.handleInbound(bob("new"))
+  assert.ok(target.kind === "created")
+  if (target.kind !== "created") return
+
+  // On `main`, `resume` calls `store.addMember` directly and never removes
+  // the sender from STRAY — this line alone is what used to leave alice a
+  // member of two rooms at once (BRIEF-13 "The mechanism, proven", defect
+  // 1). On the current code `resume` goes through `ensureMembership`, so
+  // this is an ordinary move and leaves no duplicate at all.
+  const resumed = await service.handleInbound(alice(`resume ${target.room.code}`))
+  assert.equal(resumed.kind, "resumed")
+
+  const fresh = await service.handleInbound(carol("new"))
+  assert.ok(fresh.kind === "created")
+  if (fresh.kind !== "created") return
+
+  // The explicit act (R2): alice names FRESH by code. On `main`, `join`'s
+  // internal `ensureMembership` resolves "the room to move out of" via the
+  // same `findByAddress` that scans in insertion order — with alice in both
+  // STRAY and TARGET, it finds STRAY (defect 2) and removes THAT, leaving
+  // TARGET behind as a second stray duplicate.
+  const joined = await service.handleInbound(alice(`join ${fresh.room.code}`))
+  assert.ok(joined.kind === "joined" || joined.kind === "moved")
+
+  // The composed failure: a plain inbound (no command) resolves through
+  // `findByAddress` one more time. On `main` alice is still in {TARGET,
+  // FRESH} and TARGET was inserted first, so the message is delivered
+  // there — silently overriding the `join` she just sent, byte for byte
+  // the bug from "What Jeremy saw".
+  const inbound = await service.handleInbound(alice("hello?"))
+  assert.equal(inbound.kind, "message")
+  if (inbound.kind !== "message") return
+  assert.equal(inbound.room.code, fresh.room.code, "an inbound after an explicit join must land in the room just joined")
+})
+
+test("BRIEF-13 R4: after 'leave', an inbound from that address is an unknown sender — never re-attached to a stray room left over from a pre-fix 'resume'", async () => {
+  const { service } = await buildHarness()
+
+  const stray = await service.handleInbound(alice("new"))
+  assert.ok(stray.kind === "created")
+  if (stray.kind !== "created") return
+
+  const target = await service.handleInbound(bob("new"))
+  assert.ok(target.kind === "created")
+  if (target.kind !== "created") return
+
+  // Same pre-fix duplicate scenario as the end-to-end regression test above.
+  const resumed = await service.handleInbound(alice(`resume ${target.room.code}`))
+  assert.equal(resumed.kind, "resumed")
+
+  const left = await service.handleInbound(alice("leave"))
+  assert.equal(left.kind, "left")
+
+  const inbound = await service.handleInbound(alice("hello?"))
+  assert.equal(inbound.kind, "unknown-sender", "leave must attach the sender to nothing — not fall back to a stray earlier room")
+
+  assert.equal(service.getRoom(stray.room.code)?.members.length, 0)
+  assert.equal(service.getRoom(target.room.code)?.members.length, 1, "only bob remains")
+})
+
+test("BRIEF-13 R6: 'where' answers the room code and the roster for a sender with an active room", async () => {
+  const { service, transport } = await buildHarness()
+
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+  await service.handleInbound(bob(`join ${created.room.code}`))
+
+  const outcome = await service.handleInbound(alice("where"))
+  assert.equal(outcome.kind, "where")
+  if (outcome.kind !== "where") return
+  assert.equal(outcome.room.code, created.room.code)
+
+  const lastSend = transport.sends[transport.sends.length - 1]
+  assert.ok(lastSend?.message.text.includes(created.room.code))
+  assert.ok(lastSend?.message.text.includes("Bob"), "the roster names the other member")
+})
+
+test("BRIEF-13 R6: 'where' answers plainly that a sender with no active room is in no room — not an error, not silence", async () => {
+  const { service, transport } = await buildHarness()
+
+  const outcome = await service.handleInbound(alice("where"))
+  assert.equal(outcome.kind, "not-in-room")
+
+  const lastSend = transport.sends[transport.sends.length - 1]
+  assert.ok(lastSend !== undefined, "a sender in no room asking 'where' must still get an answer, not silence")
+  assert.match(lastSend.message.text, /no room/i)
 })
 
 test("join on an unknown code replies with guidance and returns a typed error", async () => {
@@ -419,7 +527,9 @@ test("resuming onto a replaced box notifies every member once, in addition to th
   const resumed = await service.handleInbound(alice(`resume ${code}`))
   assert.equal(resumed.kind, "resumed")
 
-  const notices = transport.sends.slice(sendsBeforeResume).filter((send) => send.message.text === "Artifact restored on a new box, same link.")
+  const notices = transport.sends
+    .slice(sendsBeforeResume)
+    .filter((send) => send.message.text === `Artifact restored on a new box, same link.\n[${code}]`)
   assert.equal(notices.length, 2, "both current members should get the notice, not just whoever typed resume")
   assert.deepEqual(
     notices.map((send) => send.member.displayName).sort(),
@@ -766,9 +876,9 @@ test("a box confirmed gone during resume gets the precise 'previous box expired'
 
   const notice = transport.sends.slice(sendsBefore).find((send) => send.message.text.includes("previous box expired"))
   assert.ok(notice !== undefined, "should send the precise box-expired notice")
-  assert.equal(notice?.message.text, "The previous box expired; artifact restored on a new box.")
+  assert.equal(notice?.message.text, `The previous box expired; artifact restored on a new box.\n[${code}]`)
 
-  const generic = transport.sends.slice(sendsBefore).find((send) => send.message.text === "Artifact restored on a new box, same link.")
+  const generic = transport.sends.slice(sendsBefore).find((send) => send.message.text.startsWith("Artifact restored on a new box, same link."))
   assert.equal(generic, undefined, "must not ALSO send the generic notice")
 })
 

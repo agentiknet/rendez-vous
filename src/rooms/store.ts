@@ -331,6 +331,24 @@ function sameAddress(a: Address, b: Address): boolean {
   return a.provider === b.provider && a.source === b.source && a.contactRef === b.contactRef
 }
 
+/** One (room, member) pair `findByAddress` matched for a given address. */
+export interface AddressMatch {
+  readonly room: Room
+  readonly member: Member
+}
+
+/** `findByAddress`'s answer (BRIEF-13 rule 2): "zero, one, or several", never
+ *  a winner picked from several. `"none"` — the address has no membership
+ *  anywhere. `"one"` — the clean case every caller wants. `"ambiguous"` — a
+ *  broken invariant (R1: at most one membership per address): the store
+ *  already holds more than one, and the caller must be able to tell that
+ *  apart from a clean match rather than silently receiving whichever room
+ *  happened to be inserted first. */
+export type AddressLookup =
+  | { readonly kind: "none" }
+  | ({ readonly kind: "one" } & AddressMatch)
+  | { readonly kind: "ambiguous"; readonly matches: readonly AddressMatch[] }
+
 export class RoomStore {
   private readonly filePath: string
   private readonly rooms: Map<string, Room>
@@ -584,11 +602,25 @@ export class RoomStore {
     return updated
   }
 
-  findByAddress(address: Address): { room: Room; member: Member } | undefined {
+  /** BRIEF-13 rule 2/3: scans every room for a membership at `address` and
+   *  never returns a winner when more than one holds it — "repair on read,
+   *  loudly" means an ambiguous address is logged with every code it was
+   *  found in, at warning level, on every call, not silently normalised to
+   *  the first (oldest, by `Map` insertion order) match. */
+  findByAddress(address: Address): AddressLookup {
+    const matches: AddressMatch[] = []
     for (const room of this.rooms.values()) {
       const member = room.members.find((candidate) => sameAddress(candidate.address, address))
-      if (member !== undefined) return { room, member }
+      if (member !== undefined) matches.push({ room, member })
     }
-    return undefined
+    if (matches.length === 0) return { kind: "none" }
+    const [first, ...rest] = matches
+    if (first === undefined) return { kind: "none" }
+    if (rest.length === 0) return { kind: "one", room: first.room, member: first.member }
+    const codes = matches.map((match) => match.room.code).join(", ")
+    console.warn(
+      `findByAddress: ${address.provider}/${address.contactRef} has a membership in more than one room (${codes}) — broken invariant, not resolved silently`,
+    )
+    return { kind: "ambiguous", matches }
   }
 }

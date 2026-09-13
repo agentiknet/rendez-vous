@@ -717,7 +717,11 @@ export class DeliverableAwareTransport implements Transport {
     }
 
     const found = this.store.findByAddress(member.address)
-    if (found === undefined) {
+    // A "none" match means the transport is sending to someone the store no
+    // longer knows (nothing to splice a deliver block against); "ambiguous"
+    // is a broken invariant (R1) that already logged loudly on read — this
+    // is not the seam that resolves it, so both fall through untouched.
+    if (found.kind !== "one") {
       await this.inner.send(member, message)
       return
     }

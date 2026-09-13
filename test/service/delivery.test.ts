@@ -811,7 +811,7 @@ test("bare agent text still reaches phones exactly as before (the additive const
     transport.sends.map((send) => send.memberId).sort(),
     [alice.id, bob.id].sort(),
   )
-  assert.ok(transport.sends.every((send) => send.text === "plain broadcast, no tools"))
+  assert.ok(transport.sends.every((send) => send.text === `plain broadcast, no tools\n[${code}]`))
   assert.equal(transport.sends.some((send) => send.memberId === screen.id), false, "room-web stays transport-silent")
   await fanout.stopAll()
 })

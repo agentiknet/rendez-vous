@@ -4,6 +4,19 @@ import type { RoomStore } from "../rooms/store.ts"
 import type { DeliveryEngine } from "./delivery.ts"
 import { attachmentFallbackText, hasSendAttachment, hasSendMedia, type OutboundAttachment } from "./transports.ts"
 
+/** R6: every outbound push message carries its room code — the one
+ *  affordance that makes the active room legible on a surface (Telegram,
+ *  WhatsApp) with no other way to tell which room a reply came from. A short
+ *  suffix, not a banner, and skipped when the text already names the room
+ *  (the join/resume/QR notices already open with it, and an artifact link
+ *  already carries it in its path) so it never doubles up. `code === ""` is
+ *  the "sender in no room at all" placeholder send (`RoomService.replyGuidance`)
+ *  — nothing to name, so nothing is appended. */
+function withRoomCodeSuffix(code: string, message: OutboundMessage): OutboundMessage {
+  if (code === "" || message.text.includes(code)) return message
+  return { ...message, text: `${message.text}\n[${code}]` }
+}
+
 /** The ONE way anything outside `DeliveryEngine` sends to a member
  *  (brief A): every call site branches here, and the helper branches on
  *  `deliveryModeOf(member)` —
@@ -51,7 +64,7 @@ export class MemberSender {
       await this.acceptSystemRecord(code, member, text)
       return
     }
-    await this.transport.send(member, message)
+    await this.transport.send(member, withRoomCodeSuffix(code, message))
   }
 
   /** An agent- or room-authored attachment. A push transport with no

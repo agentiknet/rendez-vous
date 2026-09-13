@@ -47,9 +47,18 @@ export type InboundOutcome =
   | { kind: "resumed"; room: Room; member: Member }
   | { kind: "message"; room: Room; member: Member }
   | { kind: "left"; room: Room; member: Member }
+  | { kind: "where"; room: Room; member: Member }
   | { kind: "not-in-room" }
   | { kind: "unknown-code" }
   | { kind: "unknown-sender" }
+  /** R5: `findByAddress` found the sender in more than one room — a broken
+   *  invariant (R1), surfaced rather than silently resolved to whichever
+   *  room happened to be inserted first. Only reachable from `where` today:
+   *  every other inbound path degrades ambiguity to its own "no clean room"
+   *  fallback (`unknown-sender`/`not-in-room`), since guessing which of
+   *  several rooms to act on would be the same silent choice with extra
+   *  steps. */
+  | { kind: "ambiguous"; codes: readonly string[] }
   /** A member nobody could route to (brief D): `deliveryFromAddress` or the
    *  transport's pull arm threw `UnroutedDeliveryError` part-way through the
    *  lifecycle. Loud is right — but an uncaught throw here takes room
@@ -620,6 +629,8 @@ export class RoomService {
           return this.handleResume(command.code, sender, input)
         case "leave":
           return this.handleLeave(sender, input)
+        case "where":
+          return this.handleWhere(sender, input)
       }
     }
 
@@ -694,6 +705,28 @@ export class RoomService {
     return { kind: "left", room: result.room, member: result.member }
   }
 
+  /** R6: the one affordance that makes the active room legible from a surface
+   *  (Telegram, WhatsApp) that otherwise gives no clue which room a member is
+   *  speaking into — answers the room code and who else is there, and answers
+   *  just as plainly when there is no active room, rather than an error or
+   *  silence. */
+  private async handleWhere(sender: Omit<Member, "id" | "joinedAt">, input: InboundInput): Promise<InboundOutcome> {
+    const found = this.store.findByAddress(sender.address)
+    if (found.kind === "one") {
+      const roster = found.room.members.map((member) => member.displayName).join(", ")
+      const text = roster.length > 0 ? `You are in room ${found.room.code}. With: ${roster}.` : `You are in room ${found.room.code}.`
+      await this.sender.send(found.room.code, found.member, { text, artifactUrl: undefined })
+      return { kind: "where", room: found.room, member: found.member }
+    }
+    if (found.kind === "ambiguous") {
+      const codes = found.matches.map((match) => match.room.code)
+      await this.replyGuidance(input, `You have a membership in more than one room (${codes.join(", ")}) — tell the operator.`)
+      return { kind: "ambiguous", codes }
+    }
+    await this.replyGuidance(input, "You are in no room. Send `new` to start one or `join RDV-XXXX` to join one.")
+    return { kind: "not-in-room" }
+  }
+
   /** Only when the transport can actually deliver an image (R6-adjacent: the
    *  QR just encodes the same public web join link, no daemon access needed). */
   private async sendJoinQr(member: Member, room: Room, links: JoinLinks): Promise<void> {
@@ -758,7 +791,12 @@ export class RoomService {
 
   private async handleMessage(input: InboundInput): Promise<InboundOutcome> {
     const found = this.store.findByAddress(input.address)
-    if (found === undefined) {
+    // A "none" lookup is a genuine stranger; "ambiguous" is a broken
+    // invariant (R1) that already logged loudly in `findByAddress` — routing
+    // an ordinary chat message into ONE of several rooms would be exactly
+    // the silent pick this whole brief exists to end, so both degrade to the
+    // same guidance rather than guessing.
+    if (found.kind !== "one") {
       await this.replyGuidance(input, "Send `new` to start a room, or `join RDV-XXXX` to join one.")
       return { kind: "unknown-sender" }
     }
@@ -988,7 +1026,7 @@ export class RoomService {
    *  before this helper existed. */
   private async replyGuidance(input: InboundInput, text: string): Promise<void> {
     const found = this.store.findByAddress(input.address)
-    if (found !== undefined) {
+    if (found.kind === "one") {
       await this.sender.send(found.room.code, found.member, { text, artifactUrl: undefined })
       return
     }
