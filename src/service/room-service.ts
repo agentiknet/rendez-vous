@@ -8,7 +8,7 @@ import { RoomFanout, type ArtifactProbe } from "../fanout/reader.ts"
 import type { Transport } from "../fanout/types.ts"
 import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
 import { ensureMembership, handleCommand, parseCommand } from "../rooms/commands.ts"
-import type { RoomStore } from "../rooms/store.ts"
+import type { AddressLookup, RoomStore } from "../rooms/store.ts"
 import { UnroutedDeliveryError, deliveryModeOf, type Address, type Member, type Room, type Tier } from "../rooms/types.ts"
 import { memberToken, tokensMatch } from "./mcp-room.ts"
 import { publicArtifactUrl, publicMediaUrl } from "./artifact-proxy.ts"
@@ -386,6 +386,13 @@ export class RoomService {
 
   roomCount(): number {
     return this.store.list().length
+  }
+
+  /** BRIEF-13's roster query, exposed unchanged for BRIEF-18's principal
+   *  surface (src/service/mcp-personal.ts): "which rooms hold this address"
+   *  — never a second scan over `this.store.list()`. */
+  findByAddress(address: Address): AddressLookup {
+    return this.store.findByAddress(address)
   }
 
   /** Whether some room already has a member at this provider+contactRef,

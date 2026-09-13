@@ -5,6 +5,7 @@ import type { Transport } from "./fanout/types.ts"
 import { RoomStore } from "./rooms/store.ts"
 import { E2bBooter, LocalBooter, type SessionBooter } from "./service/booter.ts"
 import { startHttpServer } from "./service/http.ts"
+import { principalToken } from "./service/mcp-personal.ts"
 import { RoomService } from "./service/room-service.ts"
 import { CompositeTransport, ConsoleTransport } from "./service/transports.ts"
 
@@ -59,6 +60,19 @@ async function serve(): Promise<void> {
   process.on("SIGTERM", shutdown)
 }
 
+/** Mints a `POST /mcp` bearer for one address, to an operator, once. There is
+ *  no HTTP route that does this (BRIEF-18) — a route that minted principal
+ *  tokens would be an account system. `source` plays no part in the token
+ *  (`principalToken`'s doc) so any value works; `cli` names where it came
+ *  from for anyone reading a persisted room's `member.address` later. */
+function principalTokenCommand(provider: string | undefined, contactRef: string | undefined): void {
+  if (provider === undefined || contactRef === undefined) {
+    console.error("Usage: node src/cli.ts principal-token <provider> <contactRef>")
+    process.exit(1)
+  }
+  console.log(principalToken({ provider, source: "cli", contactRef }, env.roomTokenSecret))
+}
+
 function main(): void {
   const command = process.argv[2]
   if (command === "serve") {
@@ -68,7 +82,12 @@ function main(): void {
     })
     return
   }
+  if (command === "principal-token") {
+    principalTokenCommand(process.argv[3], process.argv[4])
+    return
+  }
   console.error("Usage: node src/cli.ts serve")
+  console.error("       node src/cli.ts principal-token <provider> <contactRef>")
   process.exit(1)
 }
 

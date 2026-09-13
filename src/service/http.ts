@@ -30,6 +30,7 @@ import { proxyArtifact, publicArtifactUrl } from "./artifact-proxy.ts"
 import { ArtifactRenderStore, type ArtifactRenderRecord } from "./artifact-renders.ts"
 import { createMcpCanvakitHandler, defaultMcpCanvakitDeps, type McpResponse } from "./mcp-canvakit.ts"
 import { bearerOf, createMcpRoomHandler, memberToken, tokensMatch } from "./mcp-room.ts"
+import { createMcpPersonalHandler } from "./mcp-personal.ts"
 import { getSessionBusy, type DaemonExtraOptions } from "./daemon-extra.ts"
 import type { RoomService, RoomWebSendOutcome } from "./room-service.ts"
 import { MediaStore, type IngressMediaRecord } from "./media-store.ts"
@@ -1201,6 +1202,7 @@ async function handle(
   daemon: DaemonExtraOptions,
   mcpCanvakit: ReturnType<typeof createMcpCanvakitHandler>,
   mcpRoom: ReturnType<typeof createMcpRoomHandler>,
+  mcpPersonal: ReturnType<typeof createMcpPersonalHandler>,
   hasStoredRender: (code: string) => Promise<boolean>,
   getStoredRender: (code: string) => Promise<ArtifactRenderRecord | undefined>,
   req: IncomingMessage,
@@ -1227,6 +1229,18 @@ async function handle(
     return
   }
 
+  // `POST /mcp` (BRIEF-18): the PERSON's surface, a third mount alongside
+  // `/mcp/canvakit` and `/mcp/room`. It never rides through a sandbox tunnel
+  // (there is no `?t=` carrier here — that workaround exists only for the
+  // box's dropped Authorization header) and it gets no CORS header: it is
+  // credentialed, and `ACAO: *` on a credentialed endpoint is the mistake
+  // `setPublicCorsHeader` below already exists to avoid.
+  if (url.pathname === "/mcp" && req.method === "POST") {
+    logMcpRequest("personal", req)
+    await handleMcpPost(mcpPersonal, req, res)
+    return
+  }
+
   // A POST-only Streamable HTTP MCP server must answer 405 on the methods it
   // does not implement — NOT 404. This is not pedantry about status codes: an
   // MCP client that gets a 404 on its opening `GET` concludes the endpoint
@@ -1240,8 +1254,8 @@ async function handle(
   // died in that handshake. The same shape means the canvakit mount had never
   // worked from a box either — configured since day one, never once exercised,
   // which is exactly the silent failure this project exists to document.
-  if (url.pathname === "/mcp/canvakit" || url.pathname === "/mcp/room") {
-    logMcpRequest(url.pathname.slice("/mcp/".length), req)
+  if (url.pathname === "/mcp/canvakit" || url.pathname === "/mcp/room" || url.pathname === "/mcp") {
+    logMcpRequest(url.pathname === "/mcp" ? "personal" : url.pathname.slice("/mcp/".length), req)
     res.writeHead(405, { "content-type": "application/json", allow: "POST" })
     res.end(JSON.stringify({ error: "method_not_allowed", message: "This MCP endpoint is POST-only." }))
     return
@@ -1420,8 +1434,12 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
     rooms: () => service.listRooms(),
     deliveries: service.deliveryEngine,
   })
+  const mcpPersonal = createMcpPersonalHandler({
+    rooms: () => service.listRooms(),
+    findByAddress: (address) => service.findByAddress(address),
+  })
   return createServer((req, res) => {
-    handle(service, dedup, media, daemon, mcpCanvakit, mcpRoom, hasStoredRender, getStoredRender, req, res).catch(
+    handle(service, dedup, media, daemon, mcpCanvakit, mcpRoom, mcpPersonal, hasStoredRender, getStoredRender, req, res).catch(
       (error: unknown) => {
         if (!res.headersSent) {
           sendJson(res, 500, {
