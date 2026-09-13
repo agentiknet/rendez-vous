@@ -154,3 +154,9 @@ test("roomViewHtml escapes a room code containing < and \" so it cannot break ou
   assert.ok(html.includes("&lt;script&gt;"), "escapeHtml must have transformed the angle brackets")
   assert.ok(html.includes("&quot;"), "escapeHtml must have transformed the quote")
 })
+
+test("roomViewHtml sends ui/notifications/size-changed, measured by a ResizeObserver (BRIEF-05: this panel's content is its own DOM)", () => {
+  const html = roomViewHtml(ROOM_A, env.publicUrl)
+  assert.ok(html.includes("ui/notifications/size-changed"), "must send the size-changed notification")
+  assert.ok(html.includes("ResizeObserver"), "room_view measures its own DOM instead of sending a constant")
+})

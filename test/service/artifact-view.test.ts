@@ -3,7 +3,7 @@ import { test } from "node:test"
 import { env } from "../../src/env.ts"
 import type { Member, Room } from "../../src/rooms/types.ts"
 import { ArtifactRenderStore } from "../../src/service/artifact-renders.ts"
-import { artifactViewHtml } from "../../src/service/artifact-view.html.ts"
+import { artifactShowKey, artifactViewHtml } from "../../src/service/artifact-view.html.ts"
 import { roomAudienceToken } from "../../src/service/mcp-room.ts"
 import {
   createMcpCanvakitHandler,
@@ -181,4 +181,48 @@ test("artifactViewHtml escapes a code containing < and \" so it cannot break out
   assert.ok(!html.includes(`RDV-<script>"`), "the raw contrived code must not appear unescaped")
   assert.ok(html.includes("&lt;script&gt;"), "escapeHtml must have transformed the angle brackets")
   assert.ok(html.includes("&quot;"), "escapeHtml must have transformed the quote")
+})
+
+// BRIEF-05: `artifactViewHtml`'s script embeds `artifactShowKey.toString()`
+// verbatim, so driving the exported function directly proves the SHIPPED
+// decision, not a string that merely looks right in the template.
+test("artifactShowKey has no shown-style one-shot latch: the same ready state with a NEW renderedAt produces a NEW key", () => {
+  const first = artifactShowKey(true, "2026-09-12T10:00:00.000Z")
+  const second = artifactShowKey(true, "2026-09-12T10:00:03.000Z")
+  assert.notEqual(first, second, "two different renders must compare as different, not latch on the first")
+})
+
+test("artifactShowKey returns the SAME key for the same renderedAt polled twice — no reload without a real change", () => {
+  const a = artifactShowKey(true, "2026-09-12T10:00:00.000Z")
+  const b = artifactShowKey(true, "2026-09-12T10:00:00.000Z")
+  assert.equal(a, b)
+})
+
+test("artifactShowKey is undefined while not ready, regardless of a stale renderedAt — the pause reset still holds", () => {
+  assert.equal(artifactShowKey(false, "2026-09-12T10:00:00.000Z"), undefined)
+})
+
+test("artifactShowKey is defined but stable for a ready room with no stored render yet (box-only liveness)", () => {
+  const a = artifactShowKey(true, undefined)
+  const b = artifactShowKey(true, undefined)
+  assert.notEqual(a, undefined)
+  assert.equal(a, b)
+})
+
+test("artifactViewHtml's script contains the renderedAt comparison, not a `shown` boolean gate", () => {
+  const html = artifactViewHtml(ROOM_A, env.publicUrl)
+  assert.ok(!/\blet shown\s*=\s*false/.test(html), "no boolean latch variable")
+  assert.ok(html.includes("artifactShowKey"), "the generated script must embed the pure comparison helper")
+})
+
+test("artifactViewHtml cache-busts the iframe src with the render version, but only when one exists", () => {
+  const html = artifactViewHtml(ROOM_A, env.publicUrl)
+  assert.ok(html.includes('"?v=" + encodeURIComponent(renderedAt)'), "a real renderedAt must cache-bust the src")
+})
+
+test("artifactViewHtml sends ui/notifications/size-changed with a constant height (BRIEF-05: the artifact is cross-origin and cannot be measured)", () => {
+  const html = artifactViewHtml(ROOM_A, env.publicUrl)
+  assert.ok(html.includes("ui/notifications/size-changed"), "must send the size-changed notification")
+  assert.ok(html.includes("ARTIFACT_PANEL_HEIGHT"), "the height sent must be the fixed constant, not a measurement")
+  assert.ok(!html.includes("ResizeObserver"), "the artifact panel must not attempt to measure its cross-origin content")
 })

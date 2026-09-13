@@ -27,7 +27,7 @@ import {
   type AguiEvent,
 } from "../audience/agui.ts"
 import { proxyArtifact, publicArtifactUrl } from "./artifact-proxy.ts"
-import { ArtifactRenderStore } from "./artifact-renders.ts"
+import { ArtifactRenderStore, type ArtifactRenderRecord } from "./artifact-renders.ts"
 import { createMcpCanvakitHandler, defaultMcpCanvakitDeps, type McpResponse } from "./mcp-canvakit.ts"
 import { bearerOf, createMcpRoomHandler, memberToken, tokensMatch } from "./mcp-room.ts"
 import { getSessionBusy, type DaemonExtraOptions } from "./daemon-extra.ts"
@@ -305,7 +305,7 @@ async function handleInboundSimulated(service: RoomService, req: IncomingMessage
 export interface RoomStatePayload {
   code: string
   state: Room["state"]
-  artifact: { url: string | undefined; ready: boolean }
+  artifact: { url: string | undefined; ready: boolean; renderedAt: string | undefined }
   members: { displayName: string; tier: Tier; joinedAt: string; away: boolean }[]
   agent: { busy: boolean; lastActivityAt: string }
   updatedAt: string
@@ -315,17 +315,23 @@ export interface RoomStatePayload {
  *  ready only when the room is active AND its stored URL exists AND the last
  *  boot/liveness probe confirmed it answers — a paused room or a confirmed
  *  dead box gets `ready: false` and no URL at all, so the page never renders
- *  a clickable dead link (the dead-artifact finding). */
+ *  a clickable dead link (the dead-artifact finding).
+ *
+ *  `renderedAt` (BRIEF-05) is the artifact panel's freshness signal: it is
+ *  `undefined` whenever there is no stored render, NEVER a fallback to "now"
+ *  — a value that changes on every poll would make the panel reload
+ *  forever, the present bug inverted. It only ever comes from the store's
+ *  own record. */
 async function roomStatePayload(
   room: Room,
   daemon: DaemonExtraOptions,
-  hasStoredRender: (code: string) => Promise<boolean>,
+  getStoredRender: (code: string) => Promise<ArtifactRenderRecord | undefined>,
   now: Date = new Date(),
 ): Promise<RoomStatePayload> {
-  const storedRender = await hasStoredRender(room.code)
+  const storedRender = await getStoredRender(room.code)
   const artifactLive =
     (room.state !== "paused" && room.artifactUrl !== undefined && room.artifactReady !== false) ||
-    storedRender
+    storedRender !== undefined
   const busy =
     room.sessionId !== undefined ? ((await getSessionBusy(daemon, room.sessionId)) ?? false) : false
   return {
@@ -334,6 +340,7 @@ async function roomStatePayload(
     artifact: {
       url: artifactLive ? publicArtifactUrl(room.code) : undefined,
       ready: artifactLive,
+      renderedAt: storedRender?.renderedAt,
     },
     members: room.members.map((member) => ({
       displayName: member.displayName,
@@ -352,7 +359,7 @@ async function roomStatePayload(
 async function handleRoomState(
   service: RoomService,
   daemon: DaemonExtraOptions,
-  hasStoredRender: (code: string) => Promise<boolean>,
+  getStoredRender: (code: string) => Promise<ArtifactRenderRecord | undefined>,
   res: ServerResponse,
   encodedCode: string,
 ): Promise<void> {
@@ -362,7 +369,7 @@ async function handleRoomState(
     sendJson(res, 404, { error: "not_found" })
     return
   }
-  sendJson(res, 200, await roomStatePayload(room, daemon, hasStoredRender))
+  sendJson(res, 200, await roomStatePayload(room, daemon, getStoredRender))
 }
 
 async function handleGetRoom(
@@ -1193,6 +1200,7 @@ async function handle(
   mcpCanvakit: ReturnType<typeof createMcpCanvakitHandler>,
   mcpRoom: ReturnType<typeof createMcpRoomHandler>,
   hasStoredRender: (code: string) => Promise<boolean>,
+  getStoredRender: (code: string) => Promise<ArtifactRenderRecord | undefined>,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
@@ -1303,7 +1311,7 @@ async function handle(
       sendJson(res, 400, { error: "invalid_code" })
       return
     }
-    await handleRoomState(service, daemon, hasStoredRender, res, encodedCode)
+    await handleRoomState(service, daemon, getStoredRender, res, encodedCode)
     return
   }
 
@@ -1400,6 +1408,7 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
   const daemon: DaemonExtraOptions =
     stateHooks?.daemon ?? { baseUrl: env.daemonUrl, token: env.daemonToken }
   const hasStoredRender = (code: string) => media.renders.hasOrLoad(code)
+  const getStoredRender = (code: string) => media.renders.getOrLoad(code)
   const mcpCanvakit = createMcpCanvakitHandler({
     ...defaultMcpCanvakitDeps(media.renders),
     roomExists: (code) => service.getRoom(code) !== undefined,
@@ -1410,11 +1419,16 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
     deliveries: service.deliveryEngine,
   })
   return createServer((req, res) => {
-    handle(service, dedup, media, daemon, mcpCanvakit, mcpRoom, hasStoredRender, req, res).catch((error: unknown) => {
-      if (!res.headersSent) {
-        sendJson(res, 500, { error: "internal_error", message: error instanceof Error ? error.message : String(error) })
-      }
-    })
+    handle(service, dedup, media, daemon, mcpCanvakit, mcpRoom, hasStoredRender, getStoredRender, req, res).catch(
+      (error: unknown) => {
+        if (!res.headersSent) {
+          sendJson(res, 500, {
+            error: "internal_error",
+            message: error instanceof Error ? error.message : String(error),
+          })
+        }
+      },
+    )
   })
 }
 

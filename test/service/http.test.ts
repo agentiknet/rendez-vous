@@ -9,6 +9,7 @@ import { DaemonClient } from "../../src/daemon/client.ts"
 import { env } from "../../src/env.ts"
 import type { Delivery, Member } from "../../src/rooms/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
+import { ArtifactRenderStore } from "../../src/service/artifact-renders.ts"
 import { LocalBooter, type SessionBooter } from "../../src/service/booter.ts"
 import { createHttpServer } from "../../src/service/http.ts"
 import { memberToken } from "../../src/service/mcp-room.ts"
@@ -53,8 +54,9 @@ function isAddressInfo(value: string | AddressInfo | null): value is AddressInfo
 async function listenOnRandomPort(
   service: RoomService,
   stateHooks?: Parameters<typeof createHttpServer>[2],
+  mediaHooks?: Parameters<typeof createHttpServer>[1],
 ): Promise<string> {
-  const server = createHttpServer(service, undefined, stateHooks)
+  const server = createHttpServer(service, mediaHooks, stateHooks)
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   const address = server.address()
   if (!isAddressInfo(address)) throw new Error("failed to bind http server")
@@ -123,7 +125,7 @@ test("GET /health reports the daemon as unreachable when it cannot be reached", 
   assert.equal(body.daemon, "unreachable")
 })
 
-async function newRoomHarness(): Promise<{
+async function newRoomHarness(renders?: ArtifactRenderStore): Promise<{
   service: RoomService
   daemon: ExtendedFakeDaemon
   baseUrl: string
@@ -151,7 +153,11 @@ async function newRoomHarness(): Promise<{
   assert.ok(sessionId !== undefined)
   if (sessionId === undefined) throw new Error("unreachable")
 
-  const baseUrl = await listenOnRandomPort(service, { daemon: { baseUrl: daemon.url, token: undefined } })
+  const baseUrl = await listenOnRandomPort(
+    service,
+    { daemon: { baseUrl: daemon.url, token: undefined } },
+    renders !== undefined ? { renders } : undefined,
+  )
   return { service, daemon, baseUrl, code: created.room.code, sessionId }
 }
 
@@ -635,6 +641,30 @@ test("GET /r/:code/state marks a paused room's artifact not ready and with no ur
   if (isRecord(body.artifact)) {
     assert.equal(body.artifact.ready, false)
     assert.equal(body.artifact.url, undefined)
+  }
+})
+
+test("GET /r/:code/state omits artifact.renderedAt when no render has ever landed (BRIEF-05: never invent a timestamp)", async () => {
+  const { baseUrl, code } = await newRoomHarness(new ArtifactRenderStore(await freshDir()))
+  const res = await fetch(`${baseUrl}/r/${code}/state`)
+  const body = await readJson(res)
+  assert.ok(isRecord(body.artifact))
+  if (isRecord(body.artifact)) {
+    assert.equal(body.artifact.renderedAt, undefined)
+  }
+})
+
+test("GET /r/:code/state carries artifact.renderedAt once a render is stored, sourced from the store's own record", async () => {
+  const renders = new ArtifactRenderStore(await freshDir())
+  const { baseUrl, code } = await newRoomHarness(renders)
+  const record = await renders.save(code, Buffer.from("<html></html>"), Buffer.from("%PDF"), 1)
+
+  const res = await fetch(`${baseUrl}/r/${code}/state`)
+  const body = await readJson(res)
+  assert.ok(isRecord(body.artifact))
+  if (isRecord(body.artifact)) {
+    assert.equal(body.artifact.renderedAt, record.renderedAt)
+    assert.equal(body.artifact.ready, true, "a stored render makes the artifact ready even with no live box")
   }
 })
 

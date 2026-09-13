@@ -24,9 +24,36 @@
  * to the iframe's `error` event, reachable via `connect-src` (`connectDomains`),
  * for hosts stricter than the one this was verified against.
  */
-import { ARTIFACT_PAUSED_TEXT, embedJson, escapeHtml } from "../web/page.ts"
+import { ARTIFACT_PAUSED_TEXT, SIZE_CHANGED_METHOD, embedJson, escapeHtml } from "../web/page.ts"
 
 const LOADING_TEXT = "Loading…"
+
+/** A fixed height in pixels, not a measurement (BRIEF-05). This panel's
+ *  artifact lives in a cross-origin inner iframe: the origin boundary that
+ *  makes CSP `frame-src` necessary in the first place also blocks this
+ *  panel from reading that iframe's content height (`contentWindow`/
+ *  `contentDocument` are opaque across origins). There is no measurement to
+ *  make here that would not silently return 0 — do not "fix" this into one. */
+const ARTIFACT_PANEL_HEIGHT = 520
+
+/** The freshness signal a `renderState` poll acts on, reduced to one
+ *  comparable value (BRIEF-05, replacing the `shown` one-shot latch):
+ *  `undefined` while paused/not-ready (mirrors the old reset-on-pause
+ *  behaviour), `renderedAt` once a stored render exists (the store's own
+ *  timestamp, never invented here), or a fixed sentinel for a room that is
+ *  `ready` purely from box liveness with no stored render yet — a real case
+ *  (`roomStatePayload`'s `artifactLive` can be true from `room.artifactUrl`
+ *  alone) but one with no freshness signal to compare, so it shows once and
+ *  is left alone until a real render lands.
+ *
+ *  Exported as a pure function, the same way `page.ts`'s `planOutboxRender`
+ *  is: embedded into the shipped script via `toString()` below AND driven
+ *  directly by tests, so "no `shown`-style latch" is proven by behaviour,
+ *  not grepped out of a string. */
+export const artifactShowKey = (ready: boolean, renderedAt: string | undefined): string | undefined => {
+  if (!ready) return undefined
+  return renderedAt === undefined ? "ready-no-stored-render" : renderedAt
+}
 
 /** Absence must never read as delivery: a fetch that fails must be visible,
  *  not just silently skipped on the next tick. Same threshold and message as
@@ -63,20 +90,28 @@ function script(code: string, publicUrl: string): string {
     const LOST_CONTACT_TEXT = ${embedJson(LOST_CONTACT_TEXT)};
     const INJECT_FAILED_TEXT = ${embedJson(INJECT_FAILED_TEXT)};
     const FAILURES_BEFORE_WARNING = ${embedJson(FAILURES_BEFORE_WARNING)};
+    const ARTIFACT_PANEL_HEIGHT = ${embedJson(ARTIFACT_PANEL_HEIGHT)};
+    const SIZE_CHANGED_METHOD = ${embedJson(SIZE_CHANGED_METHOD)};
+    const artifactShowKey = ${artifactShowKey.toString()};
 
     const pillEl = document.getElementById("state-pill");
     const frameEl = document.getElementById("artifact-frame");
     const connectionEl = document.getElementById("connection-lost");
 
-    let shown = false;
+    // undefined = nothing currently shown (paused, or no poll answered yet).
+    // Replaces the old \`shown\` one-shot latch (BRIEF-05): this is compared
+    // against the freshness key on every poll, not set once and forgotten.
+    let shownKey;
 
     // D1 fallback: an inner iframe may be blocked by a host's sandbox with
     // no CSP declaration able to allow it (no frame-src key in the MCP Apps
     // vocabulary). If it fires "error", fetch the artifact ourselves —
     // reachable via connect-src (connectDomains) — and inject its markup.
-    async function injectByFetch() {
+    // Takes the same cache-busted URL showArtifact used, so a fallback
+    // fetch cannot itself serve stale bytes.
+    async function injectByFetch(src) {
       try {
-        const res = await fetch(ARTIFACT_URL);
+        const res = await fetch(src);
         if (!res.ok) throw new Error("artifact fetch failed: " + res.status);
         const html = await res.text();
         frameEl.innerHTML = html;
@@ -85,19 +120,31 @@ function script(code: string, publicUrl: string): string {
       }
     }
 
-    function showArtifact() {
-      if (shown) return;
-      shown = true;
+    function showArtifact(key, renderedAt) {
+      shownKey = key;
       frameEl.textContent = "";
       const iframe = document.createElement("iframe");
-      iframe.src = ARTIFACT_URL;
+      // Cache-bust with the render version, but ONLY when there is one
+      // (BRIEF-05): a stored render's index is served directly by
+      // proxyArtifact, which ignores the query string entirely — safe by
+      // construction, verified by reading that code path, and the only path
+      // this panel's URL (no sub-path) ever takes once a render has landed,
+      // which by the time this panel exists (it is opened from
+      // render_artifact's own tool result) has always already happened. The
+      // "ready, no stored render" fallback has no such guarantee — it may
+      // still be proxying straight to the e2b box — so it gets the bare URL,
+      // unverified query behaviour on that upstream left untouched.
+      const src = renderedAt === undefined ? ARTIFACT_URL : ARTIFACT_URL + "?v=" + encodeURIComponent(renderedAt);
+      iframe.src = src;
       iframe.title = "Artifact";
-      iframe.addEventListener("error", injectByFetch);
+      iframe.addEventListener("error", function () {
+        injectByFetch(src);
+      });
       frameEl.appendChild(iframe);
     }
 
     function showPaused() {
-      shown = false;
+      shownKey = undefined;
       frameEl.textContent = "";
       const span = document.createElement("span");
       span.className = "artifact-paused";
@@ -109,10 +156,11 @@ function script(code: string, publicUrl: string): string {
       const ready = state.artifact.ready === true;
       pillEl.textContent = ready ? "ready" : "paused";
       pillEl.className = "pill " + (ready ? "ready" : "paused");
-      if (ready) {
-        showArtifact();
-      } else {
+      const key = artifactShowKey(ready, state.artifact.renderedAt);
+      if (key === undefined) {
         showPaused();
+      } else if (key !== shownKey) {
+        showArtifact(key, state.artifact.renderedAt);
       }
     }
 
@@ -136,6 +184,18 @@ function script(code: string, publicUrl: string): string {
 
     setInterval(pollState, 3000);
     pollState();
+
+    // BRIEF-05: the artifact lives in a cross-origin inner iframe (see
+    // ARTIFACT_PANEL_HEIGHT's comment) — a fixed height, sent once, guarded
+    // so a host that ignores or blocks it is no worse off than today.
+    try {
+      window.parent.postMessage(
+        { jsonrpc: "2.0", method: SIZE_CHANGED_METHOD, params: { height: ARTIFACT_PANEL_HEIGHT } },
+        "*",
+      );
+    } catch (e) {
+      // guarded: see the comment above.
+    }
   `
 }
 

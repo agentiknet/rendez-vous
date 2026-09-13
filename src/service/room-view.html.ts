@@ -17,7 +17,7 @@
  * the host cannot afford a full reload wiping the panel mid-conversation)
  * fills it in from the first successful fetch.
  */
-import { embedJson, escapeHtml } from "../web/page.ts"
+import { SIZE_CHANGED_METHOD, embedJson, escapeHtml } from "../web/page.ts"
 
 const ARTIFACT_PAUSED_TEXT = "artifact paused, the link will come back when the room wakes"
 const ARTIFACT_NONE_TEXT = "No artifact yet"
@@ -63,6 +63,7 @@ function script(code: string, publicUrl: string): string {
     const ARTIFACT_NONE_TEXT = ${embedJson(ARTIFACT_NONE_TEXT)};
     const LOST_CONTACT_TEXT = ${embedJson(LOST_CONTACT_TEXT)};
     const FAILURES_BEFORE_WARNING = ${embedJson(FAILURES_BEFORE_WARNING)};
+    const SIZE_CHANGED_METHOD = ${embedJson(SIZE_CHANGED_METHOD)};
 
     const pillEl = document.getElementById("state-pill");
     const agentEl = document.getElementById("agent-status");
@@ -143,6 +144,39 @@ function script(code: string, publicUrl: string): string {
 
     setInterval(pollState, 3000);
     pollState();
+
+    // BRIEF-05: this panel's content is its own DOM, so it measures itself
+    // (contrast artifact-view.html.ts, which cannot measure its cross-origin
+    // inner iframe and sends a fixed height instead). A host that ignores or
+    // blocks the notification must be no worse off than today, so the send
+    // is guarded — a failed postMessage must never break the panel.
+    let lastWidth;
+    let lastHeight;
+    function reportSize() {
+      const width = Math.ceil(document.documentElement.getBoundingClientRect().width);
+      const height = Math.ceil(document.documentElement.scrollHeight);
+      if (width === lastWidth && height === lastHeight) return;
+      lastWidth = width;
+      lastHeight = height;
+      try {
+        window.parent.postMessage({ jsonrpc: "2.0", method: SIZE_CHANGED_METHOD, params: { width, height } }, "*");
+      } catch (e) {
+        // guarded: see the comment above.
+      }
+    }
+
+    let resizeScheduled = false;
+    function scheduleReportSize() {
+      if (resizeScheduled) return;
+      resizeScheduled = true;
+      requestAnimationFrame(function () {
+        resizeScheduled = false;
+        reportSize();
+      });
+    }
+
+    new ResizeObserver(scheduleReportSize).observe(document.body);
+    scheduleReportSize();
   `
 }
 

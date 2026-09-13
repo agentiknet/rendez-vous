@@ -43,6 +43,12 @@ export function embedJson(value: unknown): string {
 // BRIEF-02) shows the same paused text rather than retyping the string.
 export const ARTIFACT_PAUSED_TEXT = "artifact paused, the link will come back when the room wakes"
 
+// Exported: both MCP App panels (room-view.html.ts, artifact-view.html.ts,
+// BRIEF-05) hand-roll this one JSON-RPC notification method name — no
+// @modelcontextprotocol/ext-apps dependency, so the exact string (read from
+// that package's installed dist in the harness) lives in one place.
+export const SIZE_CHANGED_METHOD = "ui/notifications/size-changed"
+
 /** The gap notice (PLAN-02 §3-D6): a `pruned: true` outbox response means the
  *  server destroyed records the tab's cursor still points at. Never let that
  *  read as silence — rendered as its own line in the transcript. */

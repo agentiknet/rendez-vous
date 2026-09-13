@@ -96,12 +96,21 @@ export class ArtifactRenderStore {
     return this.records.has(roomCode)
   }
 
-  /** True when a stored render exists, hydrating from disk first — the
-   *  async form the HTTP layer uses, so a service restart doesn't make
-   *  members' pages disappear until the next render lands. */
+  /** The stored render record, hydrating from disk first — the async form
+   *  the HTTP layer uses, so a service restart doesn't make members' pages
+   *  (or the `renderedAt` freshness signal) disappear until the next render
+   *  lands. */
+  async getOrLoad(roomCode: string): Promise<ArtifactRenderRecord | undefined> {
+    const existing = this.records.get(roomCode)
+    if (existing !== undefined) return existing
+    return this.hydrate(roomCode)
+  }
+
+  /** True when a stored render exists. Same hydrate-first behaviour as
+   *  `getOrLoad`, kept as a boolean convenience for callers that only need
+   *  the fact, not the record. */
   async hasOrLoad(roomCode: string): Promise<boolean> {
-    if (this.records.has(roomCode)) return true
-    return (await this.hydrate(roomCode)) !== undefined
+    return (await this.getOrLoad(roomCode)) !== undefined
   }
 
   async readHtml(roomCode: string): Promise<Buffer | undefined> {
