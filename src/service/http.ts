@@ -627,7 +627,7 @@ export interface OutboxPayload {
    *  still `pending` when this snapshot was taken, so advancing to it skips
    *  the client's own undelivered mail, permanently. The next `since` is the
    *  highest seq the client actually RENDERED
-   *  (`.plans/audience/APPENDIX-cursor-semantics.md` §3.1). D7 still holds:
+   *  (`docs/OUTBOX.md` §3.1). D7 still holds:
    *  at-least-once, dedupe on `Delivery.id`. */
   cursor: number
   /** The gap marker (PLAN-02 §3-D6): true when the requested `since` is

@@ -17,12 +17,12 @@
  * invariant (test/audience/contract.test.ts).
  *
  * The semantics encoded here are NOT re-decidable: they are normative in
- * `.plans/audience/APPENDIX-cursor-semantics.md`, and each rule cites the
- * appendix section it comes from rather than restating it loosely. The
- * governing invariant of that document — ABSENCE MUST NEVER READ AS
- * DELIVERY — is why several shapes below look over-specified: five separate
- * defects in this series were that invariant violated, four of them passing
- * a test suite (appendix §1's table).
+ * `docs/OUTBOX.md`, and each rule cites the section it comes from rather
+ * than restating it loosely. The governing invariant of that document —
+ * ABSENCE MUST NEVER READ AS DELIVERY — is why several shapes below look
+ * over-specified: nine separate defects in this series were that invariant
+ * violated, and eight of them reached a green test suite (`docs/OUTBOX.md`
+ * §1's table).
  *
  * Validation is hand-rolled in the style of `isRecord` (mcp-room.ts) — no
  * zod, no new dependency.
