@@ -148,21 +148,24 @@ export class RoomFanout {
   private readonly readers: Map<string, ActiveReader> = new Map()
   /** Per-room, in-process only: reset on restart, so the first flush after boot is always treated as an artifact change (see start of `flush`). Keyed on the PUBLIC artifact URL (`publicArtifactUrl`), not the raw box URL — the public one never changes for a room, so a box replacement (architecture.md §9.3b) no longer trips this and re-sends. */
   private readonly lastArtifactUrl: Map<string, string | undefined> = new Map()
-  /** Per-room, in-process only: `room.deliverySeq` as of the last flush of a
+  /** Per-room, in-process only: `room.spokenSeq` as of the last flush of a
    *  `"tools"` room. A turn that ends with it unchanged means the agent
-   *  called neither `say` nor `whisper` — nobody's phone received anything
-   *  (PLAN risk R2). Logged, not fixed: the web transcript still shows the
-   *  turn, so a human can see why.
+   *  called neither `say` nor `whisper` — no member of any kind was
+   *  addressed (PLAN risk R2, brief 08). Logged, not fixed: the web
+   *  transcript still shows the turn, so a human can see why.
    *
-   *  It reads the COUNTER, never `deliveries.length`. The array is a work
-   *  queue that keeps a short tail, not a log: `pruneDeliveries` drops
-   *  `delivered` records past `MAX_RETAINED_DELIVERED`, so its length stops
-   *  growing once a room is busy — and a length compared against the
-   *  previous length then matches on every single turn, warning "no phone
-   *  received anything" precisely when the agent IS addressing people. A
-   *  detector that cries wolf permanently is worse than none, and this is
-   *  the only handle we have on R2. `deliverySeq` never goes backwards. */
-  private readonly lastDeliverySeq: Map<string, number> = new Map()
+   *  It reads `spokenSeq` — the counter as of the last say/whisper MINT —
+   *  never `deliverySeq` and never `deliveries.length`. `deliverySeq` moved
+   *  for the room's own `system` records too since brief B (join links, the
+   *  QR, resume notices, a pull member's turn text): a notice landing inside
+   *  the turn window would advance it and silence this warning exactly when
+   *  the agent said nothing — absence reading as delivery, the appendix §1
+   *  fault, inside the mechanism written to catch it. The array length is
+   *  worse still: `pruneDeliveries` drops delivered records past
+   *  `MAX_RETAINED_DELIVERED`, so a length compared against the previous
+   *  length matches on every busy turn and cries wolf permanently.
+   *  `spokenSeq` is monotonic, persisted, and absent reads as 0. */
+  private readonly lastSpokenSeq: Map<string, number> = new Map()
 
   /** Both undefined unless TTS is configured. `[[say …]]` needs somewhere to
    *  put the rendered audio (the media store, which the artifact-independent
@@ -215,11 +218,13 @@ export class RoomFanout {
     if (room === undefined || room.sessionId === undefined) return
 
     // Seed the R2 detector from where the room already is, so the first flush
-    // after a restart compares against the counter's real value rather than
-    // against 0 — otherwise a resumed room with prior deliveries looks active
-    // on its first turn no matter what the agent did, and a genuinely silent
-    // first turn goes unreported.
-    this.lastDeliverySeq.set(code, room.deliverySeq ?? 0)
+    // after a restart compares against the spoken counter's real value rather
+    // than against 0 — otherwise a resumed room with prior say/whisper
+    // deliveries looks active on its first turn no matter what the agent did,
+    // and a genuinely silent first turn goes unreported. Absent (a
+    // pre-upgrade room) seeds as 0: "has not spoken", which errs toward the
+    // warning.
+    this.lastSpokenSeq.set(code, room.spokenSeq ?? 0)
 
     const controller = new AbortController()
     const done = this.runLoop(code, controller.signal).catch(() => undefined)
@@ -550,17 +555,24 @@ export class RoomFanout {
       }),
     )
 
-    // PLAN risk R2: for a `"tools"` room, delivery depends on the agent
-    // actually calling `say`/`whisper`. The counter moved during the turn if
-    // it did (the tool handlers write before turn-end, and this room was read
-    // at the top of `flush`, after it). A turn that left it where it was sent
-    // nothing to anyone's phone while the web page looks healthy; say so.
+    // PLAN risk R2: for a `"tools"` room, delivery to members depends on the
+    // agent actually calling `say`/`whisper`. The SPOKEN counter moved during
+    // the turn if it did (the tool handlers write before turn-end, and this
+    // room was read at the top of `flush`, after it). It is `spokenSeq` —
+    // the counter as of the last say/whisper mint — not `deliverySeq`, which
+    // the room's own `system` records move too: a join link or resume notice
+    // inside the turn window must never read as the agent having spoken
+    // (brief 08). A turn that leaves it where it was addressed no member of
+    // any kind, while the web page looks healthy; say so.
     if (textGated) {
-      const seq = room.deliverySeq ?? 0
-      if (seq === (this.lastDeliverySeq.get(code) ?? 0)) {
-        console.warn(`room ${code}: turn ended with zero say/whisper tool calls — no phone received anything this turn`)
+      const seq = room.spokenSeq ?? 0
+      if (seq === (this.lastSpokenSeq.get(code) ?? 0)) {
+        console.warn(
+          `room ${code}: turn ended with zero say/whisper tool calls — the agent called neither, ` +
+            `so no member of any kind was addressed this turn`,
+        )
       }
-      this.lastDeliverySeq.set(code, seq)
+      this.lastSpokenSeq.set(code, seq)
     }
 
     // Cursor is persisted only after the flush attempt: a crash between send and

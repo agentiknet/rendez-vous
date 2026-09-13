@@ -47,6 +47,7 @@ async function freshDir(): Promise<string> {
  *  instability the plan documents — so every test targets through the
  *  returned `alice`/`bob`/`screen` Members, never through a literal. */
 async function roomWith(): Promise<{
+  dir: string
   store: RoomStore
   code: string
   alice: Member
@@ -65,7 +66,7 @@ async function roomWith(): Promise<{
   const alice = await add("Alice", "messenger", "telegram")
   const bob = await add("Bob", "messenger", "whatsapp")
   const screen = await add("Screen", "room-web", "room-web")
-  return { store, code: created.code, alice, bob, screen }
+  return { dir, store, code: created.code, alice, bob, screen }
 }
 
 function pendingDelivery(id: string, memberId: string, text: string, failures = 0): Delivery {
@@ -598,6 +599,42 @@ test("a busy room stops growing: the array is bounded and every id it ever minte
     Array.from({ length: MAX_RETAINED_DELIVERED }, (_, i) => `turn ${rounds - MAX_RETAINED_DELIVERED + i}`),
     "the retained tail is the newest one",
   )
+})
+
+test("a say mint advances spokenSeq; a system mint does not (brief 08)", async () => {
+  const { store, code, alice, screen, bob } = await roomWith()
+  const eng = engine(store, new FakeTransport())
+
+  await eng.accept(code, "system", "the room's own notice", [screen.id])
+  const afterSystem = store.get(code)
+  assert.ok((afterSystem?.deliverySeq ?? 0) > 0, "the system mint advanced the delivery counter")
+  assert.equal(afterSystem?.spokenSeq, undefined, "the room's voice is not the agent's")
+
+  await eng.accept(code, "say", "to everyone", [alice.id])
+  assert.equal(store.get(code)?.spokenSeq, store.get(code)?.deliverySeq, "a say mint IS the agent speaking")
+
+  const seqBefore = store.get(code)?.deliverySeq
+  await eng.accept(code, "whisper", "to one", [bob.id])
+  assert.ok((store.get(code)?.deliverySeq ?? 0) > (seqBefore ?? 0))
+  assert.equal(store.get(code)?.spokenSeq, store.get(code)?.deliverySeq, "a whisper mint IS the agent speaking")
+})
+
+test("spokenSeq survives a store write/read cycle (brief 08)", async () => {
+  const { dir, store, code, alice, screen } = await roomWith()
+  const eng = engine(store, new FakeTransport())
+  await eng.accept(code, "say", "hello", [alice.id])
+  const before = store.get(code)
+  assert.ok((before?.spokenSeq ?? 0) > 0)
+
+  const reopened = await RoomStore.open(dir)
+  const loaded = reopened.get(code)
+  assert.equal(loaded?.spokenSeq, before?.spokenSeq, "persisted on the room, not derived from the array")
+
+  // And after the reopen, a system mint still leaves it alone.
+  assert.ok(screen !== undefined)
+  const eng2 = engine(reopened, new FakeTransport())
+  await eng2.accept(code, "system", "post-restart notice", [screen.id])
+  assert.equal(reopened.get(code)?.spokenSeq, before?.spokenSeq)
 })
 
 test("a Room round-trips through the store with deliveries", async () => {

@@ -9,7 +9,7 @@
  * idle sweep's activity signal.
  */
 import assert from "node:assert/strict"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, test } from "node:test"
@@ -18,6 +18,7 @@ import type { OutboundMessage, Transport } from "../../src/fanout/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import type { Member } from "../../src/rooms/types.ts"
 import { publicArtifactUrl } from "../../src/service/artifact-proxy.ts"
+import { DeliveryEngine } from "../../src/service/delivery.ts"
 import type { OutboundAttachment } from "../../src/service/transports.ts"
 import { FakeSource, waitFor } from "./support.ts"
 
@@ -79,13 +80,26 @@ async function harness(protocol: "tools" | "markers" | undefined): Promise<Harne
 }
 
 async function flushTurn(h: Harness, text: string, firstSeq = 1): Promise<void> {
+  const fanout = await startFanout(h)
+  fanout.start(h.code)
+  await runTurn(h, fanout, text, firstSeq)
+  await fanout.stopAll()
+}
+
+/** One long-lived reader, as production has: the detector's baseline is seeded
+ *  once, when the reader starts, and tool calls land BETWEEN turns against
+ *  that baseline. A reader created per turn re-seeds it after the accept and
+ *  swallows the delivery into the baseline — a fixture artefact that would
+ *  make every speaking turn look silent. */
+async function startFanout(h: Harness): Promise<RoomFanout> {
+  return new RoomFanout({ store: h.store, transport: h.transport, source: h.source.read() })
+}
+
+async function runTurn(h: Harness, _fanout: RoomFanout, text: string, firstSeq: number): Promise<void> {
   const endSeq = firstSeq + 1
-  const fanout = new RoomFanout({ store: h.store, transport: h.transport, source: h.source.read() })
   h.source.push({ seq: firstSeq, kind: "text-delta", text })
   h.source.push({ seq: endSeq, kind: "turn-end", reason: "completed" })
-  fanout.start(h.code)
   await waitFor(() => h.store.get(h.code)?.cursor === endSeq)
-  await fanout.stopAll()
 }
 
 test("a tools room: a turn of bare text produces zero transport sends — no messenger, no email", async () => {
@@ -179,55 +193,37 @@ test("a tools room: a turn with zero say/whisper deliveries logs a warning namin
 
 test("a tools room whose agent DID call say (a Delivery record exists) logs no warning", async () => {
   const h = await harness("tools")
-  const room = h.store.get(h.code)
-  assert.ok(room !== undefined)
-  // Establish the baseline first: in production the reader is already running
-  // when a tool call lands, so the detector's reference point predates the
-  // delivery. A fixture that writes the delivery before the reader starts has
-  // it counted in the baseline instead, and the turn then looks silent.
-  await flushTurn(h, "first turn, before the agent addressed anyone")
-  // Now simulate the tool handler's accept: one say Delivery AND the counter
-  // it advances. `DeliveryEngine.accept` writes both in one patch — a fixture
-  // that sets only the array is not simulating an accept.
-  await h.store.update(h.code, {
-    deliverySeq: 1,
-    deliveries: [
-      {
-        id: "d1",
-        memberId: h.aliceId,
-        kind: "say",
-        text: "delivered via the tool",
-        status: "delivered",
-        failures: 1,
-        lastError: undefined,
-        createdAt: new Date().toISOString(),
-        deliveredAt: new Date().toISOString(),
-      },
-    ],
-  })
+  // One reader across both turns, as production has: the baseline must
+  // predate the tool call.
+  const fanout = await startFanout(h)
+  fanout.start(h.code)
+  await runTurn(h, fanout, "first turn, before the agent addressed anyone", 1)
+  // The real tool-handler path: `DeliveryEngine.accept` mints the records AND
+  // the counters (`deliverySeq`, `spokenSeq`) in one patch. A fixture that
+  // hand-writes only part of that patch is not simulating an accept.
+  const engine = new DeliveryEngine({ store: h.store, transport: h.transport, autoDrain: false })
+  await engine.accept(h.code, "say", "delivered via the tool", [h.aliceId])
   const warnings: string[] = []
   const original = console.warn
   console.warn = (...args: unknown[]) => {
     warnings.push(args.map(String).join(" "))
   }
   try {
-    await flushTurn(h, "thinking, plus the say above")
+    await runTurn(h, fanout, "thinking, plus the say above", 3)
   } finally {
     console.warn = original
+    await fanout.stopAll()
   }
 
   assert.equal(warnings.length, 0)
 })
 
-// The R2 detector must read `deliverySeq`, never `deliveries.length`. The
-// array is a work queue with a short tail, not a log: `pruneDeliveries` drops
-// `delivered` records past `MAX_RETAINED_DELIVERED`, so on a busy room its
-// length stops growing. A length-based detector then matches its own previous
-// value on every turn and warns "no phone received anything" exactly when the
-// agent IS addressing people — a detector that cries wolf permanently is
-// worse than none. Caught by review across two parallel commits (the prune
-// and the detector were written without seeing each other).
-test("a tools room at the prune cap: the array length is unchanged but the counter moved — no warning", async () => {
+// The R2 detector must read `spokenSeq` — never `deliveries.length` (the
+// array is a pruned work queue, so a length comparison cries wolf on busy
+// rooms) and never `deliverySeq` (the room's own `system` records move it
+// too since brief B, which silenced the warning exactly when the agent said
+// nothing — brief 08's defect).
+test("a tools room at the prune cap: the array length is unchanged but the spoken counter moved — no warning", async () => {
   const h = await harness("tools")
   const at = new Date().toISOString()
   const delivered = {
@@ -242,13 +238,17 @@ test("a tools room at the prune cap: the array length is unchanged but the count
   }
   // A room whose pruned tail is already full: the agent called `say` again
   // this turn, the prune dropped the oldest record, so the array is the same
-  // LENGTH as at the last flush while the counter advanced.
+  // LENGTH as at the last flush while the spoken counter advanced. The
+  // hand-written patch carries both counters, as the real accept does.
   const tail = Array.from({ length: 20 }, (_, index) => ({ ...delivered, id: `d${index + 41}` }))
-  await h.store.update(h.code, { deliverySeq: 60, deliveries: tail })
-  await flushTurn(h, "first turn, establishes the baseline")
+  await h.store.update(h.code, { deliverySeq: 60, spokenSeq: 60, deliveries: tail })
+  const fanout = await startFanout(h)
+  fanout.start(h.code)
+  await runTurn(h, fanout, "first turn, establishes the baseline", 59)
 
   await h.store.update(h.code, {
     deliverySeq: 61,
+    spokenSeq: 61,
     deliveries: [...tail.slice(1), { ...delivered, id: "d61" }],
   })
 
@@ -258,12 +258,151 @@ test("a tools room at the prune cap: the array length is unchanged but the count
     warnings.push(args.map(String).join(" "))
   }
   try {
-    await flushTurn(h, "thinking, plus the say above")
+    await runTurn(h, fanout, "thinking, plus the say above", 61)
   } finally {
     console.warn = original
+    await fanout.stopAll()
   }
 
-  assert.equal(warnings.length, 0, "the counter moved, so the agent did address someone")
+  assert.equal(warnings.length, 0, "the spoken counter moved, so the agent did address someone")
+})
+
+test("a tools room: a turn whose only minted delivery is the room's own system record still warns (brief 08)", async () => {
+  const h = await harness("tools")
+  const web = await h.store.addMember(h.code, {
+    displayName: "Chloe",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
+  })
+  const fanout = await startFanout(h)
+  fanout.start(h.code)
+  await runTurn(h, fanout, "first turn, establishes the baseline", 1)
+  // The room's own notice (a join link, a QR caption, a resume notice) rides
+  // the real mint path: `deliverySeq` moves, `spokenSeq` must not. Under the
+  // pre-brief-08 detector this advance WAS the comparison, so the warning
+  // never fired.
+  const engine = new DeliveryEngine({ store: h.store, transport: h.transport, autoDrain: false })
+  await engine.accept(h.code, "system", "the room's own notice", [web.id])
+  const after = h.store.get(h.code)
+  assert.equal(after?.deliverySeq, 1, "the system mint advanced the delivery counter")
+  assert.equal(after?.spokenSeq, undefined, "the system mint must NOT advance the spoken counter")
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "))
+  }
+  try {
+    await runTurn(h, fanout, "prose only, no tool call", 3)
+  } finally {
+    console.warn = original
+    await fanout.stopAll()
+  }
+
+  assert.equal(warnings.length, 1, "a system record inside the turn window must not silence the detector")
+  assert.ok(warnings[0]?.includes(h.code))
+})
+
+test("a tools room: a turn with only a whisper does not warn", async () => {
+  const h = await harness("tools")
+  const fanout = await startFanout(h)
+  fanout.start(h.code)
+  await runTurn(h, fanout, "first turn, establishes the baseline", 1)
+  const engine = new DeliveryEngine({ store: h.store, transport: h.transport, autoDrain: false })
+  await engine.accept(h.code, "whisper", "just between us", [h.bobId])
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "))
+  }
+  try {
+    await runTurn(h, fanout, "thinking, plus the whisper above", 3)
+  } finally {
+    console.warn = original
+    await fanout.stopAll()
+  }
+
+  assert.equal(warnings.length, 0, "a whisper mint IS the agent speaking")
+})
+
+test("a tools room whose say records have all been pruned still does not warn on a speaking turn", async () => {
+  const h = await harness("tools")
+  const fanout = await startFanout(h)
+  fanout.start(h.code)
+  await runTurn(h, fanout, "first turn, establishes the baseline", 1)
+  const engine = new DeliveryEngine({ store: h.store, transport: h.transport, autoDrain: false })
+  await engine.accept(h.code, "say", "since aged out of the tail", [h.aliceId])
+  // The prune is exactly this: the array drops the record, the counter stays.
+  // `spokenSeq` is persisted on the room, never derived from the array — a
+  // room whose only say aged out must not read as "never spoke".
+  await h.store.update(h.code, { deliveries: [] })
+  assert.deepEqual(h.store.get(h.code)?.deliveries, [])
+  assert.ok((h.store.get(h.code)?.spokenSeq ?? 0) > 0)
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "))
+  }
+  try {
+    await runTurn(h, fanout, "thinking, plus the say above", 3)
+  } finally {
+    console.warn = original
+    await fanout.stopAll()
+  }
+
+  assert.equal(warnings.length, 0, "pruning must never manufacture a warning")
+})
+
+test("a pre-upgrade room (no spokenSeq in the persisted JSON) round-trips and warns on a silent turn", async () => {
+  const dir = await freshDir()
+  const room = {
+    code: "RDV-PRE2",
+    sessionId: "sess-1",
+    members: [
+      {
+        id: "m1",
+        displayName: "Alice",
+        tier: "messenger",
+        address: { provider: "whatsapp", source: "agentpush", contactRef: "+1" },
+        joinedAt: "2026-09-12T00:00:00.000Z",
+      },
+    ],
+    createdAt: "2026-09-12T00:00:00.000Z",
+    updatedAt: "2026-09-12T00:00:00.000Z",
+    cursor: 0,
+    lastActivityAt: "2026-09-12T00:00:00.000Z",
+    state: "active",
+    protocol: "tools",
+  }
+  await writeFile(join(dir, "rooms.json"), JSON.stringify({ rooms: [room] }), "utf8")
+
+  const store = await RoomStore.open(dir)
+  const loaded = store.get("RDV-PRE2")
+  assert.ok(loaded !== undefined, "the pre-upgrade room loads at all")
+  assert.equal(loaded.spokenSeq, undefined, "absent on a room persisted before the field")
+
+  const source = new FakeSource()
+  const transport = new RecordingTransport()
+  const fanout = new RoomFanout({ store, transport, source: source.read() })
+  source.push({ seq: 1, kind: "text-delta", text: "prose only" })
+  source.push({ seq: 2, kind: "turn-end", reason: "completed" })
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "))
+  }
+  try {
+    fanout.start("RDV-PRE2")
+    await waitFor(() => store.get("RDV-PRE2")?.cursor === 2)
+  } finally {
+    console.warn = original
+    await fanout.stopAll()
+  }
+
+  assert.equal(warnings.length, 1, "absent reads as 0 — has not spoken — which errs toward the warning")
+  assert.ok(warnings[0]?.includes("RDV-PRE2"))
 })
 
 test("a markers room behaves exactly as today: bare text, artifact line appended, same wording", async () => {

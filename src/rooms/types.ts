@@ -341,6 +341,29 @@ export interface Room {
    *  `d1..dN` ids matching their array length, which is what
    *  `DeliveryEngine.accept` falls back to. */
   deliverySeq?: number
+  /** The value `deliverySeq` had the last time a `say` or `whisper` delivery
+   *  was MINTED in this room (brief 08). This is the counter the fan-out's
+   *  silent-turn detector compares (src/fanout/reader.ts, PLAN risk R2) —
+   *  not `deliverySeq` itself, which since brief B also moves when the
+   *  room's OWN `system` records are minted (join links, QR captions,
+   *  resume notices, a pull member's turn text). A system record inside the
+   *  turn window would otherwise advance the counter and silence the
+   *  detector exactly when the agent said nothing: absence reading as
+   *  delivery, the appendix §1 fault, inside the mechanism enforcing it.
+   *
+   *  Written ONLY by `DeliveryEngine.accept`, in the same patch that mints
+   *  the records — the mint is the event; a later `delivered`/`failed`
+   *  status change does not touch it (an agent that called `say` into a
+   *  dead transport did speak; the failure is reported on its own channel).
+   *  Monotonic and persisted on the room, never derived by scanning
+   *  `deliveries` — that array is a pruned work queue, and a room whose say
+   *  records aged out must not read as "never spoke".
+   *
+   *  Optional key, absent on rooms persisted before the field. Absent reads
+   *  as 0 — "has not spoken" — which errs toward the warning, the correct
+   *  direction here: a spurious warning costs a log line, a suppressed one
+   *  costs the demo. */
+  spokenSeq?: number
   /** Which addressing protocol this room's agent was booted with. Absent on
    *  rooms that predate the field — same JSON round-trip rule as
    *  `pendingDeliveries` and `asks`. Never changed in place. */

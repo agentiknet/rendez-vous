@@ -65,6 +65,26 @@ export const MAX_RETAINED_DELIVERED = 20
 /** How long a `delivered` record is kept. See `MAX_RETAINED_DELIVERED`. */
 export const DELIVERED_RETENTION_MS = 60 * 60 * 1000
 
+/** What `Room.spokenSeq` becomes when a batch of `kind` records is minted at
+ *  `seq` (brief 08): the detector's counter moves ONLY for the agent's own
+ *  audience kinds, so a `system` record — a join link, a QR caption, a
+ *  resume notice, a pull member's turn text — must never silence the
+ *  silent-turn warning (absence reading as delivery, appendix §1, sixth
+ *  row). A `switch` over the union with no `default` arm, so the compiler —
+ *  not a forgotten `if` — is what tells the next kind added here to decide.
+ *  Returns `undefined` when the kind must not move the counter; the caller
+ *  omits the key, and absent reads as 0 ("has not spoken"), erring toward
+ *  the warning. */
+function spokenSeqFor(kind: Delivery["kind"], seq: number): number | undefined {
+  switch (kind) {
+    case "say":
+    case "whisper":
+      return seq
+    case "system":
+      return undefined
+  }
+}
+
 /** Drop `delivered` records that are past the retention window or beyond the
  *  newest `MAX_RETAINED_DELIVERED`; keep every `pending` and `failed` one, and
  *  keep the surviving records in their original order.
@@ -273,10 +293,17 @@ export class DeliveryEngine {
       // dropped raises the room's low-water mark (brief B).
       const after = pruneDeliveries(before, nowMs, retentionFloors(room, nowMs))
       const pruned = prunedUpTo(before, after)
+      // `spokenSeq` moves with the mint, in the SAME patch that mints the
+      // records: the mint is the event, not the later `delivered`/`failed`
+      // status (an agent that called `say` into a dead transport did speak —
+      // the failure is reported on its own channel). `system` mints leave it
+      // where it was, so the room's own notices never read as speech.
+      const spoken = spokenSeqFor(kind, lastSeq + created.length)
       await this.store.update(code, {
         deliveries: after,
         ...(pruned !== undefined ? { deliveryLowWater: pruned } : {}),
         deliverySeq: lastSeq + created.length,
+        ...(spoken !== undefined ? { spokenSeq: spoken } : {}),
       })
       if (this.autoDrain) {
         // Off the handler's critical path: the tool has already returned

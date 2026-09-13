@@ -290,6 +290,7 @@ function isRoom(value: unknown): value is Room {
   const asks = "asks" in value ? value.asks : undefined
   const deliveries = "deliveries" in value ? value.deliveries : undefined
   const deliverySeq = "deliverySeq" in value ? value.deliverySeq : undefined
+  const spokenSeq = "spokenSeq" in value ? value.spokenSeq : undefined
   const deliveryLowWater = "deliveryLowWater" in value ? value.deliveryLowWater : undefined
   const protocol = "protocol" in value ? value.protocol : undefined
   return (
@@ -303,6 +304,7 @@ function isRoom(value: unknown): value is Room {
     (asks === undefined || (Array.isArray(asks) && asks.every(isAsk))) &&
     (deliveries === undefined || (Array.isArray(deliveries) && deliveries.every(isDelivery))) &&
     isNumberOrUndefined(deliverySeq) &&
+    isNumberOrUndefined(spokenSeq) &&
     isNumberOrUndefined(deliveryLowWater) &&
     isProtocol(protocol) &&
     Array.isArray(value.members) &&
@@ -544,6 +546,7 @@ export class RoomStore {
         | "asks"
         | "deliveries"
         | "deliverySeq"
+        | "spokenSeq"
         | "deliveryLowWater"
         | "protocol"
       >
