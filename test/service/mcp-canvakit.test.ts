@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { env } from "../../src/env.ts"
+import type { Room } from "../../src/rooms/types.ts"
 import { ArtifactRenderStore } from "../../src/service/artifact-renders.ts"
 import { createMcpCanvakitHandler, roomRenderToken, type McpCanvakitDeps, type McpResponse } from "../../src/service/mcp-canvakit.ts"
 
@@ -26,13 +27,31 @@ const VALID_DATA = [
 const ROOM = "RDV-7F3K"
 const VALID_TOKEN = `Bearer ${roomRenderToken(ROOM, env.roomTokenSecret)}`
 
+/** A minimal `Room`, same shape `mcp-room.test.ts`'s own `room()` helper
+ *  builds — only `code` matters to `resolveRoom`. */
+function room(code: string): Room {
+  return {
+    code,
+    sessionId: undefined,
+    sandboxId: undefined,
+    artifactUrl: undefined,
+    artifactReady: undefined,
+    members: [],
+    createdAt: "2026-09-12T10:00:00.000Z",
+    updatedAt: "2026-09-12T10:00:00.000Z",
+    cursor: 0,
+    lastActivityAt: "2026-09-12T10:00:00.000Z",
+    state: "active",
+  }
+}
+
 interface Harness {
   readonly handler: ReturnType<typeof createMcpCanvakitHandler>
   readonly renders: ArtifactRenderStore
   readonly renderCalls: string[]
 }
 
-function harness(overrides?: Partial<Pick<McpCanvakitDeps, "roomExists" | "renderHtml" | "renderPdf">>): Harness {
+function harness(overrides?: Partial<Pick<McpCanvakitDeps, "roomExists" | "rooms" | "renderHtml" | "renderPdf">>): Harness {
   const renders = new ArtifactRenderStore()
   const renderCalls: string[] = []
   const deps: McpCanvakitDeps = {
@@ -54,6 +73,10 @@ function harness(overrides?: Partial<Pick<McpCanvakitDeps, "roomExists" | "rende
 
 function callParams(code: string, data: unknown): Record<string, unknown> {
   return { name: "render_artifact", arguments: { roomCode: code, data } }
+}
+
+function callParamsNoRoomCode(data: unknown): Record<string, unknown> {
+  return { name: "render_artifact", arguments: { data } }
 }
 
 test("initialize answers with a protocol version, the tool capability, and the echoed id", async () => {
@@ -257,4 +280,82 @@ test("an unknown tool is a JSON-RPC method-level failure, not a render attempt",
   assert.equal(res.status, 200)
   assert.equal(res.error?.code, -32601)
   assert.equal(renderCalls.length, 0)
+})
+
+// BRIEF-06: nothing in the agent's reachable world tells it its own room
+// code — `roster`'s result has no code, and `roomCode`'s own description
+// used to hand out the literal example. The fix makes `roomCode` optional
+// and resolves it from the bearer, and stops reporting a wrong-but-real
+// `roomCode` as the same 401 a bad credential gets.
+
+test("a call with NO roomCode and a valid render token renders and stores under the token's room", async () => {
+  const { handler, renders, renderCalls } = harness({ rooms: () => [room(ROOM)] })
+
+  const res = asRpc(
+    await handler(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: callParamsNoRoomCode(VALID_DATA) },
+      VALID_TOKEN,
+    ),
+  )
+
+  assert.equal(res.status, 200)
+  assert.equal(res.result?.isError, false)
+  const content = res.result?.content
+  assert.ok(Array.isArray(content) && isRecord(content[0]))
+  const payload = JSON.parse(String(content[0].text))
+  assert.equal(payload.artifactUrl, `${env.publicUrl}/r/${ROOM}/artifact/`)
+  assert.equal(renderCalls.length, 2, "an omitted roomCode must still reach canvakit, resolved from the bearer")
+  assert.equal(renders.has(ROOM), true, "the render must be stored under the bearer's room, not nothing")
+})
+
+test("a roomCode naming a different room than a real token's is a tool error naming the token's room, not a 401", async () => {
+  const { handler, renderCalls, renders } = harness({ rooms: () => [room(ROOM)] })
+
+  const res = asRpc(
+    await handler(
+      { jsonrpc: "2.0", id: 1, method: "tools/call", params: callParams("RDV-OTHER", VALID_DATA) },
+      VALID_TOKEN,
+    ),
+  )
+
+  assert.equal(res.status, 200, "a real token with a wrong roomCode argument is not an auth failure")
+  assert.match(res.error?.message ?? "", new RegExp(ROOM), "the error must name the token's REAL room so the agent can self-correct")
+  assert.doesNotMatch(res.error?.message ?? "", /unauthorized/)
+  assert.equal(renderCalls.length, 0, "a mismatched roomCode must render nothing")
+  assert.equal(renders.has(ROOM), false)
+})
+
+test("a garbage bearer matching no known room is still a generic 401, even when other rooms are known", async () => {
+  const { handler, renderCalls, renders } = harness({ rooms: () => [room(ROOM)] })
+
+  const res = await handler(
+    { jsonrpc: "2.0", id: 1, method: "tools/call", params: callParams(ROOM, VALID_DATA) },
+    "Bearer deadbeef",
+  )
+
+  assert.equal(res.status, 401, "no known room matches this bearer at all — the generic 401, not a room-naming error")
+  assert.ok("error" in res.body)
+  assert.match(res.body.error.message, /unauthorized/)
+  assert.equal(renderCalls.length, 0)
+  assert.equal(renders.has(ROOM), false)
+})
+
+test("tools/list no longer requires roomCode and its description drops the RDV-7F3K example", async () => {
+  const { handler } = harness()
+  const res = asRpc(await handler({ jsonrpc: "2.0", id: "a", method: "tools/list" }, undefined))
+  const tools = res.result?.tools
+  assert.ok(Array.isArray(tools))
+  const tool = tools[0]
+  assert.ok(isRecord(tool) && isRecord(tool.inputSchema))
+  const schema = tool.inputSchema as Record<string, unknown>
+  assert.ok(Array.isArray(schema.required))
+  assert.ok(!schema.required.includes("roomCode"), "roomCode must not be required — the caller may not know it")
+  assert.ok(schema.required.includes("data"))
+  const properties = schema.properties
+  assert.ok(isRecord(properties) && isRecord(properties.roomCode))
+  assert.doesNotMatch(
+    JSON.stringify(properties.roomCode),
+    /RDV-7F3K/,
+    "the example code must be gone — it is live bait for a model with no other source",
+  )
 })

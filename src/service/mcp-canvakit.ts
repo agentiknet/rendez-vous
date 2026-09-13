@@ -155,9 +155,13 @@ const RENDER_ARTIFACT_RESOURCE_URI = "ui://render_artifact/view"
  *  D2: `roomCode` stays an argument, unlike `mcp-room.ts`'s no-argument
  *  tools — the asymmetry is out of scope (BRIEF-02) because a live room's
  *  agent is running against the current schema and changing a tool's
- *  arguments is a change it can observe mid-room. It is bound anyway: the
- *  handler recomputes `roomRenderToken(roomCode, …)` and rejects a mismatch,
- *  so a token for room A cannot render room B.
+ *  arguments is a change it can observe mid-room. It is now OPTIONAL
+ *  (BRIEF-06): nothing in the agent's reachable world tells it its own room
+ *  code, so a caller that omits it gets the room its bearer token is for,
+ *  via `resolveRoom`. Supplying it is still bound: the handler rejects a
+ *  `roomCode` that names a room other than the token's, so a token for room
+ *  A still cannot render room B — but that rejection is a tool-level
+ *  `INVALID_PARAMS`, not a 401 (`callRenderTool`'s doc comment).
  *
  *  `_meta.ui.resourceUri` is carried BOTH here (the `tools/list` definition)
  *  AND on the `tools/call` result — deliberately redundant, for the same
@@ -251,7 +255,11 @@ const RENDER_ARTIFACT_TOOL = {
   inputSchema: {
     type: "object",
     properties: {
-      roomCode: { type: "string", description: "This room's code, e.g. RDV-7F3K." },
+      roomCode: {
+        type: "string",
+        description:
+          "Optional. Defaults to the room this connection's token is for — omit it unless you are deliberately targeting a specific room.",
+      },
       data: {
         type: "array",
         items: {
@@ -267,7 +275,7 @@ const RENDER_ARTIFACT_TOOL = {
           "The document as a list of typed blocks. Each block is one of: {isTitle:true,title,subtitle,date}, {isProse:true,heading,paragraphs:[...]}, {isBullets:true,heading,items:[...]}, {isTable:true,heading,head:[3 strings],rows:[{col1,col2,col3}]}, {isFigures:true,items:[{value,label}]}. Blocks are optional and repeatable, in any order.",
       },
     },
-    required: ["roomCode", "data"],
+    required: ["data"],
   },
   _meta: { ui: { resourceUri: RENDER_ARTIFACT_RESOURCE_URI } },
 } as const
@@ -307,12 +315,12 @@ function unauthorized(id: string | number | null): McpResponse {
   }
 }
 
-/** Resolve the room `resources/read`'s bearer names (D3): recompute-and-
- *  compare over every known room's `roomRenderToken`, exactly
- *  `mcp-room.ts`'s `resolveRoom` against `roomAudienceToken` — the token is
- *  not reversible, so this is the only honest binding. `render_artifact`
- *  itself does not use this: its own `roomCode` argument is bound directly
- *  in `callRenderTool` (D2). */
+/** Resolve the room a bearer names: recompute-and-compare over every known
+ *  room's `roomRenderToken`, exactly `mcp-room.ts`'s `resolveRoom` against
+ *  `roomAudienceToken` — the token is not reversible, so this is the only
+ *  honest binding. Used by `resources/read` (D3, the only signal it has) and
+ *  by `callRenderTool` (BRIEF-06) when `render_artifact`'s `roomCode` is
+ *  omitted or wrong. */
 function resolveRoom(deps: McpCanvakitDeps, authorization: string | undefined): Room | undefined {
   const provided = bearerOf(authorization)
   if (provided === undefined) return undefined
@@ -324,15 +332,18 @@ function resolveRoom(deps: McpCanvakitDeps, authorization: string | undefined): 
 
 /** Validate the tool's `arguments` into the pieces the renderer needs.
  *  Returns the failure reason instead of throwing, so the JSON-RPC error can
- *  carry it verbatim. */
+ *  carry it verbatim. `roomCode` is optional (BRIEF-06): a caller has no
+ *  reliable way to know its own room code, so a missing one is not a parse
+ *  error — `callRenderTool` resolves it from the bearer instead. A PRESENT
+ *  `roomCode` that is not a string is still rejected here. */
 function parseRenderArgs(params: Record<string, unknown>):
-  | { readonly ok: true; readonly roomCode: string; readonly data: readonly unknown[] }
+  | { readonly ok: true; readonly roomCode: string | undefined; readonly data: readonly unknown[] }
   | { readonly error: string } {
   const args = params.arguments
   if (!isRecord(args)) return { error: "params.arguments must be an object" }
   const roomCode = args.roomCode
-  if (typeof roomCode !== "string" || roomCode.trim().length === 0) {
-    return { error: "arguments.roomCode must be a non-empty string" }
+  if (roomCode !== undefined && typeof roomCode !== "string") {
+    return { error: "arguments.roomCode must be a string" }
   }
   const data = args.data
   if (!Array.isArray(data)) {
@@ -351,20 +362,38 @@ async function callRenderTool(
   if ("error" in parsed) {
     return fail(id, INVALID_PARAMS, `render_artifact: ${parsed.error}`)
   }
-  const { roomCode, data } = parsed
+  const { data } = parsed
+  const requested = parsed.roomCode?.trim()
 
-  // Token must be for THIS room, checked before touching canvakit: a bad
-  // token must never render — the render's output is what members see.
-  const expected = roomRenderToken(roomCode, env.roomTokenSecret)
-  const provided = bearerOf(authorization)
-  if (provided === undefined || !tokensMatch(provided, expected)) {
-    return {
-      status: 401,
-      body: {
-        jsonrpc: "2.0",
+  let roomCode: string
+  if (requested === undefined || requested.length === 0) {
+    // No room code supplied (BRIEF-06: the agent has no reliable way to know
+    // its own room's code) — the bearer IS the room, recompute-and-compare
+    // it against every known room exactly like `resources/read` does.
+    const room = resolveRoom(deps, authorization)
+    if (room === undefined) return unauthorized(id)
+    roomCode = room.code
+  } else {
+    // A room code WAS supplied: the fast path stays a direct token check
+    // (no `deps.rooms()` lookup needed) so a token for exactly this room
+    // still renders even if the caller's `rooms()` list is incomplete.
+    const expected = roomRenderToken(requested, env.roomTokenSecret)
+    const provided = bearerOf(authorization)
+    if (provided !== undefined && tokensMatch(provided, expected)) {
+      roomCode = requested
+    } else {
+      // The token is not valid for the room NAMED, but it may still be a
+      // valid token for a DIFFERENT room — that is a wrong argument, not a
+      // bad credential, and must not be reported as the same 401 (BRIEF-06):
+      // a caller with a real token for room X but a wrong `roomCode` needs
+      // to be told X, not sent down a "check your permissions" dead end.
+      const room = resolveRoom(deps, authorization)
+      if (room === undefined) return unauthorized(id)
+      return fail(
         id,
-        error: { code: INVALID_REQUEST, message: "unauthorized: missing or invalid bearer token for this room" },
-      },
+        INVALID_PARAMS,
+        `render_artifact: this token is for room ${room.code}, not ${requested} — omit roomCode or pass ${room.code}.`,
+      )
     }
   }
 
