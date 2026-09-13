@@ -640,20 +640,24 @@ function outboxFor(room: Room, member: Member, since: number, sinceGiven: boolea
     }
     return oldest
   }
-  // Brief E: when a member's backlog was pruned ENTIRELY, `mine` is empty and
-  // its own oldest-retained is `undefined` — total loss would read as "nothing
-  // new". Fall back to the room-wide oldest retained seq (any member's): the
-  // member's records were destroyed if the room still holds anything older
-  // than the client's cursor. Only when the room retains NOTHING at all does
-  // `pruned` stay false — with no record left there is no low-water mark to
-  // compare against, and the room's count/age caps mean that state is a room
-  // that has been quiet past `DELIVERED_RETENTION_MS`, not a destroyed
-  // backlog.
+  // Brief E, then brief B: when a member's backlog was pruned ENTIRELY, `mine`
+  // is empty and its own oldest-retained is `undefined` — total loss would
+  // read as "nothing new". Two independent answers, both conservative (they
+  // may report a gap a client did not actually suffer, never hide one):
+  //  - the room's LOW-WATER MARK (brief B) — the highest seq ever pruned, a
+  //    monotonic fact that survives even when the room retains NOTHING at
+  //    all. `since` below it means records the client should have seen were
+  //    dropped, whoever owned them. This is the exact answer, and the only
+  //    one knowable when the array is empty.
+  //  - the room-wide oldest retained seq (step 4's fallback), kept for rooms
+  //    persisted before the mark existed, whose pruned history is not in any
+  //    field we can read.
   const oldestRetained = oldestOf(mine) ?? oldestOf(all)
+  const lowWater = room.deliveryLowWater ?? 0
   return {
     memberId: member.id,
     cursor: room.deliverySeq ?? 0,
-    pruned: sinceGiven && oldestRetained !== undefined && since < oldestRetained,
+    pruned: sinceGiven && (since < lowWater || (oldestRetained !== undefined && since < oldestRetained)),
     deliveries: mine.filter((delivery) => deliverySeqOf(delivery.id) > since),
   }
 }

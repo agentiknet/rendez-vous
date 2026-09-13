@@ -864,6 +864,23 @@ test("GET /rooms/:code/outbox fires the gap marker from the room-wide oldest whe
   // not the room's (the earlier D6 test pins that; this is the contrast).
 })
 
+test("GET /rooms/:code/outbox fires the gap marker from the low-water mark when NOTHING is retained (brief B)", async () => {
+  const { store, baseUrl, code, alice } = await outboxHarness()
+  // The room pruned EVERYTHING it ever held — deliveries is empty, so there
+  // is no record left to compare `since` against. The low-water mark is the
+  // only remaining fact: seqs up to 4 were dropped at some point.
+  await store.update(code, { deliverySeq: 5, deliveryLowWater: 4, deliveries: [] })
+
+  const sinceOne = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=1`, { headers: aliceHeaders(code, alice) }))
+  assert.equal(sinceOne.pruned, true, "a cursor below the low-water mark means a destroyed backlog, even in an empty room")
+
+  const sinceFour = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox?since=4`, { headers: aliceHeaders(code, alice) }))
+  assert.equal(sinceFour.pruned, false, "at the mark itself there is nothing below it to have lost")
+
+  const omitted = await readJson(await fetch(`${baseUrl}/rooms/${code}/outbox`, { headers: aliceHeaders(code, alice) }))
+  assert.equal(omitted.pruned, false, "an omitted since asks for everything retained — nothing can be lost from that")
+})
+
 async function postCursor(
   baseUrl: string,
   roomCode: string,

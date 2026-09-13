@@ -15,8 +15,9 @@ import {
   DeliveryEngine,
   MAX_RETAINED_DELIVERED,
   pruneDeliveries,
+  prunedUpTo,
 } from "../../src/service/delivery.ts"
-import { PULL_STALE_MS, retentionFloor } from "../../src/rooms/types.ts"
+import { PULL_STALE_MS, retentionFloors } from "../../src/rooms/types.ts"
 import { createHttpServer } from "../../src/service/http.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
@@ -361,9 +362,9 @@ test("the floor keeps a delivered record the count cap and the age window would 
   }
   // Without a floor: everything is ancient, so the age window drops it all.
   assert.deepEqual(pruneDeliveries(records, now), [])
-  // With a floor at d10: every seq above it survives, overriding both axes;
-  // everything at or below it prunes exactly as it does today.
-  const pruned = pruneDeliveries(records, now, 10)
+  // With a floor for m1 at d10: m1's every seq above it survives, overriding
+  // both axes; everything at or below it prunes exactly as it does today.
+  const pruned = pruneDeliveries(records, now, new Map([["m1", 10]]))
   assert.deepEqual(
     pruned.map((record) => record.id),
     Array.from({ length: MAX_RETAINED_DELIVERED + 5 - 10 }, (_, i) => `d${11 + i}`),
@@ -374,43 +375,114 @@ test("the floor holds a pull member's record against live traffic; the stale rel
   const { store, code, alice, screen } = await roomWith()
   const eng = engine(store, new FakeTransport())
 
-  // d1 goes to the screen (pull) and is delivered; the tab renders it and acks.
+  // d1 goes to the screen (pull) and is delivered; the tab renders it and
+  // acks — d1 is now drained mail. Then three MORE records for the screen,
+  // delivered but never acked: those are its undrained backlog.
   await eng.accept(code, "say", "for the screen", [screen.id])
   await eng.drain(code)
   assert.equal(await eng.ackCursor(code, screen.id, 1), "applied")
+  for (let i = 2; i <= 4; i += 1) {
+    await eng.accept(code, "say", `undrained ${i}`, [screen.id])
+    await eng.drain(code)
+  }
 
-  // Then the count cap floods: 25 more push deliveries. The floor is
-  // room-wide (min acked cursor across live pull members), so it holds EVERY
-  // delivered record above it — the screen's undrained d1 and the push tail
-  // alike. That is the write-amplification the brief says to budget: the
-  // stale release, not the cap, is the bound on what the floor holds.
-  for (let i = 2; i <= MAX_RETAINED_DELIVERED + 6; i += 1) {
+  // Then the count cap floods: 25 push deliveries. The floor is PER-MEMBER
+  // (brief A), so it holds ONLY the screen's undrained d2..d4 — the push
+  // tail is nobody's undrained mail and the cap reclaims it as usual. That
+  // is the fix the brief asks for: one laggard tab no longer pins records
+  // that have nothing to do with it.
+  for (let i = 5; i <= MAX_RETAINED_DELIVERED + 9; i += 1) {
     await eng.accept(code, "say", `flood ${i}`, [alice.id])
     await eng.drain(code)
   }
   const held = deliveriesOf(store.get(code))
-  assert.equal(held.length, MAX_RETAINED_DELIVERED + 6, "the floor holds everything above it — the cap cannot reclaim it")
+  assert.equal(held.length, MAX_RETAINED_DELIVERED + 3, "the push tail is bounded by the cap; only the screen's backlog is extra")
   assert.ok(
-    held.some((record) => record.id === "d1" && record.memberId === screen.id),
-    "the undrained pull record survives both retention axes",
+    held.some((record) => record.id === "d2" && record.memberId === screen.id),
+    "the screen's undrained backlog survives both retention axes",
+  )
+  assert.ok(
+    !held.some((record) => record.id === "d5" && record.memberId === alice.id),
+    "the push tail is bounded by the cap, not pinned by the screen's lag",
+  )
+  // Whatever the flood pruned raised the room's low-water mark (brief B).
+  assert.ok(
+    (store.get(code)?.deliveryLowWater ?? 0) >= 5,
+    "the highest seq actually dropped is recorded as the low-water mark",
   )
 
   // Release: past PULL_STALE_MS with no further ack the member is stale, its
   // floor is gone, and the prune reclaims the backlog — the cap takes the
-  // oldest 6 records, d1 among them.
+  // oldest records, the screen's d2..d4 among them.
   const later = Date.now() + PULL_STALE_MS + 1000
   const room = store.get(code)
   assert.ok(room !== undefined)
-  await store.update(code, { deliveries: pruneDeliveries(held, later, retentionFloor(room, later)) })
+  const heldThen = deliveriesOf(room)
+  const afterRelease = pruneDeliveries(heldThen, later, retentionFloors(room, later))
+  const releasedUpTo = prunedUpTo(heldThen, afterRelease)
+  await store.update(code, {
+    deliveries: afterRelease,
+    ...(releasedUpTo !== undefined ? { deliveryLowWater: releasedUpTo } : {}),
+  })
   assert.ok(
-    !deliveriesOf(store.get(code)).some((record) => record.id === "d1"),
+    !deliveriesOf(store.get(code)).some((record) => record.id === "d2"),
     "the released floor lets the prune take the backlog",
+  )
+  assert.ok(
+    (store.get(code)?.deliveryLowWater ?? 0) >= 4,
+    "the released backlog raises the low-water mark — the returning tab gets the gap marker",
   )
   // And the release NEVER removes the member (D6 constraint 1): same member,
   // same id — the reconnecting tab is the same principal, not a fresh one.
   const after = store.get(code)
   assert.ok(after !== undefined)
   assert.ok(after.members.some((member) => member.id === screen.id))
+})
+
+test("one laggard pull member pins only its own records, never another member's (brief A)", () => {
+  const now = Date.now()
+  const ancient = new Date(now - 10 * DELIVERED_RETENTION_MS).toISOString()
+  const records: Delivery[] = []
+  for (let i = 0; i < 4; i += 1) records.push(deliveredAt(`d${i + 1}`, "m1", `hers ${i}`, ancient))
+  for (let i = 0; i < 2; i += 1) records.push(deliveredAt(`d${i + 5}`, "m2", `his ${i}`, ancient))
+  records.push(deliveredAt("d7", "m3", "a push member's record", ancient))
+
+  // m1 is a live pull member acked at d2; m2 is a live pull member that has
+  // never acked (its floor is 0 — it holds everything of its own); m3 is a
+  // push member with no floor at all.
+  const floors = new Map([
+    ["m1", 2],
+    ["m2", 0],
+  ])
+  const pruned = pruneDeliveries(records, now, floors)
+
+  assert.deepEqual(
+    pruned.map((record) => record.id),
+    ["d3", "d4", "d5", "d6"],
+    "m1's records above ITS floor survive; m2's undrained mail survives; m3's push record is the age window's business alone",
+  )
+  // And the room-wide rule this replaces would also have kept d7: the
+  // per-member rule is strictly smaller retention, strictly more correct.
+})
+
+test("prunedUpTo reports the highest seq actually dropped, whoever owned it (brief B)", () => {
+  const ancient = new Date(Date.now() - 10 * DELIVERED_RETENTION_MS).toISOString()
+  const records: Delivery[] = [
+    deliveredAt("d1", "m1", "old", ancient),
+    deliveredAt("d5", "m2", "the highest drop, another member's", ancient),
+    deliveredAt("d6", "m1", "kept by m1's floor", new Date(Date.now() - 1000).toISOString()),
+    pendingDelivery("d7", "m1", "pending is never pruned"),
+  ]
+  // Keep only m1's d6 (floor 5 for m1): d1 and d5 drop, and the mark is d5 —
+  // the highest dropped, even though it belonged to a different member than
+  // the floor that did the keeping.
+  const after = pruneDeliveries(records, Date.now(), new Map([["m1", 5]]))
+  assert.deepEqual(
+    after.map((record) => record.id),
+    ["d6", "d7"],
+  )
+  assert.equal(prunedUpTo(records, after), 5)
+  assert.equal(prunedUpTo(records, records), undefined, "nothing dropped, no mark to raise")
 })
 
 test("an ack confirms by recipient exactly the records at or below the cursor, and a backwards ack is ignored", async () => {

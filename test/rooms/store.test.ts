@@ -486,6 +486,25 @@ test("open rejects a member whose ackedSeq is not a sane number", async () => {
   await assert.rejects(() => RoomStore.open(dir), /corrupt room store/i)
 })
 
+test("the delivery low-water mark is monotonic and round-trips; a room persisted without one loads as zero (brief B)", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+
+  // Absent means zero: a fresh room reports no pruned history.
+  assert.equal(store.get(room.code)?.deliveryLowWater, undefined)
+
+  await store.update(room.code, { deliveryLowWater: 4 })
+  // A stale snapshot reporting an older mark must never pull it down — a
+  // client comparing `since` against it would be told a destroyed backlog
+  // was intact.
+  await store.update(room.code, { deliveryLowWater: 2 })
+  assert.equal(store.get(room.code)?.deliveryLowWater, 4)
+
+  const reopened = await RoomStore.open(dir)
+  assert.equal(reopened.get(room.code)?.deliveryLowWater, 4)
+})
+
 test("open migrates a pre-delivery rooms.json: delivery is derived from addresses and attempts is renamed to failures, in memory", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)

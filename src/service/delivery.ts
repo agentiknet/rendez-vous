@@ -24,7 +24,7 @@ import {
   type Delivery,
   type Member,
   deliverySeqOf,
-  retentionFloor,
+  retentionFloors,
 } from "../rooms/types.ts"
 
 /** Per-send hard timeout. Deliberately NOT the 2s house budget (that is for
@@ -69,43 +69,63 @@ export const DELIVERED_RETENTION_MS = 60 * 60 * 1000
  *  newest `MAX_RETAINED_DELIVERED`; keep every `pending` and `failed` one, and
  *  keep the surviving records in their original order.
  *
- *  `floor` is the room's retention floor (PLAN-02 §3-D6, `retentionFloor`):
- *  a `delivered` record whose seq is ABOVE it is kept, overriding BOTH axes —
- *  it is a live pull member's undrained mail, not completed work, and pruning
- *  it would be the silent-loss fault D6 exists to prevent. Everything else
+ *  Drop `delivered` records that are past the retention window or beyond the
+ *  newest `MAX_RETAINED_DELIVERED`; keep every `pending` and `failed` one, and
+ *  keep the surviving records in their original order.
+ *
+ *  `floors` is the room's per-member retention floors (PLAN-02 §3-D6 as
+ *  amended by brief A, `retentionFloors`): a `delivered` record is kept iff
+ *  its OWNER is a live pull member AND its seq is above THAT member's floor —
+ *  it is that member's undrained mail, not completed work, and pruning it
+ *  would be the silent-loss fault D6 exists to prevent. Everything else
  *  prunes exactly as it does today.
  *
- *  THE COST THIS REOPENS, BUDGETED (brief C): the count cap existed because
- *  `RoomStore.persist` serializes the whole store on every write, and the
- *  floor defeats it for exactly the records a live pull member has not
- *  drained. Worst case accepted: one busy room fanning out to five pull
- *  members at a sustained turn every 10 s writes ~5 records/turn ≈ 1 800
- *  records/hour, and the floor holds everything above the SLOWEST live
- *  member's ack. Liveness is what bounds it, and the stale release is the
- *  bound: a member's unacked holdings are capped at ~PULL_STALE_MS (90 s) of
- *  fan-out ≈ 45 records per member, ≈ 225 records ≈ a few hundred KB of JSON
- *  per persist in that pathological room — released automatically once the
- *  member goes stale, with the gap marker telling its tab what happened.
- *  Without `PULL_STALE_MS` the floor is unbounded (a tab left open pins the
- *  log forever); with it, the write amplification is finite and self-healing.
+ *  THE FLOOR IS PER-MEMBER (brief A): a delivery belongs to exactly one
+ *  member (`Delivery.memberId`), so one laggard tab pins ONLY its own
+ *  records. The room-wide floor this replaces was a conservative
+ *  over-approximation with a real cost — one laggard tab held every other
+ *  member's records, including push records that had nothing to do with it,
+ *  and the count cap stopped bounding anything above the floor.
+ *
+ *  THE COST THIS REOPENS, RE-BUDGETED (brief A): the count cap existed
+ *  because `RoomStore.persist` serializes the whole store on every write.
+ *  What the floors hold is now, per live pull member, exactly that member's
+ *  own undrained tail — bounded by its liveness, and the stale release is
+ *  the bound: a member's unacked holdings are capped at ~PULL_STALE_MS (90 s)
+ *  of fan-out ≈ 45 records per member. Worst case accepted: five pull
+ *  members ALL lagging at a sustained turn every 10 s ≈ 225 records ≈ a few
+ *  hundred KB of JSON per persist — the same ceiling as before, but reached
+ *  only when every member lags at once; one laggard now costs ~45 records,
+ *  not 225, and the push tail is bounded by the cap and the age window
+ *  again. Released automatically once a member goes stale, with the gap
+ *  marker telling its tab what happened.
  *
  *  A `delivered` record whose timestamps cannot be parsed is dropped rather
  *  than kept: an undateable record can never age out, which is exactly the
- *  unbounded retention this prune exists to prevent — unless the floor holds
- *  it, in which case the stale release is what eventually drops it. Survivors
- *  are selected by ARRAY INDEX, not by id, so the prune is correct even on a
- *  legacy room whose length-derived ids collide (`Room.deliverySeq`). */
-export function pruneDeliveries(deliveries: readonly Delivery[], nowMs: number, floor?: number): Delivery[] {
+ *  unbounded retention this prune exists to prevent — unless its owner's
+ *  floor holds it, in which case the stale release is what eventually drops
+ *  it. Survivors are selected by ARRAY INDEX, not by id, so the prune is
+ *  correct even on a legacy room whose length-derived ids collide
+ *  (`Room.deliverySeq`). */
+export function pruneDeliveries(
+  deliveries: readonly Delivery[],
+  nowMs: number,
+  floors?: ReadonlyMap<string, number>,
+): Delivery[] {
   const keep = new Set<number>()
-  // The floor first: these records survive whatever their age and whatever
+  // The floors first: these records survive whatever their age and whatever
   // the count cap says — overriding BOTH axes (brief C), including the
-  // undateable drop, until the stale release takes the floor away. The cap
-  // below then only counts records it keeps ON ITS OWN authority, so
-  // floor-protected records never crowd the retained tail out.
-  if (floor !== undefined) {
+  // undateable drop, until the stale release takes the floor away. A record
+  // whose owner has no floor (push, or a stale-released pull member) is
+  // never held by someone else's lag (brief A). The cap below then only
+  // counts records it keeps ON ITS OWN authority, so floor-protected records
+  // never crowd the retained tail out.
+  if (floors !== undefined) {
     for (let index = 0; index < deliveries.length; index += 1) {
       const delivery = deliveries[index]
       if (delivery === undefined || delivery.status !== "delivered") continue
+      const floor = floors.get(delivery.memberId)
+      if (floor === undefined) continue
       if (deliverySeqOf(delivery.id) > floor) keep.add(index)
     }
   }
@@ -119,6 +139,23 @@ export function pruneDeliveries(deliveries: readonly Delivery[], nowMs: number, 
     capped += 1
   }
   return deliveries.filter((delivery, index) => delivery.status !== "delivered" || keep.has(index))
+}
+
+/** The room's new low-water mark after a prune (brief B): the HIGHEST seq the
+ *  prune actually dropped, whoever owned it. Per-member floors mean different
+ *  members' records prune at different times, so the mark must be the max
+ *  over what was ACTUALLY dropped — never a guess from what survived. The
+ *  mark is monotonic (`RoomStore.update` never lets it decrease), so callers
+ *  may pass `undefined` when nothing was dropped: the previous mark stands. */
+export function prunedUpTo(before: readonly Delivery[], after: readonly Delivery[]): number | undefined {
+  const kept = new Set(after.map((delivery) => delivery.id))
+  let highest: number | undefined
+  for (const delivery of before) {
+    if (delivery.status !== "delivered" || kept.has(delivery.id)) continue
+    const seq = deliverySeqOf(delivery.id)
+    if (highest === undefined || seq > highest) highest = seq
+  }
+  return highest
 }
 
 export interface DeliveryEngineOpts {
@@ -228,10 +265,17 @@ export class DeliveryEngine {
         createdAt: now,
         deliveredAt: undefined,
       }))
+      const nowMs = this.nowMs()
+      const before = [...(room.deliveries ?? []), ...created]
+      // The prune carries the room's per-member retention floors: a live pull
+      // member's undrained records survive the cap and the age window — its
+      // own records only, never anyone else's (brief A). Whatever the prune
+      // dropped raises the room's low-water mark (brief B).
+      const after = pruneDeliveries(before, nowMs, retentionFloors(room, nowMs))
+      const pruned = prunedUpTo(before, after)
       await this.store.update(code, {
-        // The prune carries the room's retention floor: a live pull member's
-        // undrained records survive the cap and the age window.
-        deliveries: pruneDeliveries([...(room.deliveries ?? []), ...created], this.nowMs(), retentionFloor(room, this.nowMs())),
+        deliveries: after,
+        ...(pruned !== undefined ? { deliveryLowWater: pruned } : {}),
         deliverySeq: lastSeq + created.length,
       })
       if (this.autoDrain) {
@@ -438,10 +482,16 @@ export class DeliveryEngine {
     // just marked `delivered` always survives its own prune — it is dated
     // `now`, and `drainRoom` walks pending records in array order, so it is
     // also the highest-indexed delivered one. A caller can still read back the
-    // status it just caused. The prune carries the room's retention floor
-    // (brief C): a live pull member's undrained records survive both axes.
+    // status it just caused. The prune carries the room's per-member retention
+    // floors (brief A): a live pull member's undrained records survive both
+    // axes — its own records only. Whatever the prune dropped raises the
+    // room's low-water mark (brief B).
+    const nowMs = this.nowMs()
+    const after = pruneDeliveries(deliveries, nowMs, retentionFloors(room, nowMs))
+    const pruned = prunedUpTo(deliveries, after)
     await this.store.update(code, {
-      deliveries: pruneDeliveries(deliveries, this.nowMs(), retentionFloor(room, this.nowMs())),
+      deliveries: after,
+      ...(pruned !== undefined ? { deliveryLowWater: pruned } : {}),
     })
   }
 

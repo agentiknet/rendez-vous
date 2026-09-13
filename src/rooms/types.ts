@@ -234,21 +234,24 @@ export function pullMemberStale(member: Member, nowMs: number): boolean {
   return !Number.isNaN(stamp) && nowMs - stamp > PULL_STALE_MS
 }
 
-/** The retention floor (PLAN-02 §3-D6): the lowest acked cursor across the
- *  room's LIVE pull members, or `undefined` when no live pull member has
- *  acked anything. `pruneDeliveries` may never drop a delivered record whose
- *  seq is above this — it is undrained mail, not completed work. Stale
- *  members contribute nothing: their floor is released, and the gap marker
- *  tells their tab what happened when it comes back. */
-export function retentionFloor(room: Room, nowMs: number): number | undefined {
-  let floor: number | undefined
+/** The retention floors (PLAN-02 §3-D6, per-member since brief A): one floor
+ *  per LIVE pull member — `memberId → ackedSeq`, with a member that has never
+ *  acked contributing `0` (it holds everything: its mail is undrained mail
+ *  just the same). `pruneDeliveries` may never drop a delivered record whose
+ *  owner has a floor its seq is above — and, per-member, may never use one
+ *  member's floor to hold another member's records: a delivery belongs to
+ *  exactly one member (`Delivery.memberId`), so one laggard tab pins only its
+ *  own backlog, never the push tail or anyone else's. Stale members
+ *  contribute nothing: their floor is released, and the gap marker tells
+ *  their tab what happened when it comes back. */
+export function retentionFloors(room: Room, nowMs: number): ReadonlyMap<string, number> {
+  const floors = new Map<string, number>()
   for (const member of room.members) {
     if (deliveryModeOf(member) !== "pull") continue
     if (pullMemberStale(member, nowMs)) continue
-    const seq = member.ackedSeq
-    if (seq !== undefined && (floor === undefined || seq < floor)) floor = seq
+    floors.set(member.id, member.ackedSeq ?? 0)
   }
-  return floor
+  return floors
 }
 
 export interface Room {
@@ -328,4 +331,18 @@ export interface Room {
    *  rooms that predate the field — same JSON round-trip rule as
    *  `pendingDeliveries` and `asks`. Never changed in place. */
   protocol?: "markers" | "tools"
+  /** The room's low-water mark (PLAN-02 §3-D6, brief B): the HIGHEST delivery
+   *  seq ever pruned in this room. Monotonic — `RoomStore.update` never lets
+   *  it decrease, so it is safe to read as "everything at or below this may
+   *  be gone". It is the gap marker's answer for the last blind edge: when
+   *  the room retains no records at all, there is nothing to compare `since`
+   *  against, and a client that lost its ENTIRE backlog was told "nothing
+   *  new" — absence presented as delivery, the §1 fault one more time. With
+   *  the mark, `pruned` is true whenever `since` sits below it, whether or
+   *  not any record survives.
+   *
+   *  Optional key, absent on rooms persisted before the field — absent means
+   *  zero, the honest value for a room that has (as far as we know) never
+   *  pruned anything. Costs one number. */
+  deliveryLowWater?: number
 }

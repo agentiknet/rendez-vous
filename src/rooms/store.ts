@@ -290,6 +290,7 @@ function isRoom(value: unknown): value is Room {
   const asks = "asks" in value ? value.asks : undefined
   const deliveries = "deliveries" in value ? value.deliveries : undefined
   const deliverySeq = "deliverySeq" in value ? value.deliverySeq : undefined
+  const deliveryLowWater = "deliveryLowWater" in value ? value.deliveryLowWater : undefined
   const protocol = "protocol" in value ? value.protocol : undefined
   return (
     isString(value.code) &&
@@ -302,6 +303,7 @@ function isRoom(value: unknown): value is Room {
     (asks === undefined || (Array.isArray(asks) && asks.every(isAsk))) &&
     (deliveries === undefined || (Array.isArray(deliveries) && deliveries.every(isDelivery))) &&
     isNumberOrUndefined(deliverySeq) &&
+    isNumberOrUndefined(deliveryLowWater) &&
     isProtocol(protocol) &&
     Array.isArray(value.members) &&
     value.members.every(isMember) &&
@@ -542,6 +544,7 @@ export class RoomStore {
         | "asks"
         | "deliveries"
         | "deliverySeq"
+        | "deliveryLowWater"
         | "protocol"
       >
     >,
@@ -558,6 +561,14 @@ export class RoomStore {
       ...room,
       ...patch,
       updatedAt: new Date().toISOString(),
+    }
+    // The low-water mark is MONOTONIC (brief B): it is the highest seq ever
+    // pruned in this room, so a prune that drops nothing (or a stale snapshot
+    // reporting an older mark) can never pull it down — a client comparing
+    // `since` against it would otherwise be told a destroyed backlog was
+    // intact. Absent means zero, for rooms persisted before the field.
+    if (patch.deliveryLowWater !== undefined || room.deliveryLowWater !== undefined) {
+      updated.deliveryLowWater = Math.max(room.deliveryLowWater ?? 0, patch.deliveryLowWater ?? 0)
     }
     this.rooms.set(normalized, updated)
     await this.enqueueWrite()
