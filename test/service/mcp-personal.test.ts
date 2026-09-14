@@ -1285,3 +1285,39 @@ test("rendezvous_leave refuses a room CODE with the SAME code-shaped reason rend
   assert.equal(leaveParts.body, sendParts.body, "the REASON is one shared wording across tools")
   assert.ok(!/not a member/i.test(leave.error?.message ?? ""), "a code-shaped argument is not a membership question")
 })
+
+// --- BRIEF-13 step 4b: an ambiguous address resolves itself, through the
+// EXISTING rendezvous_send — no new tool, no new admission mechanism. -----
+
+test("BRIEF-13 step 4b: an ambiguous address resolves via rendezvous_send('resume <slug>') — no new tool needed", async () => {
+  const { service, store, handler } = await buildSendHarness()
+
+  const roomA = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(roomA.kind, "created")
+  if (roomA.kind !== "created") return
+  const roomB = await store.create()
+  await store.addMember(roomB.code, { displayName: "Alice", tier: "messenger", address: ALICE })
+  const roomC = await store.create()
+  await store.addMember(roomC.code, { displayName: "Alice", tier: "messenger", address: ALICE })
+
+  assert.equal(store.findByAddress(ALICE).kind, "ambiguous", "the fixture must start genuinely ambiguous")
+
+  // This is exactly the fact the panel's #ambiguous banner asserts.
+  const before = listResult(await callList(handler, bearerFor(ALICE)))
+  assert.equal(before.ambiguous, true, "rendezvous_list must report the ambiguity the banner is about")
+  assert.equal(before.rooms.length, 3)
+  assert.ok(before.rooms.every((room) => room.active === false), "no room is active while ambiguous")
+
+  // The resolving action: reuse rendezvous_send to speak the SAME "resume
+  // <slug>" command a phone would send — enterBySlug (commands.ts) now
+  // resolves an ambiguous match on the named room instead of refusing it.
+  const resolveRes = await callSend(handler, sendBearerFor(ALICE), { roomSlug: roomB.slug, text: `resume ${roomB.slug}` })
+  const resolvePayload = JSON.parse(contentTextOf(asRpc(resolveRes))) as { roomSlug: string; memberId: string; outcome: string; accepted: boolean }
+  assert.equal(resolvePayload.accepted, true, `expected the resume to be accepted, got outcome: ${resolvePayload.outcome}`)
+
+  const after = listResult(await callList(handler, bearerFor(ALICE)))
+  assert.equal(after.ambiguous, false, "the banner's claim must now be false")
+  assert.equal(after.rooms.length, 1, "exactly one room remains — the ambiguity actually collapsed")
+  assert.equal(after.rooms[0]?.slug, roomB.slug, "the room named to resolve it is the one that survives")
+  assert.equal(after.rooms[0]?.active, true, "the resolved room becomes THE active one")
+})

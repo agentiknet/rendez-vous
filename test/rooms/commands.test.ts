@@ -255,6 +255,71 @@ test("BRIEF-20 boundary: a non-member naming a room's slug is refused as a membe
   assert.equal(confirmed.ok, true)
 })
 
+test("BRIEF-13 step 4b: an ambiguous address resolves by naming one of its OWN rooms by slug — every other membership is dropped, not touched by whoever asked", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+
+  // Bare rooms with no creator membership at all, so the fixture's only
+  // member anywhere is the ambiguous address under test — nothing else to
+  // account for in the member counts below.
+  const roomA = await store.create()
+  const roomB = await store.create()
+  const roomC = await store.create()
+
+  await store.addMember(roomA.code, alice())
+  await store.addMember(roomB.code, alice())
+  await store.addMember(roomC.code, alice())
+  assert.equal(store.findByAddress(alice().address).kind, "ambiguous", "the fixture must start genuinely ambiguous")
+
+  // Naming the middle room by SLUG must resolve, not refuse — the address
+  // genuinely IS a member of it, ambiguity notwithstanding.
+  const resolved = await handleCommand(store, { kind: "join-by-slug", slug: roomB.slug }, alice())
+  assert.equal(resolved.ok, true)
+  if (!resolved.ok) return
+  assert.equal(resolved.room.code, roomB.code)
+
+  const after = store.findByAddress(alice().address)
+  assert.equal(after.kind, "one", "the ambiguity must actually collapse to exactly one room")
+  if (after.kind === "one") assert.equal(after.room.code, roomB.code)
+
+  assert.equal(store.get(roomA.code)?.members.length, 0, "the room NOT named must lose the membership")
+  assert.equal(store.get(roomC.code)?.members.length, 0, "the room NOT named must lose the membership")
+  assert.equal(store.get(roomB.code)?.members.length, 1, "the NAMED room keeps exactly its one member")
+
+  // The drop is a real fact, and must be reported, not hidden behind a
+  // hardcoded undefined — the same BRIEF-27 rule `join`/`resume` already keep.
+  const movedFrom = (resolved as { ok: true; movedFrom: string | string[] | undefined }).movedFrom
+  assert.ok(Array.isArray(movedFrom), "movedFrom must report every room actually dropped")
+  assert.equal((movedFrom as string[]).length, 2)
+  assert.ok((movedFrom as string[]).includes(roomA.code))
+  assert.ok((movedFrom as string[]).includes(roomC.code))
+})
+
+test("BRIEF-13 step 4b boundary: an address ambiguous across two rooms naming a THIRD room it is not in still gets not-a-member", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+
+  const roomA = await store.create()
+  const roomB = await store.create()
+  const roomC = await store.create()
+
+  await store.addMember(roomA.code, alice())
+  await store.addMember(roomB.code, alice())
+  assert.equal(store.findByAddress(alice().address).kind, "ambiguous", "the fixture must start genuinely ambiguous")
+
+  // The fix must not become a way IN: naming a room the address has no
+  // membership in at all, ambiguous or not, is still refused plainly.
+  const refused = await handleCommand(store, { kind: "join-by-slug", slug: roomC.slug }, alice())
+  assert.deepEqual(refused, { ok: false, reason: "not-a-member" })
+  assert.equal(store.get(roomC.code)?.members.length, 0, "naming a room the address is not in must never add them to it")
+
+  const stillAmbiguous = store.findByAddress(alice().address)
+  assert.equal(stillAmbiguous.kind, "ambiguous", "a refused attempt must leave the untouched ambiguity exactly as it was")
+  if (stillAmbiguous.kind === "ambiguous") {
+    assert.equal(stillAmbiguous.matches.length, 2)
+  }
+})
+
 test("BRIEF-13 R1: 'resume' on a different room than the one the address is already in leaves that address in exactly one room store-wide", async () => {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)

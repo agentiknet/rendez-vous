@@ -141,7 +141,23 @@ async function moveIntoRoom(
  *  calls `store.addMember` for anyone who isn't already on that roster, so a
  *  slug can never become an accepted join credential the way a code is. A
  *  member confirming their own room this way is a no-op refresh through the
- *  same `ensureMembership` path `join`/`resume` use, not a new mechanism. */
+ *  same `ensureMembership` path `join`/`resume` use, not a new mechanism.
+ *
+ *  BRIEF-13 step 4b: "already lists `sender` as a member" is a fact about
+ *  `findByAddress`'s ANSWER, not about its `kind` being `"one"` — an address
+ *  ambiguously in several rooms, one of which is the room this slug names,
+ *  genuinely IS a member of that room; `kind !== "one"` used to refuse it
+ *  with `"not-a-member"`, a claim that is simply false about them, and the
+ *  one path that could have resolved their own ambiguity was closed to
+ *  exactly the person the ambiguity is about. Still refused, unchanged: a
+ *  `"none"` address (never a member anywhere) and an ambiguous address none
+ *  of whose matches name THIS room — the boundary above is untouched, because
+ *  it is still checking the same fact, only reading it correctly out of the
+ *  `"ambiguous"` shape too. Resolution itself is not new logic: an ambiguous
+ *  match falls into `ensureMembership`'s existing ambiguous branch, which
+ *  already removes every OTHER membership before confirming this one — the
+ *  ambiguity collapses as a consequence of the move semantics `join`/`resume`
+ *  already document, not by a second admission mechanism. */
 async function enterBySlug(
   store: RoomStore,
   slug: string,
@@ -152,12 +168,19 @@ async function enterBySlug(
     return { ok: false, reason: "unknown-code" }
   }
   const current = store.findByAddress(sender.address)
-  if (current.kind !== "one" || current.room.code !== room.code) {
+  const alreadyOnThisRoster =
+    (current.kind === "one" && current.room.code === room.code) ||
+    (current.kind === "ambiguous" && current.matches.some((match) => match.room.code === room.code))
+  if (!alreadyOnThisRoster) {
     return { ok: false, reason: "not-a-member" }
   }
-  const { member } = await ensureMembership(store, room.code, sender)
+  const { member, movedFrom } = await ensureMembership(store, room.code, sender)
   const updated = store.get(room.code) ?? room
-  return { ok: true, room: updated, member, created: false, movedFrom: undefined }
+  // `movedFrom` is honest here now too: resolving an ambiguous address drops
+  // every OTHER room it was in, which is a real fact worth reporting, not the
+  // hardcoded `undefined` this returned before — the "one, same room" no-op
+  // case still yields `undefined` from `ensureMembership` itself, unchanged.
+  return { ok: true, room: updated, member, created: false, movedFrom }
 }
 
 async function leaveCurrent(
