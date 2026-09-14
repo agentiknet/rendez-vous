@@ -1564,7 +1564,7 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
       const outcome = await service.requestIdentityRecovery(code, memberId)
       switch (outcome.kind) {
         case "sent":
-          return "sent"
+          return "accepted"
         case "no-surface":
           return "no-surface"
         case "conflict":

@@ -505,6 +505,33 @@ test("a repeated stream failure escalates to the reused failure banner, and one 
   assert.equal(outboxFailureVisible(state), true, "three in a row is no longer plausibly transient — the banner must show")
 })
 
+// --- BRIEF-23A finding 1: the recovery URL scrub runs unconditionally, not only on success ---
+
+test("BRIEF-23A: a redemption whose fetch rejects leaves no recovery parameter in the URL and still shows the failure sentence — the scrub runs before the conditional, not inside the success arm", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks())
+  const fnStart = html.indexOf("async function applyRecoveryFromUrl() {")
+  assert.ok(fnStart > 0, "applyRecoveryFromUrl must be embedded in the page")
+
+  const scrubIdx = html.indexOf("history.replaceState(null, \"\", location.pathname);", fnStart)
+  assert.ok(scrubIdx > fnStart, "the URL scrub must be inside applyRecoveryFromUrl")
+
+  const condIdx = html.indexOf("if (result.status === \"restored\")", fnStart)
+  assert.ok(condIdx > fnStart, "the restored-if conditional must be inside applyRecoveryFromUrl")
+
+  assert.ok(scrubIdx < condIdx, "history.replaceState must appear BEFORE the if/restored — unconditional scrub, not success-only")
+
+  const failArm = html.indexOf("recoveryFailureText(result.error)", fnStart)
+  assert.ok(failArm > fnStart, "the failure sentence must still render from result.error, not from the URL")
+  assert.ok(failArm > condIdx, "the failure arm must follow the restored conditional (still inside else)")
+})
+
+test("BRIEF-23A: the success path still scrubs the URL and stores the claim — finding 1's move must not regress the success path", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks())
+  assert.ok(html.includes("history.replaceState(null, \"\", location.pathname);"), "the URL scrub must be present somewhere in the page")
+  assert.ok(html.includes("setStoredClaim("), "the claim storage call (inside redeemRecovery) must still be embedded")
+  assert.ok(html.includes("nameErrorEl.style.display = \"none\""), "the success branch still hides the error element")
+})
+
 test("renderRoomPage ships the stream's failure text and reconnect parser verbatim, and a status line to render them into", () => {
   const html = renderRoomPage(fakeRoom(), fakeLinks())
   assert.ok(html.includes('id="stream-status"'), "the no_session sentence needs somewhere visible to land")

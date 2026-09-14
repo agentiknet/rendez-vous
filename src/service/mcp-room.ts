@@ -162,7 +162,7 @@ export interface McpRoomDeps {
   readonly recoverIdentity?: (
     code: string,
     memberId: string,
-  ) => Promise<"sent" | "no-surface" | "conflict" | "unknown">
+  ) => Promise<"accepted" | "no-surface" | "conflict" | "unknown">
 }
 
 // --- JSON-RPC / MCP wire handling: same hand-rolled surface as canvakit's
@@ -259,7 +259,7 @@ const WHISPER_TOOL = {
 const RECOVER_TOOL = {
   name: "recover_identity",
   description:
-    "When a member says they cannot get back into the web page under their name — they lost their link, changed device or browser, or cleared their data — call this with their member_id (from roster). The room sends a one-time recovery link to that member's OWN surface (the one they are already talking to you on), never to anywhere else, and the link restores only their own name. Returns {sent: true} or {sent: false, reason}. Do not paste any link yourself and do not promise anyone a name they did not already hold: a name someone else holds stays theirs.",
+    "When a member says they cannot get back into the web page under their name — they lost their link, changed device or browser, or cleared their data — call this with their member_id (from roster). The room sends a one-time recovery link to that member's OWN surface (the one they are already talking to you on), never to anywhere else, and the link restores only their own name. Returns {accepted: true} or {accepted: false, reason}. Do not paste any link yourself and do not promise anyone a name they did not already hold: a name someone else holds stays theirs.",
   inputSchema: {
     type: "object",
     properties: {
@@ -580,9 +580,9 @@ export function createMcpRoomHandler(
               // this result is projected on the room's shared screen, and the
               // recovery URL must never appear in it.
               text: JSON.stringify(
-                status === "sent"
-                  ? { sent: true, member_id: memberId }
-                  : { sent: false, member_id: memberId, reason: status },
+                status === "accepted"
+                  ? { accepted: true, member_id: memberId }
+                  : { accepted: false, member_id: memberId, reason: status },
               ),
             },
           ],

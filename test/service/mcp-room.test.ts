@@ -669,3 +669,34 @@ test("say through the contract advances spokenSeq; the room's own system records
   // race the suite's directory cleanup.
   await h.engine.drain(h.code)
 })
+
+// --- BRIEF-23A finding 4: `sent` overclaims delivery — the field and description must follow the house convention ---
+
+test("BRIEF-23A: recover_identity result carries no field named 'sent', and the tool description does not promise delivery", async () => {
+  const deps: McpRoomDeps = {
+    rooms: () => [room(ROOM_A, MEMBERS_A)],
+    deliveries: { accept: async () => ({ accepted: [], unknown: [] }) },
+    recoverIdentity: async (_code, _memberId) => "accepted",
+  }
+  const handler = createMcpRoomHandler(deps)
+
+  // tools/list: the description must not promise delivery
+  const list = asRpc(await handler({ jsonrpc: "2.0", id: 1, method: "tools/list" }, undefined))
+  const tools = list.result?.tools as { name: string; description: string }[] | undefined
+  assert.ok(tools !== undefined)
+  const recoverTool = tools.find((tool) => tool.name === "recover_identity")
+  assert.ok(recoverTool !== undefined, "recover_identity must be advertised when the dep is wired")
+  assert.ok(!recoverTool.description.includes("delivered"), "the tool description must not promise delivery")
+  assert.ok(!recoverTool.description.includes("{sent:"), "the tool description must not mention sent")
+
+  // tools/call: the result must not carry a field named `sent`
+  const call = asRpc(await handler(
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "recover_identity", arguments: { member_id: "m1" } } },
+    tokenFor(ROOM_A),
+  ))
+  assert.equal(call.status, 200)
+  const content = call.result?.content as { text: string }[] | undefined
+  assert.ok(Array.isArray(content) && content.length === 1)
+  const payload = JSON.parse(String(content[0]?.text ?? "{}")) as Record<string, unknown>
+  assert.ok(!("sent" in payload), "the result must not carry a field named 'sent'")
+})

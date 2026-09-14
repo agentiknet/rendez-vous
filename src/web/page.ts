@@ -644,9 +644,9 @@ function script(code: string, room: Room, agentBusy: boolean): string {
         fetchImpl: function (input, init) { return fetch(input, init); },
         setStoredClaim: function (key, value) { localStorage.setItem(key, value); },
       });
+      history.replaceState(null, "", location.pathname);
       if (result.status === "restored") {
         nameErrorEl.style.display = "none";
-        history.replaceState(null, "", location.pathname);
       } else {
         nameErrorEl.textContent = recoveryFailureText(result.error);
         nameErrorEl.style.display = "";

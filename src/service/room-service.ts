@@ -791,7 +791,7 @@ export class RoomService {
       createdAt: now,
       expiresAt: now + RECOVERY_LINK_TTL_MS,
     }
-    await this.store.update(code, { recoveries: [...pruneRecoveryLinks(room.recoveries ?? [], now), link] })
+    await this.store.update(code, { recoveries: [...pruneRecoveryLinks(room.recoveries ?? [], now).filter((candidate) => candidate.requestedBy !== requester.id), link] })
 
     const url = `${env.publicUrl}/r/${room.code}?recover=${encodeURIComponent(link.token)}&name=${encodeURIComponent(displayName)}`
     await this.sender.send(code, requester, { text: recoveryLinkText(url), artifactUrl: undefined })
@@ -817,17 +817,12 @@ export class RoomService {
     if (now >= link.expiresAt) return { kind: "expired" }
     if (slugify(displayName) !== slugify(link.displayName)) return { kind: "wrong-member" }
 
-    // Burn first, in the same write that records it: a second redemption
-    // reads `usedAt` and stops. Nothing is removed or recreated — the member
-    // record and its id survive, which is what keeps the backlog attached
-    // (docs/OUTBOX.md §7.1).
-    const burned = (room.recoveries ?? []).map((candidate) =>
-      candidate.token === token ? { ...candidate, usedAt: now } : candidate,
-    )
-    await this.store.update(code, { recoveries: burned })
-
+    // Restore FIRST — the claim is idempotent (docs/OUTBOX.md §7.1), so
+    // re-running it yields the same claim. Doing it before the burn turns
+    // a permanent loss into, at worst, a link that stays redeemable slightly
+    // longer.
     const contactRef = slugify(link.displayName)
-    const existing = (this.store.get(code)?.members ?? []).find(
+    const existing = (room.members ?? []).find(
       (member) => member.address.provider === "room-web" && member.address.contactRef === contactRef,
     )
     const claim = existing?.claim ?? mintClaim()
@@ -837,6 +832,19 @@ export class RoomService {
       address: { provider: "room-web", source: "room-web", contactRef },
       claim,
     })
+
+    // Re-read the room after the await. A concurrent caller may have burned
+    // the token while we were restoring — if so, the restore was idempotent
+    // and we return the same result without burning again.
+    const refreshed = this.store.get(code)
+    const stillLive = (refreshed?.recoveries ?? []).find((candidate) => candidate.token === token)
+    if (stillLive === undefined || stillLive.usedAt !== undefined) {
+      return { kind: "restored", member, claim: member.claim ?? claim }
+    }
+    const burned = (refreshed?.recoveries ?? []).map((candidate) =>
+      candidate.token === token ? { ...candidate, usedAt: now } : candidate,
+    )
+    await this.store.update(code, { recoveries: burned })
     return { kind: "restored", member, claim: member.claim ?? claim }
   }
 

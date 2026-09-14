@@ -330,6 +330,109 @@ test("BRIEF-23: a room-web-only member is told there is no way to prove them, wi
   assert.ok(!text.includes("recover="), "and it is not a link")
 })
 
+// --- BRIEF-23A finding 2: restore-first ordering prevents a crash between burn and restore from stranding the member ---
+
+test("BRIEF-23A: after redemption the claim is restored and the token is burned — restore-first ordering means a crash after restore does not strand the member", async () => {
+  const h = await recoveryHarness()
+  const outcome = await h.service.requestIdentityRecovery(h.code, h.bob.id)
+  assert.equal(outcome.kind, "sent")
+  if (outcome.kind !== "sent") return
+  const token = tokenOf(outcome.url)
+
+  // Redeem (with the finding-2 fix: restore first, burn second)
+  const redeemed = await postJson(h.baseUrl, `/rooms/${h.code}/recover`, { token, displayName: "Bob" })
+  assert.equal(redeemed.status, 200)
+
+  // A claim was returned — the browser can store it
+  const claim = typeof redeemed.body.claim === "string" ? redeemed.body.claim : ""
+  assert.ok(claim.length > 0, "a claim was returned from the redemption")
+
+  // The member is NOT stranded: they can send with the returned claim
+  const sent = await postJson(h.baseUrl, `/rooms/${h.code}/send`, {
+    displayName: "Bob",
+    text: "I am back",
+    claim,
+  })
+  assert.equal(sent.status, 200, "the member is restored and can send — not stranded")
+
+  // The token IS burned: second redemption fails
+  const second = await postJson(h.baseUrl, `/rooms/${h.code}/recover`, { token, displayName: "Bob" })
+  assert.equal(second.status, 409)
+  assert.equal(second.body.error, "invalid_token", "the token was burned — second redemption refused")
+
+  // Store-level proof: the web member for Bob was created
+  const room = h.store.get(h.code)
+  assert.ok(room !== undefined)
+  const webBob = room.members.find((m) => m.displayName === "Bob" && m.tier === "room-web")
+  assert.ok(webBob !== undefined, "the web member for Bob exists — the restore completed")
+  assert.ok(typeof webBob.claim === "string" && webBob.claim.length > 0, "the web member has a claim")
+})
+
+// --- BRIEF-23A finding 3: minting revokes the member's outstanding unburned links ---
+
+test("BRIEF-23A: minting a second recovery link for a member revokes the first, and a different member's outstanding link is unaffected", async () => {
+  const h = await recoveryHarness()
+
+  // First link for Alice
+  const first = await h.service.requestIdentityRecovery(h.code, h.alice.id)
+  assert.equal(first.kind, "sent")
+  if (first.kind !== "sent") return
+  const firstToken = tokenOf(first.url)
+
+  // Second link for Alice — must revoke the first
+  const second = await h.service.requestIdentityRecovery(h.code, h.alice.id)
+  assert.equal(second.kind, "sent")
+  if (second.kind !== "sent") return
+
+  // The first link is revoked
+  const firstRedeem = await postJson(h.baseUrl, `/rooms/${h.code}/recover`, { token: firstToken, displayName: "Alice" })
+  assert.equal(firstRedeem.status, 409)
+  assert.equal(firstRedeem.body.error, "invalid_token", "the first link was revoked by the second mint (no longer in recoveries)")
+
+  // The second link works
+  const secondToken = tokenOf(second.url)
+  const secondRedeem = await postJson(h.baseUrl, `/rooms/${h.code}/recover`, { token: secondToken, displayName: "Alice" })
+  assert.equal(secondRedeem.status, 200, "the freshly minted link works")
+
+  // A DIFFERENT member's outstanding link is unaffected
+  const bobLink = await h.service.requestIdentityRecovery(h.code, h.bob.id)
+  assert.equal(bobLink.kind, "sent")
+  if (bobLink.kind !== "sent") return
+  const bobToken = tokenOf(bobLink.url)
+  const bobRedeem = await postJson(h.baseUrl, `/rooms/${h.code}/recover`, { token: bobToken, displayName: "Bob" })
+  assert.equal(bobRedeem.status, 200, "a different member's link is unaffected by Alice's revocation")
+})
+
+// --- BRIEF-23A concurrency: restore-first with a re-read closes the race two concurrent redemptions can create ---
+
+test("BRIEF-23A: two concurrent redemptions of the same token both succeed with the same claim, and the token ends burned once", async () => {
+  const h = await recoveryHarness()
+  const outcome = await h.service.requestIdentityRecovery(h.code, h.alice.id)
+  assert.equal(outcome.kind, "sent")
+  if (outcome.kind !== "sent") return
+  const token = tokenOf(outcome.url)
+
+  const body = { token, displayName: "Alice" }
+  // Fire both concurrently — neither sees the other's burn in the first check
+  const [a, b] = await Promise.all([postJson(h.baseUrl, `/rooms/${h.code}/recover`, body), postJson(h.baseUrl, `/rooms/${h.code}/recover`, body)])
+
+  assert.equal(a.status, 200, "first concurrent redemption succeeded")
+  assert.equal(b.status, 200, "second concurrent redemption also succeeded")
+  assert.equal(a.body.claim, b.body.claim, "both callers received the SAME claim (restore is idempotent)")
+
+  // The token is burned exactly once: a third sequential attempt fails
+  const third = await postJson(h.baseUrl, `/rooms/${h.code}/recover`, body)
+  assert.equal(third.status, 409)
+  assert.equal(third.body.error, "invalid_token", "the token was burned — only one burn happened")
+
+  // Store-level proof: the token has usedAt set
+  const room = h.store.get(h.code)
+  assert.ok(room !== undefined)
+  const link = (room.recoveries ?? []).find((candidate) => candidate.token === token)
+  assert.ok(link !== undefined)
+  assert.ok(typeof link.usedAt === "number", "the token was burned exactly once")
+})
+
 // 8. The capability must not ride the public projection: the room JSON and
 //    the page's embedded INITIAL_ROOM are handed to ANY caller/spectator, and
 //    an unspent token there hands the identity away.
