@@ -21,7 +21,7 @@ import { MemberSender } from "./member-send.ts"
 import { OpenAiTtsProvider } from "../media/openai.ts"
 import { MediaStore } from "./media-store.ts"
 import { buildSessionRecap } from "./recap.ts"
-import { hasSendMedia } from "./transports.ts"
+import { hasSendMedia, type OutboundAttachment } from "./transports.ts"
 
 /** What every member-facing surface shows instead of `room.artifactUrl`
  *  (architecture.md §9.3b): the raw e2b URL is a pure function of sandbox id
@@ -331,7 +331,7 @@ export class RoomService {
   private readonly booter: SessionBooter
   private readonly transport: Transport
   private readonly daemon: DaemonExtraOptions
-  private readonly mediaStore: MediaStore
+  readonly mediaStore: MediaStore
   private readonly deliverable: DeliverableService
   /** The delivery half of the room audience tools (PLAN §3.2/§3.3): the
    *  `say`/`whisper` MCP handlers accept into this, and it drains off the
@@ -628,6 +628,17 @@ export class RoomService {
     const room = this.store.get(code)
     if (room === undefined) return undefined
     return this.mediaStore.read(room.code, id)
+  }
+
+  /** Deliver a voice-note attachment (from `[[say …]]` marker rendering in
+   *  a say/whisper call) to one member, through the same ONE send path every
+   *  other room-authored message uses (MemberSender). */
+  async deliverAttachment(code: string, memberId: string, attachment: OutboundAttachment): Promise<void> {
+    const room = this.store.get(code)
+    if (room === undefined) return
+    const member = room.members.find((candidate) => candidate.id === memberId)
+    if (member === undefined) return
+    await this.sender.sendAttachment(code, member, attachment)
   }
 
   async daemonHealth(): Promise<HealthResult | "unreachable"> {

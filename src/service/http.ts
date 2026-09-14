@@ -11,7 +11,7 @@ import {
 } from "../channels/media-ingress.ts"
 import { AgentpushMediaFetcher } from "../channels/agentpush/media-fetch.ts"
 import { TelegramMediaResolver } from "../channels/telegram-media.ts"
-import { OpenAiSttProvider, OpenAiVisionProvider } from "../media/openai.ts"
+import { OpenAiSttProvider, OpenAiTtsProvider, OpenAiVisionProvider } from "../media/openai.ts"
 import type { TranscriptRecord } from "../daemon/records.ts"
 import { env } from "../env.ts"
 import { joinLinks } from "../links/index.ts"
@@ -30,7 +30,7 @@ import {
 import { proxyArtifact, publicArtifactUrl } from "./artifact-proxy.ts"
 import { ArtifactRenderStore, type ArtifactRenderRecord } from "./artifact-renders.ts"
 import { createMcpCanvakitHandler, defaultMcpCanvakitDeps, type McpResponse } from "./mcp-canvakit.ts"
-import { bearerOf, createMcpRoomHandler, memberToken, tokensMatch } from "./mcp-room.ts"
+import { bearerOf, createMcpRoomHandler, memberToken, tokensMatch, type McpRoomDeps } from "./mcp-room.ts"
 import { createMcpPersonalHandler } from "./mcp-personal.ts"
 import { getSessionBusy, type DaemonExtraOptions } from "./daemon-extra.ts"
 import { nameClaimedMessage, type RoomService, type RoomWebSendOutcome } from "./room-service.ts"
@@ -1498,6 +1498,47 @@ export interface HttpStateHooks {
   daemon?: DaemonExtraOptions
 }
 
+/** The room MCP handler deps as `createHttpServer` wires them — exported so
+ *  the composition root is testable. An absent `openaiKey` produces the same
+ *  graceful fallback the fan-out path uses (no voice notes, spoken words as
+ *  text), and `roomMcpDeps` makes it honest: the handler deps either carry
+ *  all three keys or none. */
+export function roomMcpDeps(
+  service: RoomService,
+  getStoredRender: (code: string) => Promise<ArtifactRenderRecord | undefined>,
+  openaiKey?: string,
+): McpRoomDeps {
+  const recoverIdentity: McpRoomDeps["recoverIdentity"] = async (code, memberId) => {
+    const outcome = await service.requestIdentityRecovery(code, memberId)
+    switch (outcome.kind) {
+      case "sent":
+        return "accepted"
+      case "no-surface":
+        return "no-surface"
+      case "conflict":
+        return "conflict"
+      case "unknown-code":
+      case "unknown-member":
+        return "unknown"
+    }
+  }
+  const deps: McpRoomDeps = {
+    rooms: () => service.listRooms(),
+    deliveries: service.deliveryEngine,
+    storedRender: getStoredRender,
+    recoverIdentity,
+    ...(openaiKey !== undefined
+      ? {
+          tts: new OpenAiTtsProvider(openaiKey),
+          mediaStore: service.mediaStore,
+          deliverAttachment: (code, memberId, attachment) =>
+            service.deliverAttachment(code, memberId, attachment),
+        }
+      : {}),
+  }
+  return deps
+}
+
 export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHooks, stateHooks?: HttpStateHooks): Server {
   const dedup = new MessageDedup()
   const media = resolveMediaIngress(mediaHooks)
@@ -1516,31 +1557,7 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
       await service.deliveryEngine.recordToolCall(code, toolName, args)
     },
   })
-  const mcpRoom = createMcpRoomHandler({
-    rooms: () => service.listRooms(),
-    deliveries: service.deliveryEngine,
-    // The SAME lookup `GET /r/:code/state` answers from, deliberately: the
-    // agent's `room_view` and the members' page must never disagree about
-    // whether a document exists.
-    storedRender: getStoredRender,
-    // BRIEF-23: `recover_identity` routes to the one recovery path, whose
-    // result is reduced to a status (`unknown` folds the two not-found arms)
-    // so the tool result carries no URL — see `RECOVER_TOOL`.
-    recoverIdentity: async (code, memberId) => {
-      const outcome = await service.requestIdentityRecovery(code, memberId)
-      switch (outcome.kind) {
-        case "sent":
-          return "accepted"
-        case "no-surface":
-          return "no-surface"
-        case "conflict":
-          return "conflict"
-        case "unknown-code":
-        case "unknown-member":
-          return "unknown"
-      }
-    },
-  })
+  const mcpRoom = createMcpRoomHandler(roomMcpDeps(service, getStoredRender, env.openaiApiKey))
   const mcpPersonal = createMcpPersonalHandler({
     rooms: () => service.listRooms(),
     findByAddress: (address) => service.findByAddress(address),

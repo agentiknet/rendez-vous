@@ -11,7 +11,7 @@ import type { Delivery, Member } from "../../src/rooms/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import { ArtifactRenderStore } from "../../src/service/artifact-renders.ts"
 import { LocalBooter, type SessionBooter } from "../../src/service/booter.ts"
-import { createHttpServer } from "../../src/service/http.ts"
+import { createHttpServer, roomMcpDeps } from "../../src/service/http.ts"
 import { MediaStore } from "../../src/service/media-store.ts"
 import { memberToken } from "../../src/service/mcp-room.ts"
 import { RoomService, type RoomWebSendOutcome } from "../../src/service/room-service.ts"
@@ -2063,4 +2063,35 @@ test("POST /rooms/:code/pause then resume brings the room back — the beat the 
   if (resumed.kind !== "resumed") throw new Error("unreachable")
   assert.equal(resumed.room.state, "active")
   assert.ok(resumed.room.sessionId !== undefined, "resumed room has a live session")
+})
+
+// --- BRIEF-31: the composition root wires TTS deps into the MCP room handler ---
+
+test("BRIEF-31: roomMcpDeps wires tts/mediaStore/deliverAttachment when openai key given, omits all three when absent", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const transport = new MemoryTransport()
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
+  services.push(service)
+  const getStoredRender = async () => undefined
+
+  const withKey = roomMcpDeps(service, getStoredRender, "sk-openai-key")
+  assert.ok(withKey.tts !== undefined, "tts provider must be wired when openai key is given")
+  assert.ok(withKey.mediaStore !== undefined, "mediaStore must be wired when openai key is given")
+  assert.ok(withKey.deliverAttachment !== undefined, "deliverAttachment must be wired when openai key is given")
+
+  const withoutKey = roomMcpDeps(service, getStoredRender)
+  assert.equal(withoutKey.tts, undefined, "tts omitted without openai key")
+  assert.equal(withoutKey.mediaStore, undefined, "mediaStore omitted without openai key")
+  assert.equal(withoutKey.deliverAttachment, undefined, "deliverAttachment omitted without openai key")
 })
