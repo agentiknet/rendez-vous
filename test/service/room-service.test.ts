@@ -1514,3 +1514,107 @@ test("BRIEF-36 presence: an inbound from a pull member stamps their liveness —
   const rosterEntry = roster.members.find((candidate) => candidate.memberId === webMember.id)
   assert.equal(rosterEntry?.presence, "present", "the roster must agree with the delivery path")
 })
+
+// ---------------------------------------------------------------------------
+// BRIEF 40: prompts queue. The next turn-end that flushes is not necessarily
+// the turn that carries a member's message — beats arrived faster than the
+// agent could answer, and the room announced a failure that had not
+// happened, while the answer was being written. The obligation therefore
+// carries the sequence number of the prompt that created it and is judged
+// only once the reader has counted that many turn-ends. Never a fixed
+// offset: a burst of any size, from any number of members, is handled by
+// the same comparison.
+// ---------------------------------------------------------------------------
+
+test("BRIEF-40: a message queued behind a running turn is judged only by its own turn — no warning while the answer is still being written", async () => {
+  const { service, store, transport, daemon, code, aliceId, sessionId } = await brief36Room()
+
+  // Carol's join announcement is prompt #1: the turn that is running when
+  // alice's message arrives and queues behind it (the measured rehearsal
+  // shape — the previous beat's answer was still being written).
+  const joined = await service.handleInbound(carol(`join ${code}`))
+  assert.equal(joined.kind, "joined")
+
+  // alice's message: prompt #2. The obligation belongs to THIS prompt.
+  const inbound = await service.handleInbound(alice("Garde ça entre nous : est-ce qu'on vend trop cher ?"))
+  assert.equal(inbound.kind, "message")
+
+  // Turn 1 — the announcement's turn, not alice's — ends minting nothing
+  // for her. It must not judge her still-queued message.
+  await runDaemonTurn(daemon, sessionId, store, code, 1, "bienvenue Carol")
+
+  // The answer is minted on the NEXT turn: the mint itself discharges.
+  await service.deliveryEngine.accept(code, "say", "Le transfert aéroport est déjà dans le budget…", [aliceId])
+  await runDaemonTurn(daemon, sessionId, store, code, 3, "la réponse")
+
+  assert.equal(replyWarnings(transport).length, 0, "a message still waiting in the queue must not be judged as unanswered")
+})
+
+test("BRIEF-40: a burst of three queued inbounds answered later produces no warning — and not one per queued message either", async () => {
+  const { service, store, transport, daemon, code, aliceId, sessionId } = await brief36Room()
+
+  const joined = await service.handleInbound(carol(`join ${code}`))
+  assert.equal(joined.kind, "joined")
+
+  // Three messages from one member queue behind the running turn: prompts
+  // #2, #3, #4. The obligation belongs to the LAST of them (brief 40) — one
+  // reply answers the whole burst, so one slot, not three.
+  for (const text of ["première question", "deuxième question", "troisième question"]) {
+    const inbound = await service.handleInbound(alice(text))
+    assert.equal(inbound.kind, "message")
+  }
+
+  await runDaemonTurn(daemon, sessionId, store, code, 1, "bienvenue Carol")
+
+  // The burst is answered, once, several turns later: the mint discharges
+  // the slot no matter which of the three turns it lands in.
+  await service.deliveryEngine.accept(code, "say", "On en était là, et pour vos trois questions…", [aliceId])
+  for (const seq of [3, 5, 7]) {
+    await runDaemonTurn(daemon, sessionId, store, code, seq, "tournant")
+  }
+
+  assert.equal(replyWarnings(transport).length, 0, "a burst answered by one reply must not warn once per queued message")
+})
+
+test("BRIEF-40: two members interleaved — the answered one stays silent, the one never answered fires exactly once, to her alone", async () => {
+  const { service, store, transport, daemon, code, aliceId, sessionId } = await brief36Room()
+
+  const joined = await service.handleInbound(carol(`join ${code}`))
+  assert.equal(joined.kind, "joined")
+  if (joined.kind !== "joined") return
+  const carolId = joined.member.id
+
+  // Both speak while the announcement's turn is running: alice prompt #2,
+  // carol prompt #3. The obligation belongs to carol — the last speaker.
+  await service.handleInbound(alice("ma question"))
+  await service.handleInbound(carol("et la mienne ?"))
+
+  await runDaemonTurn(daemon, sessionId, store, code, 1, "bienvenue Carol")
+
+  // The agent answers alice — and only alice — during alice's own turn.
+  await service.deliveryEngine.accept(code, "say", "Réponse à alice.", [aliceId])
+  await runDaemonTurn(daemon, sessionId, store, code, 3, "le tour d'alice")
+
+  // Carol's turn ends and mints nothing for her: exactly one warning, to
+  // her alone — alice was answered, and carol's slot was never discharged
+  // by alice's mint.
+  await runDaemonTurn(daemon, sessionId, store, code, 5, "le tour de Carol")
+
+  const warnings = replyWarnings(transport)
+  assert.equal(warnings.length, 1, "the genuinely unanswered member fires exactly once")
+  assert.equal(warnings[0]?.member.id, carolId, "the warning goes to the member who was not answered")
+})
+
+test("BRIEF-40: genuine silence — the turn that carried the message ended and minted nothing — still fires once, to that member alone", async () => {
+  const { service, store, transport, daemon, code, aliceId, sessionId } = await brief36Room()
+
+  // Prompt #1, no queue: this turn IS the turn that carries the message.
+  const inbound = await service.handleInbound(alice("hello?"))
+  assert.equal(inbound.kind, "message")
+
+  await runDaemonTurn(daemon, sessionId, store, code, 1, "prose only, no tool call")
+
+  const warnings = replyWarnings(transport)
+  assert.equal(warnings.length, 1, "a genuinely unanswered message still fires, exactly once")
+  assert.equal(warnings[0]?.member.id, aliceId)
+})

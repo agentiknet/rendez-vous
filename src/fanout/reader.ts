@@ -186,6 +186,8 @@ export class RoomFanout {
    *  inbound, or the obligation already discharged) means the fact does not
    *  exist, so the assertion is skipped — never guessed. */
   private readonly triggeredBy: (code: string) => string | undefined
+  private readonly onTurnEnd: ((code: string) => void) | undefined
+  private readonly onReaderStart: ((code: string) => void) | undefined
 
   /** Both undefined unless TTS is configured. `[[say …]]` needs somewhere to
    *  put the rendered audio (the media store, which the artifact-independent
@@ -216,11 +218,26 @@ export class RoomFanout {
     probeUrl?: ArtifactProbe
     reportUnservable?: (code: string, correction: string) => Promise<void>
     /** Assertion 4's fact (BRIEF-15, post-turn-assertions) — see
-     *  `triggeredBy`'s doc. One-shot in production (brief 36): the wiring
-     *  consumes the fact on read, so each inbound is checked exactly once.
-     *  Omitted in every existing harness that never wires it, which is
-     *  exactly "no fact, skip the assertion". */
+     *  `triggeredBy`'s doc. One-shot in production (brief 36), and due only
+     *  once the turn that carries the member's message has actually ended
+     *  (brief 40): the wiring answers `undefined` while the message is
+     *  still queued, WITHOUT discharging, and hands the member over on the
+     *  first read at or after their turn's end. Omitted in every existing
+     *  harness that never wires it, which is exactly "no fact, skip the
+     *  assertion". */
     triggeredBy?: (code: string) => string | undefined
+    /** Brief 40: called for EVERY turn-end record the reader consumes,
+     *  whether or not the turn flushes (a turn with no text mints nothing
+     *  and still ends). `RoomService` counts these against the prompts it
+     *  has fanned in, so an obligation is judged only by a turn that could
+     *  actually have carried the answer. */
+    onTurnEnd?: (code: string) => void
+    /** Brief 40: called when a reader for `code` (re)starts, BEFORE its
+     *  first flush. `RoomService` resets its prompt/turn counters here so
+     *  the two sides of the due-ness comparison restart in step; the
+     *  outstanding obligation is lost with them, which is the established
+     *  restart posture: the first turn after a restart skips the check. */
+    onReaderStart?: (code: string) => void
   }) {
     this.store = opts.store
     this.sender =
@@ -237,6 +254,8 @@ export class RoomFanout {
     this.probeUrl = opts.probeUrl ?? probeArtifactUrl
     this.reportUnservable = opts.reportUnservable
     this.triggeredBy = opts.triggeredBy ?? (() => undefined)
+    this.onTurnEnd = opts.onTurnEnd
+    this.onReaderStart = opts.onReaderStart
   }
 
   start(code: string): void {
@@ -254,6 +273,10 @@ export class RoomFanout {
     this.lastSpokenSeq.set(code, room.spokenSeq ?? 0)
     // Same seeding reasoning, for assertion 4's own baseline.
     this.lastDeliverySeq.set(code, room.deliverySeq ?? 0)
+    // Brief 40: the wiring resets its prompt/turn counters in step, so the
+    // due-ness comparison starts aligned at 0 — and the outstanding
+    // obligation is dropped, the established restart posture.
+    this.onReaderStart?.(code)
 
     const controller = new AbortController()
     const done = this.runLoop(code, controller.signal).catch(() => undefined)
@@ -314,6 +337,10 @@ export class RoomFanout {
         continue
       }
       if (record.kind === "turn-end") {
+        // Counted whether or not the turn flushes: a turn that mints no
+        // text still ended, and the due-ness comparison (brief 40) must not
+        // drift whenever one does.
+        this.onTurnEnd?.(code)
         if (buffer.length > 0) {
           await this.flush(code, buffer, record.seq)
         }

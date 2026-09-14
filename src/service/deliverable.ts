@@ -360,6 +360,12 @@ export interface DeliverableServiceOptions {
   readonly renderPdf?: RenderPdfFn
   readonly now?: () => number
   readonly expiryMs?: number
+  /** Brief 40: called for every `queue: true` prompt this service sends
+   *  (`postSystemNote`) — each occupies one of the session's turns, and the
+   *  assertion-4 due-ness comparison in `RoomService` drifts by a turn for
+   *  every prompt that escapes its count. Optional; unwired in tests that
+   *   don't exercise the assertion. */
+  readonly onPromptQueued?: (roomCode: string) => void
 }
 
 function defaultFetchHtml(url: string): Promise<string> {
@@ -380,6 +386,7 @@ export class DeliverableService {
   private readonly renderPdf: RenderPdfFn
   private readonly now: () => number
   private readonly expiryMs: number
+  private readonly onPromptQueued: ((roomCode: string) => void) | undefined
   private readonly pending = new Map<string, PendingDelivery>()
 
   constructor(opts: DeliverableServiceOptions) {
@@ -393,6 +400,7 @@ export class DeliverableService {
     this.renderPdf = opts.renderPdf ?? ((html, title, outPath) => renderArtifactPdf(html, title, outPath))
     this.now = opts.now ?? Date.now
     this.expiryMs = opts.expiryMs ?? DEFAULT_EXPIRY_MS
+    this.onPromptQueued = opts.onPromptQueued
 
     if (opts.store !== undefined) {
       const expired = this.hydrateFromStore(opts.store)
@@ -494,6 +502,7 @@ export class DeliverableService {
       console.warn(`[deliverable] room ${room.code} has no live session — not recorded in the daemon transcript: ${text}`)
       return
     }
+    this.onPromptQueued?.(room.code)
     const result = await this.client.prompt(room.sessionId, {
       prompt: `[system · delivery] ${text} (no reply needed)`,
       queue: true,

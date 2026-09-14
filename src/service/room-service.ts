@@ -355,24 +355,46 @@ export class RoomService {
   private readonly sender: MemberSender
   private readonly fanout: RoomFanout
   /** Assertion 4's fact (BRIEF-15, post-turn-assertions): the member whose
-   *  inbound message started this room's turn, set right before
+   *  inbound message the room still owes an answer, set right before
    *  `handleMessage` fans it into the session and read back by the fan-out's
    *  post-turn check via `triggeredBy`. A ONE-SHOT obligation (brief 36),
    *  not a standing property of the room, discharged by whichever comes
    *  first: a `say`/`whisper`/`system` mint addressed to this member (the
    *  delivery engine's `onMint` — the resume banner answers here, since it
    *  is minted while no reader exists and no window can ever contain it),
-   *  or the first post-turn check that reads it. Once discharged, a later
-   *  turn that member did not start (an idle sweep, a resume, another
-   *  member's message) is never judged against it. The old
+   *  or the first post-turn check that reads it once it is DUE. Once
+   *  discharged, a later turn that member did not start (an idle sweep, a
+   *  resume, another member's message) is never judged against it. The old
    *  set-and-never-cleared shape made the fact mean "who most recently
    *  sent anything, possibly long ago", so a turn the agent ended without
    *  speaking — after the member had already been answered — fired "your
    *  message did not get a reply" at someone who had just been answered:
    *  delivery reading as absence. In-process only, like `lastSeenCursor`
    *  below — a restart loses the fact, which just means the first turn
-   *  after a restart skips the assertion rather than guessing. */
-  private readonly lastInboundMemberId = new Map<string, string>()
+   *  after a restart skips the assertion rather than guessing.
+   *
+   *  Brief 40 adds WHEN the check may read it at all: prompts queue, so the
+   *  next turn-end that flushes is not necessarily the turn that carries
+   *  this message — judging there fires at a member whose answer is still
+   *  being written. The obligation therefore carries the sequence number of
+   *  the prompt that created it, and `dueAnswer` hands it over only once
+   *  the reader has counted that many turn-ends. A later inbound from
+   *  anyone OVERWRITES the slot (brief 40: the obligation belongs to the
+   *  last of a burst — an earlier queued message from the same member is
+   *  answered by the same reply, and an earlier member's message is
+   *  subsumed by the later speaker's). */
+  private readonly outstandingAnswer = new Map<string, { memberId: string; promptSeq: number }>()
+  /** How many `queue: true` prompts this service has fanned into each
+   *  room's session since its reader last (re)started — EVERY one, member
+   *  messages, join announcements, unservable corrections and delivery
+   *  notes alike, because each occupies exactly one turn and the
+   *  due-ness comparison drifts if any escapes the count. Reset by the
+   *  reader's `onReaderStart`. */
+  private readonly promptSeqs = new Map<string, number>()
+  /** How many turn-end records the reader has consumed per room since it
+   *  last (re)started, reported back through `onTurnEnd`. The fan-out side
+   *  of the brief-40 due-ness comparison. */
+  private readonly turnEndsSeen = new Map<string, number>()
   private readonly idlePauseMs: number
   private readonly idleSweepMs: number
   private readonly boxProbeMs: number
@@ -471,6 +493,12 @@ export class RoomService {
         store: this.store,
         agentpush:
           env.agentpushUrl !== undefined ? new AgentpushToolClient({ baseUrl: env.agentpushUrl, apiKey: env.agentpushKey }) : undefined,
+        // Brief 40: the delivery note occupies one of the session's turns,
+        // so it must join the prompt count the assertion-4 due-ness check
+        // compares against.
+        onPromptQueued: (roomCode) => {
+          this.countPrompt(roomCode)
+        },
       })
     // TTS is optional: without a key, `[[say …]]` degrades to the sentence as
     // text rather than disappearing (src/fanout/reader.ts's `renderSpeech`).
@@ -495,9 +523,9 @@ export class RoomService {
       // never witness it; the mint itself is the only reliable witness.
       onMint: (code, kind, memberIds) => {
         if (kind !== "say" && kind !== "whisper" && kind !== "system") return
-        const trigger = this.lastInboundMemberId.get(code)
-        if (trigger === undefined || !memberIds.includes(trigger)) return
-        this.lastInboundMemberId.delete(code)
+        const entry = this.outstandingAnswer.get(code)
+        if (entry === undefined || !memberIds.includes(entry.memberId)) return
+        this.outstandingAnswer.delete(code)
       },
     })
     // The ONE send path outside DeliveryEngine (brief A): the room's own
@@ -517,18 +545,32 @@ export class RoomService {
       // over the ordinary fan-in path (queue: true — the agent may be
       // mid-turn; omitting it loses the message, STATE.md finding #1).
       reportUnservable: (code, correction) => this.reportUnservableArtifact(code, correction),
-      // Assertion 4 (BRIEF-15, post-turn-assertions): who started the turn
-      // the fan-out is about to flush, if it was an ordinary inbound message.
-      // One-shot (brief 36): reading it discharges it — but the mint path
-      // (`onMint` above) discharges it first when the turn's deliveries
-      // already answered the member, because a delivery minted outside any
-      // window (the resume banner) is invisible to this check. The
-      // obligation is asked once per inbound and never re-asked on a later
-      // turn that member did not start.
-      triggeredBy: (code) => {
-        const memberId = this.lastInboundMemberId.get(code)
-        this.lastInboundMemberId.delete(code)
-        return memberId
+      // Assertion 4 (BRIEF-15, post-turn-assertions): who the room still
+      // owes an answer, IF one is due (brief 40). The next turn-end that
+      // flushes is not necessarily the turn that carries the member's
+      // message — prompts queue — so the wiring answers `undefined` while
+      // the reader has not yet counted up to the member's prompt, WITHOUT
+      // discharging: the obligation stays armed for the turn that is
+      // actually theirs. One-shot (brief 36) once due; the mint path
+      // (`onMint` above) discharges it first when a delivery already
+      // answered the member, because a delivery minted outside any window
+      // (the resume banner) is invisible to this check. The obligation is
+      // asked once per inbound and never re-asked on a later turn that
+      // member did not start.
+      triggeredBy: (code) => this.dueAnswer(code),
+      // Brief 40: the two sides of the due-ness comparison. The reader
+      // counts every turn-end it consumes (flushing or not); the service
+      // counts every prompt it queues; an obligation is due only when the
+      // turn that carries it has ended. A reader (re)start resets both —
+      // and drops the outstanding obligation, the established restart
+      // posture.
+      onTurnEnd: (code) => {
+        this.turnEndsSeen.set(code, (this.turnEndsSeen.get(code) ?? 0) + 1)
+      },
+      onReaderStart: (code) => {
+        this.promptSeqs.delete(code)
+        this.turnEndsSeen.delete(code)
+        this.outstandingAnswer.delete(code)
       },
       ...(opts.probeUrl !== undefined ? { probeUrl: opts.probeUrl } : {}),
       ...(openaiKey !== undefined ? { tts: new OpenAiTtsProvider(openaiKey), mediaStore: this.mediaStore } : {}),
@@ -548,6 +590,7 @@ export class RoomService {
       console.warn(`[fanout] room ${code} has no live session — not reporting: ${correction}`)
       return
     }
+    this.countPrompt(code)
     const result = await this.client.prompt(room.sessionId, {
       prompt: correction,
       queue: true,
@@ -556,6 +599,32 @@ export class RoomService {
     if (!result.ok) {
       console.error(`[fanout] failed to report in room ${code}'s transcript: ${result.message}`)
     }
+  }
+
+  /** Count one `queue: true` prompt against the room's session (brief 40):
+   *  every prompt — a member's message, a join announcement, an unservable
+   *  correction, a delivery note — occupies exactly one turn, and the
+   *  assertion-4 due-ness comparison drifts by one turn for every prompt
+   *  that escapes the count. Returns the prompt's sequence number, which
+   *  the ordinary inbound path records on the obligation it creates. */
+  private countPrompt(code: string): number {
+    const seq = (this.promptSeqs.get(code) ?? 0) + 1
+    this.promptSeqs.set(code, seq)
+    return seq
+  }
+
+  /** Assertion 4's read side (brief 40): the outstanding obligation, but
+   *  only once DUE — the reader must have counted at least as many
+   *  turn-ends as the prompt that created it, i.e. the turn that carries
+   *  the member's message has actually ended. Reading a due obligation
+   *  discharges it (brief 36's one-shot); reading an UNDUE one discharges
+   *  nothing, so the judgement simply waits for the turn that is theirs. */
+  private dueAnswer(code: string): string | undefined {
+    const entry = this.outstandingAnswer.get(code)
+    if (entry === undefined) return undefined
+    if ((this.turnEndsSeen.get(code) ?? 0) < entry.promptSeq) return undefined
+    this.outstandingAnswer.delete(code)
+    return entry.memberId
   }
 
   private async reportUnservableArtifact(code: string, correction: string): Promise<void> {
@@ -976,6 +1045,11 @@ export class RoomService {
     }
     const { member } = resolved
 
+    // This is a member speaking into the room through the personal MCP —
+    // the prompt occupies a turn, so it must join the brief-40 count even
+    // though the assertion-4 obligation itself is only written on the
+    // ordinary inbound path.
+    this.countPrompt(room.code)
     const deliverableText = await this.resolveDeliverableText(room, member, text)
     if (deliverableText !== undefined) {
       await this.broadcast(room, deliverableText)
@@ -1158,6 +1232,7 @@ export class RoomService {
     const line = sameHuman
       ? `${member.displayName} just joined from another device (${member.address.provider}) — the same human already in this room. Nobody new has arrived, and the room has nothing to tell anyone: do not announce this.`
       : `${member.displayName} (${member.address.provider}) just joined this room — a new person, not greeted yet. Say one line that they have arrived.`
+    this.countPrompt(room.code)
     const result = await this.client.prompt(room.sessionId, {
       prompt: line,
       queue: true,
@@ -1400,8 +1475,11 @@ export class RoomService {
     // Assertion 4's fact (BRIEF-15, post-turn-assertions): recorded right
     // before the fan-in that starts the turn, so the fan-out's post-turn
     // check has someone to compare its deliveries against. One-shot (brief
-    // 36): the first check that reads it consumes it.
-    this.lastInboundMemberId.set(room.code, member.id)
+    // 36); the prompt sequence (brief 40) makes it due only once the turn
+    // that carries THIS message has ended — a later inbound overwrites the
+    // slot, because the obligation belongs to the last of a burst.
+    const promptSeq = this.countPrompt(room.code)
+    this.outstandingAnswer.set(room.code, { memberId: member.id, promptSeq })
     const result = await fanIn(this.client, room.sessionId, { ...member, channel: member.address.provider }, input.text)
     await this.touchActivity(room.code)
     if (!result.ok) {
