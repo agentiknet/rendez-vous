@@ -109,7 +109,7 @@ test("a mixed room: the push outsider's notice goes over the transport, the pull
   assert.ok(pullNotices[0]!.text.includes("whispered to Jeremy"))
 })
 
-test("the whispered-to human's second surface gets the whisper and NO notice", async () => {
+test("the whispered-to human's second surface gets neither the whisper nor a notice (BRIEF-43: the sibling is not widened in)", async () => {
   const { store, code, members } = await roomWith([
     ["Jeremy", "whatsapp", "messenger"],
     ["Jeremy", "telegram", "messenger"],
@@ -122,9 +122,13 @@ test("the whispered-to human's second surface gets the whisper and NO notice", a
   await delivery.accept(code, "whisper", "between us", [jeremy1.id])
   await delivery.drain(code)
 
+  // The sibling surface is treated as not-an-outsider by `sameHumanName`,
+  // so it receives NO notice — and, since BRIEF-43 removed the expansion,
+  // it also does not silently receive the whisper itself.
   const secondSurfaceNotices = systemRecordsFor(store, code, jeremy2.id)
   assert.equal(secondSurfaceNotices.length, 0)
-  assert.ok(transport.sends.some((send) => send.memberId === jeremy2.id && send.text.startsWith("(private)")))
+  assert.equal(transport.sends.some((send) => send.memberId === jeremy2.id), false)
+  assert.ok(transport.sends.some((send) => send.memberId === jeremy1.id && send.text.startsWith("(private)")))
 })
 
 test("no outsider record carries the whispered text", async () => {

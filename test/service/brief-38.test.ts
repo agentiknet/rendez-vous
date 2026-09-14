@@ -1,8 +1,11 @@
 /**
- * BRIEF-38: addressing a human addresses that human, on every surface they
- * are in the room on. A `say`/`whisper` resolved to one member id fans out
- * to every member of the room sharing that member's display name
- * (`sameHumanName`, BRIEF-37's one-human rule) — and to nobody else.
+ * BRIEF-43 reverses BRIEF-38's display-name expansion: a `say`/`whisper`
+ * resolved to one member id mints for THAT member only — a member_id is a
+ * surface, and addressing a whole human is the agent naming all their ids.
+ * These suites keep the properties around the removed expansion that must
+ * survive: the honest receipt, whisper privacy, no cross-name leakage, no
+ * unknown-id rescue, and the one-human rule where it still lives
+ * (`sameHumanName`, in the whisper notices).
  */
 import assert from "node:assert/strict"
 import { mkdtemp, rm } from "node:fs/promises"
@@ -54,7 +57,7 @@ function engine(store: RoomStore, transport: Transport): DeliveryEngine {
   return new DeliveryEngine({ store, transport, autoDrain: false })
 }
 
-test("say to ONE of a human's two ids mints a record for BOTH of them, and reports only the id that was sent", async () => {
+test("say to ONE of a human's two ids mints for that one only, and reports only the id that was sent", async () => {
   const { store, code, members } = await roomWith([
     ["Mathilde", "telegram"],
     ["Jeremy", "whatsapp"],
@@ -65,17 +68,18 @@ test("say to ONE of a human's two ids mints a record for BOTH of them, and repor
   const transport = new FakeTransport()
   const outcome = await engine(store, transport).accept(code, "say", "the recap", [jeremy1.id])
 
-  // The honest receipt: one id named, one id accepted — not two.
+  // The honest receipt, exact again (BRIEF-43): one id named, one id
+  // accepted, one record minted — the sibling surface is not widened in.
   assert.deepEqual(outcome.accepted, [jeremy1.id])
   assert.deepEqual(outcome.unknown, [])
 
   const minted = store.get(code)?.deliveries ?? []
-  const mintedFor = minted.map((delivery) => delivery.memberId).sort()
-  assert.deepEqual(mintedFor, [jeremy1.id, jeremy2.id].sort())
+  const mintedFor = minted.map((delivery) => delivery.memberId)
+  assert.deepEqual(mintedFor, [jeremy1.id])
   assert.ok(minted.every((delivery) => delivery.text === "the recap"))
 })
 
-test("whisper to one of a human's two ids reaches BOTH of that human's members and NO other member", async () => {
+test("whisper to one surface reaches that surface and NO other member — the sibling surface included", async () => {
   const { store, code, members } = await roomWith([
     ["Mathilde", "telegram"],
     ["Jeremy", "whatsapp"],
@@ -89,13 +93,15 @@ test("whisper to one of a human's two ids reaches BOTH of that human's members a
   await delivery.drain(code)
 
   const privateTexts = transport.sends.filter((send) => send.text.startsWith("(private)"))
-  // Arm 1 — both surfaces of the same human got the whisper itself.
+  // Arm 1 — exactly the named surface got the whisper itself.
   assert.deepEqual(
-    privateTexts.map((send) => send.memberId).sort(),
-    [jeremy1.id, jeremy2.id].sort(),
+    privateTexts.map((send) => send.memberId),
+    [jeremy1.id],
   )
-  // Arm 2 — nobody else saw the content, and the notice fired once as a
-  // system record, over the transport to the outsider (BRIEF-39 shape).
+  // Arm 2 — nobody else saw the content (the same human's other surface
+  // included), and the notice fired once as a system record, over the
+  // transport to the outsider (BRIEF-39 shape).
+  assert.ok(transport.sends.every((send) => send.memberId !== jeremy2.id || !send.text.includes("the real numbers")))
   assert.ok(transport.sends.every((send) => send.memberId !== mathilde.id || !send.text.includes("the real numbers")))
   const notices = transport.sends.filter((send) => send.text.includes("(the agent whispered to Jeremy)"))
   assert.equal(notices.length, 1)
@@ -130,7 +136,7 @@ test("an unknown member id still lands in `unknown` and mints nothing", async ()
   assert.deepEqual(store.get(code)?.deliveries ?? [], [])
 })
 
-test("name matching is case-insensitive: `jeremy` and `Jeremy` are one human", async () => {
+test("case-insensitive name matching stays the one-human rule where it still lives — the whisper notice", async () => {
   const { store, code, members } = await roomWith([
     ["Mathilde", "telegram"],
     ["Jeremy", "whatsapp"],
@@ -139,13 +145,19 @@ test("name matching is case-insensitive: `jeremy` and `Jeremy` are one human", a
   const [, jeremy1, jeremy2] = members
   if (jeremy1 === undefined || jeremy2 === undefined) throw new Error("roster incomplete")
   const transport = new FakeTransport()
-  await engine(store, transport).accept(code, "say", "caseless", [jeremy1.id])
+  const delivery = engine(store, transport)
+  await delivery.accept(code, "whisper", "caseless", [jeremy1.id])
+  await delivery.drain(code)
 
-  const mintedFor = (store.get(code)?.deliveries ?? []).map((delivery) => delivery.memberId).sort()
-  assert.deepEqual(mintedFor, [jeremy1.id, jeremy2.id].sort())
+  // `jeremy` (lowercase) and `Jeremy` are one human via `sameHumanName`, so
+  // the sibling surface is NOT an outsider to this whisper: it gets no
+  // notice, and the single outsider notice goes to Mathilde.
+  const notices = transport.sends.filter((send) => send.text.includes("(the agent whispered to Jeremy)"))
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0]?.memberId, members[0]?.id)
 })
 
-test("an answer minted for one surface discharges the turn trigger minted on the sibling surface", async () => {
+test("an answer minted for the ids the agent named discharges exactly those ids' triggers", async () => {
   const { store, code, members } = await roomWith([
     ["Mathilde", "telegram"],
     ["Jeremy", "whatsapp"],
@@ -164,6 +176,6 @@ test("an answer minted for one surface discharges the turn trigger minted on the
       seen.push(...memberIds)
     },
   })
-  await delivery.accept(code, "say", "answering jeremy", [jeremy1.id])
+  await delivery.accept(code, "say", "answering jeremy", [jeremy1.id, jeremy2.id])
   assert.deepEqual([...seen].sort(), [jeremy1.id, jeremy2.id].sort())
 })

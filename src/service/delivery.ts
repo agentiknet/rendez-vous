@@ -277,23 +277,25 @@ export class DeliveryEngine {
    *  (`Member.id` is not stable across a leave/rejoin, so a stale cached id
    *  is a normal occurrence, not an anomaly).
    *
-   *  BRIEF-38 — addressing a human addresses that human, on every surface
-   *  they are in the room on. For a `say` or `whisper`, each accepted id
-   *  resolves not to its one member but to EVERY member of the room sharing
-   *  that member's display name (`sameHumanName`, the product's own
-   *  one-human rule from BRIEF-37): the agent is told "answer Jeremy", the
-   *  room holds two Jeremys — one human, two devices — and the answer must
-   *  reach both phones, not whichever row the roster happened to offer. The
-   *  expansion happens at MINT TIME only: membership, presence, the roster
-   *  the agent sees and the outbox are untouched, and no other kind is
-   *  widened (`system` records are per-surface facts, `tool` records are
-   *  minted per pull member and a push member must never receive one).
-   *  An unknown id is still unknown — generosity never rescues a typo.
+   *  BRIEF-43 — a resolved recipient mints for THAT recipient, and for that
+   *  recipient alone. A `member_id` is a surface, and the agent can see
+   *  surfaces (the inbound prefix carries the channel, `roster` returns each
+   *  member's id next to their surface), so one id in, one record minted:
+   *  the accept outcome `{accepted, unknown}` means exactly what it says
+   *  again. Addressing the whole human is the agent's own deliberate act —
+   *  naming all of the person's ids in `to`, or broadcasting — and
+   *  `booter.ts`'s prompt is what teaches that distinction. This reverses
+   *  BRIEF-38's display-name expansion, which overwrote the agent's choice
+   *  of surface in the engine and made per-surface addressing impossible by
+   *  construction; the BRIEF-38 hole it guarded against (an answer landing
+   *  on one device of the human who asked) is closed by the prompt instead.
+   *  No other kind is touched (`system` records are per-surface facts,
+   *  `tool` records are minted per pull member and a push member must never
+   *  receive one), and an unknown id is still unknown — no rescue, ever.
    *
-   *  `accepted` stays the ids the CALLER named: if one id now mints three
-   *  records, that is one accepted id that was heard, not three. The agent
-   *  reads it as "the person I addressed exists and will get this", which
-   *  is exactly what it asked. */
+   *  `sameHumanName` stays, for the things that are not addressing:
+   *  `announceJoin`'s silence about a second device and `announceWhisper`'s
+   *  treatment of a human's own other surface as not-an-outsider. */
   async accept(
     code: string,
     kind: Delivery["kind"],
@@ -313,20 +315,7 @@ export class DeliveryEngine {
     }
 
     if (accepted.length > 0) {
-      // The human expansion (BRIEF-38): one accepted id fans out to every
-      // same-named member of the room, roster order preserved, each surface
-      // exactly once. Only `say`/`whisper` — see `accept`'s doc.
-      let recipients = accepted
-      if (kind === "say" || kind === "whisper") {
-        const acceptedSet = new Set(accepted)
-        const humanNames = new Set(
-          room.members.filter((member) => acceptedSet.has(member.id)).map((member) => member.displayName.toLowerCase()),
-        )
-        recipients = room.members
-          .filter((member) => humanNames.has(member.displayName.toLowerCase()))
-          .map((member) => member.id)
-      }
-      await this.mintRecords(code, kind, text, recipients, toolName, true)
+      await this.mintRecords(code, kind, text, accepted, toolName, true)
     }
 
     return { accepted, unknown }
@@ -390,10 +379,11 @@ export class DeliveryEngine {
     })
     // The mint is the event (see `onMint`'s doc): discharged the moment
     // the records exist, never waiting for a flush that may never see
-    // them. The RECIPIENTS, not the accepted ids (BRIEF-38): an answer
-    // addressed to one of a human's two devices answers that human — the
-    // obligation of the device that actually asked must discharge even
-    // when the agent picked the sibling id out of the roster.
+    // them. Exactly the accepted ids now (BRIEF-43): a mint is for the
+    // surfaces the agent named, and no mint exists for a surface the
+    // agent did not name — the obligation of a device whose question was
+    // not answered must still fire, and the prompt is what tells the
+    // agent to name all of a human's ids when the answer concerns them.
     if (discharge) this.onMint?.(code, kind, recipients)
     if (this.autoDrain) {
       // Off the handler's critical path: the tool has already returned
@@ -637,9 +627,11 @@ export class DeliveryEngine {
    *  arrive would be a lie (BRIEF-39: both tiers announce, from both
    *  delivered arms of `attempt`).
    *
-   *  BRIEF-38: one whisper to one human now mints one record per surface,
-   *  so this runs once per record of the SAME whisper. Two consequences are
-   *  handled here, both driven by `sameHumanName`:
+    *  BRIEF-43: a whisper mints for exactly the surface the agent named, so
+    *  one whisper is normally ONE record — but the agent may deliberately
+    *  name all of a human's ids, and then this runs once per record of the
+    *  SAME whisper. Two consequences are handled here, both driven by
+    *  `sameHumanName`:
    *  - the target's OTHER surfaces are not "other members" — they just
    *    received the whisper itself, and must not be told it happened as if
    *    they were outsiders;
