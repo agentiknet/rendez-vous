@@ -14,6 +14,27 @@ const DEFAULT_TIMEOUT_MS = 5_000
 
 export type SandboxLiveness = "alive" | "paused" | "gone" | "unknown"
 
+/**
+ * A probe that could not tell whether the box exists. Thrown by
+ * `E2bBooter.resume` (`src/service/booter.ts`) when a probe of a known
+ * `sandboxId` comes back `"unknown"`, so `RoomService` can report the refusal
+ * into the room and leave the stored shape alone.
+ *
+ * `"unknown"` is deliberately NOT `"gone"` (see this file's header): silently
+ * falling through to a reconnect that may end in a fresh boot would start a
+ * second, billed box on top of one that is actually still fine. Refusing is
+ * the only answer that cannot bill twice.
+ */
+export class BoxLivenessUnknownError extends Error {
+  readonly sandboxId: string
+
+  constructor(sandboxId: string) {
+    super(`box liveness for sandbox ${sandboxId} is unknown — refusing to start a replacement`)
+    this.name = "BoxLivenessUnknownError"
+    this.sandboxId = sandboxId
+  }
+}
+
 /** `(sandboxId) => Promise<SandboxLiveness>` — the shape both `E2bBooter`
  *  (`booter.ts`) and `RoomService`'s idle sweep (`room-service.ts`) take as
  *  an injectable constructor param, so tests can script a

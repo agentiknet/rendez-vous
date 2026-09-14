@@ -49,6 +49,7 @@ process.env.RDV_PREWARM_SANDBOX_ID = PREWARM_ID
 const { DaemonClient } = await import("../../src/daemon/client.ts")
 const { RoomStore } = await import("../../src/rooms/store.ts")
 const { E2bBooter } = await import("../../src/service/booter.ts")
+const { BoxLivenessUnknownError } = await import("../../src/service/box-liveness.ts")
 const { canvakitMcpServer } = await import("../../src/service/mcp-canvakit.ts")
 const { roomMcpServer } = await import("../../src/service/mcp-room.ts")
 
@@ -332,27 +333,60 @@ test("E2bBooter.resume boots fresh in the same call when the box probed paused b
   }
 })
 
-test("E2bBooter.resume does NOT treat an unknown box-liveness result as gone — it reconnects normally instead of booting fresh", async () => {
+test("E2bBooter.resume refuses on an unknown box-liveness result instead of treating it as gone — no reconnect, no fresh boot", async () => {
   const dir = await freshDir()
   const daemon = await freshDaemon()
   const store = await RoomStore.open(dir)
   const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
   const booter = new E2bBooter(client, { baseUrl: daemon.url, token: undefined }, store, async () => "unknown")
-  const artifact = await startArtifactServer()
+  const room = await roomWithBox(store, "flaky-box", "https://flaky.example")
 
-  try {
-    const room = await roomWithBox(store, "flaky-box", artifact.url)
-    daemon.pushRecord("sess_fake", { seq: 1, kind: "turn-end", reason: "completed" })
-    const result = await booter.resume(room)
+  await assert.rejects(() => booter.resume(room), BoxLivenessUnknownError)
 
-    assert.equal(result.boxWasGone, undefined)
-    const spawnRequests = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent")
-    assert.equal(spawnRequests.length, 1)
-    const body = spawnRequests[0]?.body
-    assert.ok(isRecord(body) && isRecord(body.sandbox))
-    if (!isRecord(body) || !isRecord(body.sandbox)) return
-    assert.equal(body.sandbox.reuse, "flaky-box", "unknown must fall through to the ordinary reconnect path, never be treated as gone")
-  } finally {
-    await artifact.close()
-  }
+  const spawnRequests = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent")
+  assert.equal(spawnRequests.length, 0, "unknown must not be treated as gone: neither a reconnect nor a fresh boot")
+  assert.equal(
+    store.get(room.code)?.sandboxId,
+    "flaky-box",
+    "an unknown box may still be alive and must stay on record for the next attempt",
+  )
+})
+
+test("E2bBooter.resume probes liveness even when the room has no artifactUrl — a confirmed-gone box is booted fresh, never handed to sandbox.reuse", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new E2bBooter(client, { baseUrl: daemon.url, token: undefined }, store, async () => "gone")
+
+  // A room that holds a sandboxId but never finished serving an artifact: the
+  // old `artifactUrl === undefined` short-circuit skipped the probe entirely
+  // and reused the dead box (the drop point BRIEF-25 measured).
+  const created = await store.create()
+  const room = await store.update(created.code, { sandboxId: "gone-box" })
+
+  const result = await booter.resume(room)
+
+  assert.equal(result.boxWasGone, true)
+  const spawnRequests = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent")
+  assert.equal(spawnRequests.length, 1)
+  const body = spawnRequests[0]?.body
+  assert.ok(isRecord(body) && isRecord(body.sandbox))
+  if (!isRecord(body) || !isRecord(body.sandbox)) return
+  assert.equal("reuse" in body.sandbox, false, "the confirmed-gone sandboxId must never be handed to sandbox.reuse")
+})
+
+test("E2bBooter.resume drops a confirmed-gone box from the store before booting, so a revive that fails later cannot leave the room claiming it", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new E2bBooter(client, { baseUrl: daemon.url, token: undefined }, store, async () => "gone")
+  const room = await roomWithBox(store, "gone-box", "https://gone.example")
+
+  const result = await booter.resume(room)
+
+  assert.equal(result.boxWasGone, true)
+  assert.equal(store.get(room.code)?.sandboxId, undefined, "the confirmed-dead box must not stay on the room")
+  assert.equal(store.get(room.code)?.artifactUrl, undefined)
 })

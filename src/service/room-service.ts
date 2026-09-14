@@ -13,7 +13,7 @@ import { UnroutedDeliveryError, deliveryModeOf, type Address, type Member, type 
 import { memberToken, tokensMatch } from "./mcp-room.ts"
 import { publicArtifactUrl, publicMediaUrl } from "./artifact-proxy.ts"
 import type { SessionBooter } from "./booter.ts"
-import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
+import { BoxLivenessUnknownError, isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
 import { DeliverableAwareTransport, DeliverableService, parseDeliverableCommand } from "./deliverable.ts"
 import { DeliveryEngine } from "./delivery.ts"
@@ -99,6 +99,26 @@ export type RoomWebClaimOutcome =
   | { kind: "name-claimed"; reason: NameClaimedReason }
 
 const RESUMING_TEXT = "Resuming room, one moment…"
+
+/** BRIEF-25: the terminal record a revive gets when it could not be brought
+ *  back within the bound. Bounded, named and final — the room is never left
+ *  on "one moment…". */
+const REVIVE_FAILED_TEXT =
+  "The room could not be resumed — nothing was started. Send another message to try again."
+
+/** BRIEF-25: the box probe could not tell whether the box is still there. The
+ *  one arm that must never be folded into either "resumed" or "booted fresh",
+ *  because booting over a box that may still be alive bills two
+ *  (box-liveness.ts's own header). */
+const BOX_LIVENESS_UNKNOWN_TEXT =
+  "I could not tell whether the room's box is still there, so I did not start a new one. Send another message to try again."
+
+/** BRIEF-25: how long one whole revive may take — recap read, box probe,
+ *  reconnect and any fresh boot together. Long enough for a genuine cold e2b
+ *  boot, short enough that a leg which never settles cannot park the room on
+ *  "one moment…" forever. Injectable via `reviveTimeoutMs` so tests do not
+ *  wait this out. */
+const DEFAULT_REVIVE_TIMEOUT_MS = 90_000
 
 /** BRIEF-22: the one thing a member is told when `spawnAgent` 401s — the
  *  daemon rejected the bearer this service sent. Never transient (a retry
@@ -256,6 +276,14 @@ export class RoomService {
    *  slot holds only the tail of that room's own chain, so this stays one
    *  entry per room ever resumed, not per call. */
   private readonly roomLocks = new Map<string, Promise<unknown>>()
+  /** Generation token per room, bumped at the start of every bounded revive.
+   *  A revive that times out releases the room lock while its own
+   *  `performResume` is still in flight; when that orphan eventually settles
+   *  it sees the token moved on and declines to write, so a slow attempt
+   *  cannot clobber a newer one. */
+  private readonly reviveAttempts = new Map<string, number>()
+  /** Every revive, whole — see `DEFAULT_REVIVE_TIMEOUT_MS`. */
+  private readonly reviveTimeoutMs: number
   private idleSweepTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(opts: {
@@ -266,6 +294,10 @@ export class RoomService {
     idlePauseMinutes?: number
     idleSweepSeconds?: number
     boxProbeMinutes?: number
+    /** Hard ceiling on one whole revive (BRIEF-25) — recap, probe, reconnect
+     *  and any fresh boot share it. Defaults to 90s; inject a small value in
+     *  tests. */
+    reviveTimeoutMs?: number
     /** Injectable for tests — see `BoxLivenessCheck`'s doc. Defaults to the
      *  real e2b API call. */
     checkBoxLiveness?: BoxLivenessCheck
@@ -299,6 +331,7 @@ export class RoomService {
     this.idlePauseMs = (opts.idlePauseMinutes ?? env.idlePauseMinutes) * 60_000
     this.idleSweepMs = (opts.idleSweepSeconds ?? env.idleSweepSeconds) * 1000
     this.boxProbeMs = (opts.boxProbeMinutes ?? env.boxProbeMinutes) * 60_000
+    this.reviveTimeoutMs = opts.reviveTimeoutMs ?? DEFAULT_REVIVE_TIMEOUT_MS
     this.checkBoxLiveness = opts.checkBoxLiveness ?? ((sandboxId) => isSandboxAlive(sandboxId))
     // env.mediaDir is the live runtime store the running service serves
     // media from; a test must inject its own MediaStore, never rely on this.
@@ -1143,11 +1176,72 @@ export class RoomService {
       // lock exists to close.
       const current = this.store.get(room.code) ?? room
       if (current.state !== "paused") return current
-      return this.performResume(current)
+      return this.boundedRevive(current)
     })
   }
 
-  private async performResume(room: Room): Promise<Room> {
+  /** BRIEF-25: the WHOLE revive runs under one ceiling, and every way it can
+   *  end produces a record in the room. On `main`, `performResume` awaited
+   *  `booter.resume` unbounded and only caught `SpawnAgentUnauthorizedError`,
+   *  so a resume leg that never settles (the RDV-HTUS measurement: a reaped
+   *  box) left the room parked on "Resuming room, one moment…" forever and
+   *  held the room's lock behind it. Bounding it HERE — not in any one leg —
+   *  is what makes "every revive ends" true. */
+  private async boundedRevive(room: Room): Promise<Room> {
+    const attempt = (this.reviveAttempts.get(room.code) ?? 0) + 1
+    this.reviveAttempts.set(room.code, attempt)
+
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expiry = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), this.reviveTimeoutMs)
+    })
+    try {
+      const raced = await Promise.race([this.performResume(room, attempt), expiry])
+      if (raced === "timeout") {
+        // Invalidate this attempt: the leg is still in flight, and "bounded,
+        // named and final" means its eventual result must not silently turn
+        // the room back to active after the failure record already went out.
+        this.reviveAttempts.set(room.code, attempt + 1)
+        await this.notifyReviveFailed(room, REVIVE_FAILED_TEXT)
+        return this.store.get(room.code) ?? room
+      }
+      return raced
+    } catch (error) {
+      // `"unknown"` is its own honest answer (BRIEF-25): the room is not told
+      // it was a dead box, only that the box could not be reached. Every other
+      // failure gets the bounded-and-final wording.
+      const text = error instanceof BoxLivenessUnknownError ? BOX_LIVENESS_UNKNOWN_TEXT : REVIVE_FAILED_TEXT
+      await this.notifyReviveFailed(room, text)
+      return this.store.get(room.code) ?? room
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
+  /** A failed revive leaves the room paused, with no session and no artifact
+   *  being advertised — the stored shape must never claim a live room that is
+   *  not there. `sandboxId` is left as the booter left it: a box confirmed
+   *  gone was already dropped by `E2bBooter.forgetConfirmedDeadBox`, while an
+   *  `"unknown"` box must NOT be erased (it may still be alive, and the next
+   *  send has to be able to reconnect to it). */
+  private async notifyReviveFailed(room: Room, text: string): Promise<void> {
+    await this.store.update(room.code, { state: "paused", sessionId: undefined, artifactReady: false })
+    await Promise.allSettled(
+      room.members.map((member) => this.sender.send(room.code, member, { text, artifactUrl: undefined })),
+    )
+  }
+
+  /** BRIEF-25's "resumed" arm: the box was alive and the session came back on
+   *  it, so the room is told in its own voice. The box-replaced arms keep
+   *  their existing, more precise notices (`notifyBoxReplaced`). */
+  private async notifyRoomResumed(room: Room): Promise<void> {
+    const artifactUrl = memberFacingArtifactUrl(room)
+    await Promise.allSettled(
+      room.members.map((member) => this.sender.send(room.code, member, { text: "Room resumed.", artifactUrl })),
+    )
+  }
+
+  private async performResume(room: Room, attempt: number): Promise<Room> {
     // Which session's transcript to replay. Usually `lastSessionId`: by the
     // time a resume runs, pausing has already cleared `sessionId` — that
     // ordering is what made the first version of this dead on arrival, since
@@ -1169,6 +1263,20 @@ export class RoomService {
       await this.notifySpawnUnauthorized(room)
       return room
     }
+
+    // A revive that timed out while this one was still in flight releases the
+    // room lock and lets a newer attempt start; if that happened, this stale
+    // result must not clobber the store. Best-effort kill the session it
+    // produced (unless it is the one already recorded) so a late boot does not
+    // leave an untracked, billed box.
+    if (this.reviveAttempts.get(room.code) !== attempt) {
+      const current = this.store.get(room.code)
+      if (current?.sessionId !== booted.sessionId) {
+        await this.client.kill(booted.sessionId).catch(() => undefined)
+      }
+      return current ?? room
+    }
+
     // A new sessionId restarts the daemon's own seq numbering near 1, while
     // `room.cursor` is still whatever seq the *previous* session last
     // flushed at — the fan-out reader would then open the new session's
@@ -1193,8 +1301,10 @@ export class RoomService {
       ...(sessionChanged ? { cursor: 0 } : {}),
     })
     this.fanout.start(updated.code)
-    if (boxReplaced) {
+    if (boxReplaced || booted.boxWasGone === true) {
       await this.notifyBoxReplaced(updated, booted.boxWasGone === true)
+    } else {
+      await this.notifyRoomResumed(updated)
     }
     return updated
   }

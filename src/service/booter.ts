@@ -5,7 +5,7 @@ import { joinLinks } from "../links/index.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import type { Room } from "../rooms/types.ts"
 import { bootRoomSession, isSandboxNotFoundError, resumeRoomSession, type OrphanSandboxKiller } from "../sandbox/boot.ts"
-import { isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
+import { BoxLivenessUnknownError, isSandboxAlive, type BoxLivenessCheck } from "./box-liveness.ts"
 import { canvakitMcpServer } from "./mcp-canvakit.ts"
 import { localRoomMcpServer, roomMcpServer } from "./mcp-room.ts"
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
@@ -354,28 +354,53 @@ export class E2bBooter implements SessionBooter {
     return this.bootWithReuse(room, opts.label, this.prewarmSandboxId())
   }
 
+  /** A box confirmed dead (the liveness probe's `"gone"`, or a reconnect that
+   *  itself reports not-found) must not be left on the room: the next revive
+   *  would hand the same dead `sandboxId` to `sandbox.reuse`. Clearing it HERE,
+   *  before the fresh boot rather than only when that boot succeeds, is what
+   *  keeps the room's stored shape true even when the fresh boot itself later
+   *  hangs or fails (BRIEF-25: "the room's stored shape must be true when the
+   *  attempt ends"). */
+  private async forgetConfirmedDeadBox(room: Room): Promise<void> {
+    if (room.sandboxId === undefined) return
+    await this.store.update(room.code, { sandboxId: undefined, artifactUrl: undefined, artifactReady: false })
+  }
+
   async resume(room: Room, opts?: ResumeOptions): Promise<BootedSession> {
     const recap = opts?.recap
-    if (room.sandboxId === undefined || room.artifactUrl === undefined) {
-      // No box on record, or one that never finished serving anything —
-      // nothing for resumeRoomSession's probe to check, so boot fresh,
-      // reusing the box if we at least have its id.
-      return this.bootWithReuse(room, `rdv-${room.code}`, room.sandboxId, recap)
+    if (room.sandboxId === undefined) {
+      // No box on record — nothing for the probe to check, so boot fresh.
+      return this.bootWithReuse(room, `rdv-${room.code}`, undefined, recap)
     }
 
     // Session liveness and box liveness are independent facts
     // (docs/UPSTREAM.md #10): a box confirmed GONE is not worth a reconnect
     // attempt at all — `resumeRoomSession`'s reconnect only retries a
     // TRANSIENT `sandbox_reconnect_failed`, not "the box no longer exists".
-    // Boot fresh with reuse dropped entirely ("reuse nothing", per the
-    // brief) rather than handing a known-dead sandboxId to `sandbox.reuse`.
-    // `"unknown"` (a network error probing e2b) is deliberately NOT treated
-    // as gone — fall through to the ordinary reconnect path, which has its
-    // own retry budget for exactly that uncertainty.
+    // The probe runs whenever we hold a sandboxId, NOT only when we also hold
+    // an artifactUrl: `resumeRoomSession` needs a URL to probe the served app,
+    // but the box's existence does not. The old `artifactUrl === undefined`
+    // short-circuit skipped the probe entirely and handed a confirmed-dead box
+    // straight to `sandbox.reuse` — the drop point BRIEF-25 measured.
     const liveness = await this.checkBoxLiveness(room.sandboxId)
     if (liveness === "gone") {
+      await this.forgetConfirmedDeadBox(room)
       const booted = await this.bootWithReuse(room, `rdv-${room.code}`, undefined, recap)
       return { ...booted, boxWasGone: true }
+    }
+    if (liveness === "unknown") {
+      // Deliberately NOT `"gone"` (box-liveness.ts's header): booting fresh
+      // over a box that may still be alive bills two. Refuse, and let
+      // `RoomService` report that the room could not tell; the next send
+      // retries.
+      throw new BoxLivenessUnknownError(room.sandboxId)
+    }
+
+    if (room.artifactUrl === undefined) {
+      // Alive/paused but never finished serving anything — nothing for
+      // `resumeRoomSession`'s artifact probe to check, so reusing the box is
+      // the only meaningful resume.
+      return this.bootWithReuse(room, `rdv-${room.code}`, room.sandboxId, recap)
     }
 
     let result
@@ -405,6 +430,7 @@ export class E2bBooter implements SessionBooter {
       // generic failure that the caller's own retry would answer with a
       // second, unserialized boot (the live double boot).
       if (!isSandboxNotFoundError(err)) throw err
+      await this.forgetConfirmedDeadBox(room)
       const booted = await this.bootWithReuse(room, `rdv-${room.code}`, undefined, recap)
       return { ...booted, boxWasGone: true }
     }
