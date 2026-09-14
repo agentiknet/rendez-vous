@@ -20,7 +20,6 @@ import { DeliveryEngine } from "./delivery.ts"
 import { MemberSender } from "./member-send.ts"
 import { OpenAiTtsProvider } from "../media/openai.ts"
 import { MediaStore } from "./media-store.ts"
-import { reportAssertionViolation, type PostTurnAssertion } from "./post-turn-assertions.ts"
 import { buildSessionRecap } from "./recap.ts"
 import { hasSendMedia } from "./transports.ts"
 
@@ -562,15 +561,6 @@ export class RoomService {
    *  — never a second scan over `this.store.list()`. */
   findByAddress(address: Address): AddressLookup {
     return this.store.findByAddress(address)
-  }
-
-  /** The post-turn assertion set's report sink for facts computed OUTSIDE
-   *  this class (BRIEF-15, post-turn-assertions) — today, assertion 2's
-   *  `sendReachedNobody` check in the room MCP handler
-   *  (`src/service/mcp-room.ts`), which has no `MemberSender` of its own to
-   *  broadcast with. */
-  async reportAssertion(room: Room, assertion: PostTurnAssertion, detail: string): Promise<void> {
-    await reportAssertionViolation(this.sender, room, assertion, detail)
   }
 
   /** Whether some room already has a member at this provider+contactRef,
@@ -1188,23 +1178,21 @@ export class RoomService {
     // reaching an ORDINARY chat message (never a `join <code>`/`resume
     // <code>`, which are parsed and routed before `handleMessage` is ever
     // called, R3's "a message naming a room wins, for that message only")
-    // means the message named no room code either. Reported into EVERY
-    // candidate room: nothing here knows which one the sender meant, so
-    // whichever room a human eventually opens up should already carry the
-    // notice.
+    // means the message named no room code either. Logged into every
+    // candidate room so the operator sees the full scope; the member
+    // receives no delivery because `replyGuidance` twelve lines below
+    // already tells them what happened and what to do — a second message
+    // would be duplication and, when the same address is in N rooms, N-fold
+    // spam to one person.
     if (found.kind === "ambiguous") {
       const codes = found.matches.map((match) => match.room.code).join(", ")
-      await Promise.allSettled(
-        found.matches.map((match) =>
-          reportAssertionViolation(
-            this.sender,
-            match.room,
-            "ambiguous-sender",
+      for (const match of found.matches) {
+        console.warn(
+          `post-turn assertion violated: "ambiguous-sender" in room ${match.room.code} — ` +
             `an inbound message from ${input.address.provider}/${input.address.contactRef} named no room code, ` +
-              `and that address is a member of more than one room (${codes})`,
-          ),
-        ),
-      )
+            `and that address is a member of more than one room (${codes})`,
+        )
+      }
     }
     // A "none" lookup is a genuine stranger; "ambiguous" is a broken
     // invariant (R1) that already logged loudly in `findByAddress` — routing

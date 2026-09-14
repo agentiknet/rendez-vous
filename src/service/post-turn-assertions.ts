@@ -54,16 +54,25 @@ export function turnAnsweredNobody(
 /** How every violation in the set is reported — the one mechanism shared by
  *  all four assertions, so folding assertion 1 (the pre-existing silent-turn
  *  detector) into the set means it inherits this too, on top of its
- *  unchanged detection logic. */
+ *  unchanged detection logic.
+ *
+ *  `memberId` is the member the assertion is about — the only recipient.
+ *  `humanText` is what the member sees: plain language, no UUIDs, no room
+ *  codes, no assertion names. A violation with no member subject must log
+ *  directly at the call site instead. */
 export async function reportAssertionViolation(
   sender: MemberSender,
   room: Room,
   assertion: PostTurnAssertion,
   detail: string,
+  memberId: string,
+  humanText: string,
 ): Promise<void> {
   console.warn(`post-turn assertion violated: "${assertion}" in room ${room.code} — ${detail}`)
-  const text = `[system · assertion] ${detail}`
-  await Promise.allSettled(
-    room.members.map((member: Member) => sender.send(room.code, member, { text, artifactUrl: undefined })),
-  )
+  const member = room.members.find((m: Member) => m.id === memberId)
+  if (member === undefined) {
+    console.warn(`post-turn assertion: member ${memberId} not found in room ${room.code} — nothing delivered`)
+    return
+  }
+  await sender.send(room.code, member, { text: humanText, artifactUrl: undefined })
 }

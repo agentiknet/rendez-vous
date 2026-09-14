@@ -630,6 +630,8 @@ export class RoomFanout {
             "turn-answered-nobody",
             `room ${code}: an inbound message from member ${triggerMemberId} started this turn, ` +
               `but no accepted say/whisper delivery this turn was addressed to them`,
+            triggerMemberId,
+            "Your message did not get a reply this turn.",
           )
         }
       }

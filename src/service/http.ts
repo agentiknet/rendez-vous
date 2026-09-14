@@ -1555,8 +1555,6 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
     // agent's `room_view` and the members' page must never disagree about
     // whether a document exists.
     storedRender: getStoredRender,
-    // Assertion 2 (BRIEF-15, post-turn-assertions).
-    reportAssertion: (room, assertion, detail) => service.reportAssertion(room, assertion, detail),
     // BRIEF-23: `recover_identity` routes to the one recovery path, whose
     // result is reduced to a status (`unknown` folds the two not-found arms)
     // so the tool result carries no URL — see `RECOVER_TOOL`.

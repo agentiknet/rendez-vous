@@ -43,7 +43,7 @@ import {
   type AudienceSendOutcome,
 } from "../audience/contract.ts"
 import type { Room } from "../rooms/types.ts"
-import { sendReachedNobody, type PostTurnAssertion } from "./post-turn-assertions.ts"
+import { sendReachedNobody } from "./post-turn-assertions.ts"
 import { roomViewHtml } from "./room-view.html.ts"
 import type { McpResponse, McpServerMount } from "./mcp-canvakit.ts"
 
@@ -146,12 +146,6 @@ export interface McpRoomDeps {
    *  it is wired at every real call site: the spectator page and the agent
    *  must not disagree about whether a document exists. */
   readonly storedRender?: (code: string) => Promise<{ readonly renderedAt: string } | undefined>
-  /** Assertion 2's report sink (BRIEF-15, post-turn-assertions): called when
-   *  a `say`/`whisper` reached nobody because every id it named was unknown.
-   *  Omitting it (every test that doesn't care about the assertion set)
-   *  just means the fact goes unreported, same as omitting `storedRender`
-   *  degrades `room_view` — never a throw. */
-  readonly reportAssertion?: (room: Room, assertion: PostTurnAssertion, detail: string) => Promise<void>
   /** BRIEF-23: the sink behind `recover_identity`. It resolves the member
    *  server-side, mints the one-time link and sends it to that member's own
    *  surface; the tool only ever learns a status, never the URL (file-top
@@ -552,10 +546,10 @@ export function createMcpRoomHandler(
         // corrected: the tool result below still reports the honest
         // `accepted: []` back to the agent unchanged.
         if (sendReachedNobody(outcome)) {
-          await deps.reportAssertion?.(
-            room,
-            "send-reached-nobody",
-            `a ${privacy === "private" ? "whisper" : "say"} named ${outcome.unknown.length} member id(s) and none matched anyone in the room: ${outcome.unknown.join(", ")}`,
+          console.warn(
+            `post-turn assertion violated: "send-reached-nobody" in room ${room.code} — ` +
+              `a ${privacy === "private" ? "whisper" : "say"} named ${outcome.unknown.length} member id(s) ` +
+              `and none matched anyone in the room: ${outcome.unknown.join(", ")}`,
           )
         }
         return ok(id, acceptResult(outcome))

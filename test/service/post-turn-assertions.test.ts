@@ -26,6 +26,64 @@ async function freshDir(): Promise<string> {
   return dir
 }
 
+async function twoPushRoom(): Promise<{
+  code: string
+  memberIds: string[]
+  room: import("../../src/rooms/types.ts").Room
+  sender: MemberSender
+  store: RoomStore
+  transport: MemoryTransport
+  engine: DeliveryEngine
+}> {
+  const dir = await freshDir()
+  const store = await RoomStore.open(dir)
+  const created = await store.create()
+  const memberIds: string[] = []
+  for (let i = 0; i < 2; i++) {
+    const m = await store.addMember(created.code, {
+      displayName: `Member ${i}`,
+      tier: "messenger",
+      address: { provider: "whatsapp", source: "agentpush", contactRef: `+${i}` },
+    })
+    memberIds.push(m.id)
+  }
+  const transport = new MemoryTransport()
+  const engine = new DeliveryEngine({ store, transport, autoDrain: false })
+  const sender = new MemberSender({ store, transport, engine })
+  const room = store.get(created.code)
+  assert.ok(room !== undefined)
+  return { code: created.code, memberIds, room, sender, store, transport, engine }
+}
+
+async function fiveMemberRoom(): Promise<{
+  code: string
+  memberIds: string[]
+  room: import("../../src/rooms/types.ts").Room
+  sender: MemberSender
+  store: RoomStore
+  transport: MemoryTransport
+  engine: DeliveryEngine
+}> {
+  const dir = await freshDir()
+  const store = await RoomStore.open(dir)
+  const created = await store.create()
+  const memberIds: string[] = []
+  for (let i = 0; i < 5; i++) {
+    const m = await store.addMember(created.code, {
+      displayName: `Member ${i}`,
+      tier: "messenger",
+      address: { provider: "whatsapp", source: "agentpush", contactRef: `+${i}` },
+    })
+    memberIds.push(m.id)
+  }
+  const transport = new MemoryTransport()
+  const engine = new DeliveryEngine({ store, transport, autoDrain: false })
+  const sender = new MemberSender({ store, transport, engine })
+  const room = store.get(created.code)
+  assert.ok(room !== undefined)
+  return { code: created.code, memberIds, room, sender, store, transport, engine }
+}
+
 // --- assertion 2's predicate: sendReachedNobody ---
 
 test("sendReachedNobody fires when every explicitly-named id was unknown", () => {
@@ -63,28 +121,11 @@ test("turnAnsweredNobody ignores system/tool records even when addressed to the 
   assert.equal(turnAnsweredNobody("alice", minted), true)
 })
 
-// --- reportAssertionViolation: the one reporting mechanism assertions 2-4
-// share (assertion 1 stays log-only — see reader.ts's comment on why) ---
+// --- reportAssertionViolation: the one reporting mechanism ---
 
-test("reportAssertionViolation logs a warning naming the assertion and the room, and broadcasts a system notice to every member", async () => {
-  const dir = await freshDir()
-  const store = await RoomStore.open(dir)
-  const created = await store.create()
-  const push = await store.addMember(created.code, {
-    displayName: "Alice",
-    tier: "messenger",
-    address: { provider: "whatsapp", source: "agentpush", contactRef: "+1" },
-  })
-  const pull = await store.addMember(created.code, {
-    displayName: "Chloe",
-    tier: "room-web",
-    address: { provider: "room-web", source: "room-web", contactRef: "chloe" },
-  })
-  const transport = new MemoryTransport()
-  const engine = new DeliveryEngine({ store, transport, autoDrain: false })
-  const sender = new MemberSender({ store, transport, engine })
-  const room = store.get(created.code)
-  assert.ok(room !== undefined)
+test("reportAssertionViolation logs a warning naming the assertion and the room, and sends exactly one system notice — to the specified member", async () => {
+  const { room, sender, transport, memberIds } = await twoPushRoom()
+  const subjectId = memberIds[0]!
 
   const warnings: string[] = []
   const original = console.warn
@@ -92,24 +133,79 @@ test("reportAssertionViolation logs a warning naming the assertion and the room,
     warnings.push(args.map(String).join(" "))
   }
   try {
-    await reportAssertionViolation(sender, room, "ambiguous-sender", "a made-up detail sentence")
+    await reportAssertionViolation(sender, room, "turn-answered-nobody", "a made-up detail sentence", subjectId, "Your message did not get a reply this turn.")
   } finally {
     console.warn = original
   }
 
   assert.equal(warnings.length, 1)
-  assert.ok(warnings[0]?.includes("ambiguous-sender"), "the warning must name the assertion")
+  assert.ok(warnings[0]?.includes("turn-answered-nobody"), "the warning must name the assertion")
   assert.ok(warnings[0]?.includes(room.code), "the warning must name the room")
   assert.ok(warnings[0]?.includes("a made-up detail sentence"))
 
-  // The push member gets it straight over the transport — no drain required.
   assert.equal(transport.sends.length, 1)
-  assert.equal(transport.sends[0]?.member.id, push.id)
-  assert.ok(transport.sends[0]?.message.text.includes("a made-up detail sentence"))
+  assert.equal(transport.sends[0]?.member.id, subjectId, "the only delivery is to the specified member")
+})
 
-  // The pull member gets a persisted `kind: "system"` outbox record instead.
-  const record = store.get(created.code)?.deliveries?.find((delivery) => delivery.memberId === pull.id)
-  assert.ok(record !== undefined)
-  assert.equal(record.kind, "system")
-  assert.ok(record.text.includes("a made-up detail sentence"))
+test("turn-answered-nobody in a room with five members mints exactly one delivery to the trigger member", async () => {
+  const { room, sender, transport, memberIds } = await fiveMemberRoom()
+  const triggerId = memberIds[2]!
+
+  await reportAssertionViolation(sender, room, "turn-answered-nobody", "detail", triggerId, "Your message did not get a reply this turn.")
+
+  assert.equal(transport.sends.length, 1)
+  assert.equal(transport.sends[0]?.member.id, triggerId)
+})
+
+test("the delivered text contains no member id, no room code, and no assertion name", async () => {
+  const { room, sender, transport, memberIds } = await twoPushRoom()
+  const subjectId = memberIds[0]!
+
+  await reportAssertionViolation(sender, room, "turn-answered-nobody", "technical detail for the log", subjectId, "Your message did not get a reply this turn.")
+
+  assert.equal(transport.sends.length, 1)
+  const text = transport.sends[0]?.message.text ?? ""
+  assert.ok(!text.includes(subjectId), "must not contain the member id")
+  assert.ok(!text.includes(room.code), "must not contain the room code")
+  assert.ok(!text.includes("turn-answered-nobody"), "must not contain the assertion name")
+  assert.ok(!text.includes("system"), "must not contain the system prefix")
+  assert.ok(text.includes("Your message did not get a reply this turn."))
+})
+
+test("console.warn still carries the assertion name and the room — the operator path is not downgraded", async () => {
+  const { room, sender, memberIds } = await twoPushRoom()
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "))
+  }
+  try {
+    await reportAssertionViolation(sender, room, "ambiguous-sender", `room ${room.code}: inbound from test`, memberIds[0]!, "Your message could not be routed.")
+  } finally {
+    console.warn = original
+  }
+
+  assert.equal(warnings.length, 1)
+  assert.ok(warnings[0]?.includes("ambiguous-sender"), "warning must name the assertion")
+  assert.ok(warnings[0]?.includes(room.code), "warning must name the room")
+  assert.ok(warnings[0]?.includes("inbound from test"), "warning must carry the full detail")
+})
+
+test("a member who is neither the subject nor involved receives nothing", async () => {
+  const { room, sender, transport, memberIds } = await fiveMemberRoom()
+  const subjectId = memberIds[1]!
+  const uninvolvedId = memberIds[4]!
+
+  await reportAssertionViolation(sender, room, "turn-answered-nobody", "detail", subjectId, "Your message did not get a reply this turn.")
+
+  const recipientIds = transport.sends.map((s) => s.member.id)
+  assert.equal(transport.sends.length, 1)
+  assert.ok(recipientIds.includes(subjectId), "the subject must receive it")
+  assert.ok(!recipientIds.includes(uninvolvedId), "the uninvolved member must not receive it")
+  for (const id of memberIds) {
+    if (id !== subjectId) {
+      assert.ok(!recipientIds.includes(id), `member ${id} must not receive the assertion`)
+    }
+  }
 })

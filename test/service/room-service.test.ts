@@ -379,7 +379,7 @@ test("BRIEF-20/BRIEF-13 R6: 'where' answers the room's slug (never its code) and
 // address sending an explicit `join <code>` must not report anything — R3
 // says a message naming a room wins, for that message only. ---
 
-test("BRIEF-15: an ordinary message from an address ambiguously in two rooms reports assertion 3 into both; the same address sending 'join <code>' does not", async () => {
+test("BRIEF-15: an ordinary message from an address ambiguously in two rooms reports assertion 3 as a log-only warning — no delivery, and replyGuidance still serves the member", async () => {
   const { service, store, transport } = await buildHarness()
 
   const roomA = await service.handleInbound(alice("new"))
@@ -398,23 +398,49 @@ test("BRIEF-15: an ordinary message from an address ambiguously in two rooms rep
   await store.addMember(roomB.room.code, { displayName: "Alice", tier: "messenger", address: alice("").address })
 
   transport.sends.length = 0
-  const inbound = await service.handleInbound(alice("hello, anyone there?"))
-  assert.equal(inbound.kind, "unknown-sender", "an ambiguous address degrades to unknown-sender, never a silent pick")
-
-  const assertionSends = transport.sends.filter((send) => send.message.text.includes("[system · assertion]"))
-  // Broadcast to EVERY member of EVERY candidate room (roomA: alice alone;
-  // roomB: bob and alice both) — the notice must be visible wherever the
-  // failure could have happened, not just to the ambiguous member.
-  assert.equal(assertionSends.length, 3)
-  for (const send of assertionSends) {
-    assert.ok(send.message.text.includes(roomA.room.code) && send.message.text.includes(roomB.room.code), "each notice names both candidate rooms")
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")) }
+  try {
+    const inbound = await service.handleInbound(alice("hello, anyone there?"))
+    assert.equal(inbound.kind, "unknown-sender", "an ambiguous address degrades to unknown-sender, never a silent pick")
+  } finally {
+    console.warn = original
   }
+
+  // Zero assertion deliveries — ambiguous-sender is log-only because
+  // replyGuidance already tells the member what happened and what to do.
+  const assertionDeliveries = transport.sends.filter((send) => send.message.text.startsWith("Send `new`"))
+  assert.ok(assertionDeliveries.length > 0, "replyGuidance still serves the member")
+  const spamDeliveries = transport.sends.filter((send) =>
+    send.message.text.includes("ambiguous") || send.message.text.includes("could not be routed"),
+  )
+  assert.equal(spamDeliveries.length, 0, "ambiguous-sender mints zero deliveries to any member")
+
+  // console.warn fires for each candidate room.
+  const assertionWarnings = warnings.filter((w) => w.includes("ambiguous-sender"))
+  assert.equal(assertionWarnings.length, 2)
+  assert.ok(assertionWarnings[0]?.includes(roomA.room.code))
+  assert.ok(assertionWarnings[0]?.includes(roomB.room.code))
+  assert.ok(assertionWarnings[1]?.includes(roomA.room.code))
+  assert.ok(assertionWarnings[1]?.includes(roomB.room.code))
 
   transport.sends.length = 0
   const joined = await service.handleInbound(alice(`join ${roomA.room.code}`))
   assert.ok(joined.kind === "joined" || joined.kind === "moved")
-  const assertionSendsAfterJoin = transport.sends.filter((send) => send.message.text.includes("[system · assertion]"))
-  assert.deepEqual(assertionSendsAfterJoin, [], "naming the room by code resolves this message outside the ambiguity check (R3)")
+
+  transport.sends.length = 0
+  // Another message without a room code — ambiguity persists (R3 is per-message).
+  const warnings2: string[] = []
+  const warn2 = console.warn
+  console.warn = (...args: unknown[]) => { warnings2.push(args.map(String).join(" ")) }
+  try {
+    await service.handleInbound(alice("still no room code?"))
+  } finally {
+    console.warn = warn2
+  }
+  const assertionWarnings2 = warnings2.filter((w) => w.includes("ambiguous-sender"))
+  assert.ok(assertionWarnings2.length > 0, "the next message without a room code still triggers the assertion")
 })
 
 test("BRIEF-20: 'join <slug>' refuses a stranger, resolves for an existing member, and 'resume <slug>' revives a paused room for that member", async () => {
