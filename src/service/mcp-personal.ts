@@ -228,6 +228,33 @@ const RENDEZVOUS_SEND_TOOL = {
   },
 } as const
 
+/** `rendezvous_new` (BRIEF-13 step 3). Today a room can be created from MCP
+ *  only by accident: `rendezvous_send({roomSlug: <any room you are in>, text:
+ *  "new"})` reaches `handleInbound` → `parseCommand` → `handleNew`, which
+ *  works, is undocumented, and requires already being in a room to ask for a
+ *  new one. This is that path, made a real tool, reusing `deps.sendInbound`
+ *  verbatim — not a second creation path.
+ *
+ *  Two facts the description states because both are surprising and both are
+ *  silent today: it MOVES THE CALLER'S POINTER off whatever room they were in
+ *  (`new` goes through `ensureMembership` exactly like `join`/`resume` do —
+ *  R1/R2), and it BOOTS AN AGENT, which costs a box and takes real time, so a
+ *  caller must treat the room as PENDING, not render it as an already-usable,
+ *  frozen row.
+ *
+ *  No arguments, same reasoning as `RENDEZVOUS_LIST_TOOL`: the principal is
+ *  fixed by the bearer, and "which room" is not a question this tool answers
+ *  — it always means a brand new one. BRIEF-24's rule applies here exactly as
+ *  it does to `rendezvous_invite`: the new room's join CODE never reaches
+ *  `content[0].text`; it rides in `_meta.rooms`, the same shape
+ *  `rendezvous_list` already uses, so it merges the same way. */
+const RENDEZVOUS_NEW_TOOL = {
+  name: "rendezvous_new",
+  description:
+    "Create a brand-new room and move YOUR principal's pointer into it — off whatever room you were in before, exactly like join/resume do (rendezvous_list will show you moved). This BOOTS AN AGENT: a sandbox has to start, which costs a box and takes real time, so the room may come back not yet ready — treat it as PENDING, never render it as an already-usable, frozen row. Returns {roomSlug, ready}; the room's join code never appears here (invite others with rendezvous_invite once it exists). Requires a send-capable credential; a read-only one is refused.",
+  inputSchema: { type: "object", properties: {} },
+} as const
+
 /** `rendezvous_drain` (BRIEF-12) — this mount's one LISTENING tool: the
  *  member's own deliveries, the transcript the person could not otherwise
  *  hear. Keyed by `roomSlug` (BRIEF-20: the slug identifies) and authorised
@@ -493,15 +520,21 @@ function codeShapedRefusal(id: string | number | null, toolName: string): McpRes
   )
 }
 
-/** A `rendezvous_send` refusal for a READ-ONLY principal token (AMENDMENT
- *  2). Names the reason, because the reason is fixable and the fix is not
- *  guessable: the capability is baked into the token's derivation, so the
- *  only remedy is a new token. Never a silent no-op. */
-function readOnlyRefusal(id: string | number | null): McpResponse {
+/** A refusal for a READ-ONLY principal token (AMENDMENT 2), shared by every
+ *  tool on this mount that requires `send` — `rendezvous_send` and, since
+ *  BRIEF-13 step 3, `rendezvous_new` (creating a room is as much a write as
+ *  speaking into one: it moves the pointer and spends a box). Names the
+ *  reason, because the reason is fixable and the fix is not guessable: the
+ *  capability is baked into the token's derivation, so the only remedy is a
+ *  new token. Never a silent no-op.
+ *
+ *  `toolName` varies the prefix only, exactly as `membershipRefusal` and
+ *  `codeShapedRefusal` do — the body is the one shared reason. */
+function readOnlyRefusal(id: string | number | null, toolName: string): McpResponse {
   return fail(
     id,
     INVALID_REQUEST,
-    "rendezvous_send: this principal token was derived read-only, so it can list your rooms but not speak in them. The send capability is part of the token itself, not a setting — mint a new one with `principal-token <provider> <contactRef> --can-send`.",
+    `${toolName}: this principal token was derived read-only, so it can list your rooms but not speak in them. The send capability is part of the token itself, not a setting — mint a new one with \`principal-token <provider> <contactRef> --can-send\`.`,
   )
 }
 
@@ -560,7 +593,7 @@ async function callSendTool(
 
   // Capability before arguments: a read-only token must learn nothing about
   // whether the room it named exists or holds it as a member.
-  if (principal.capability !== "send") return readOnlyRefusal(id)
+  if (principal.capability !== "send") return readOnlyRefusal(id, RENDEZVOUS_SEND_TOOL.name)
 
   const args = isRecord(params.arguments) ? params.arguments : {}
   const roomSlug = typeof args.roomSlug === "string" ? args.roomSlug.trim() : ""
@@ -595,6 +628,74 @@ async function callSendTool(
     text,
   })
   return ok(id, sendResult(match.room.slug, match.member.id, outcome))
+}
+
+/** The `rendezvous_new` result. `content[0].text` names only the new room's
+ *  SLUG (BRIEF-24's rule, applied here exactly as `rendezvous_invite`
+ *  applies it): the join code never reaches model-visible text. `ready`
+ *  reports `room.artifactReady === true`, the same signal step 1's artifact
+ *  frame already keys visibility on (`artifactFrameViewOf`,
+ *  roster-panel.html.ts) — a caller that renders this as a frozen row
+ *  instead of a pending one is ignoring a fact this result already states.
+ *  `_meta.rooms` is the SAME shape `rendezvous_list` carries its codes in,
+ *  so a host that already merges one merges the other with no new code. */
+function newResult(roomSlug: string, code: string, ready: boolean): Record<string, unknown> {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({ roomSlug, ready }),
+      },
+    ],
+    isError: false,
+    _meta: {
+      rooms: [{ slug: roomSlug, code }],
+    },
+  }
+}
+
+/** `rendezvous_new`'s whole body (BRIEF-13 step 3). Reuses `deps.sendInbound`
+ *  — the SAME inbound path `rendezvous_send({roomSlug: <any room>, text:
+ *  "new"})` already reaches by accident today — so there is no second
+ *  creation mechanism, only a documented door to the existing one. Requires
+ *  `send`, exactly as `rendezvous_send` does: creating a room moves the
+ *  caller's pointer and spends a box, which is as much a write as speaking
+ *  into one.
+ *
+ *  `PersonalInboundOutcome` is deliberately narrowed to `{kind: string}`
+ *  (file-top HARD RULE), so the new room's identity is not read off the
+ *  outcome — it is read back with the same `findByAddress` every other tool
+ *  here uses, AFTER the command has moved the pointer. `handleCommand`'s
+ *  "new" arm always succeeds at the command layer (it only ever returns
+ *  `ok: true`) and always leaves the address in EXACTLY ONE room afterwards
+ *  (`ensureMembership`'s move-then-add), so `findByAddress` returning
+ *  anything other than `"one"` here means something raced or broke
+ *  underneath this call — loud, not a guess at which room to report. */
+async function callNewTool(
+  deps: McpPersonalDeps,
+  principal: ResolvedPrincipal,
+  id: string | number | null,
+): Promise<McpResponse> {
+  const sendInbound = deps.sendInbound
+  if (sendInbound === undefined) {
+    return fail(id, METHOD_NOT_FOUND, `unknown tool: ${RENDEZVOUS_NEW_TOOL.name}`)
+  }
+  if (principal.capability !== "send") return readOnlyRefusal(id, RENDEZVOUS_NEW_TOOL.name)
+
+  const before = matchesOf(deps.findByAddress(principal.address))
+  const displayName = principalDisplayName(before) ?? principal.address.contactRef
+  const tier = before[0]?.member.tier ?? "messenger"
+
+  const outcome = await sendInbound({ address: principal.address, displayName, tier, text: "new" })
+  if (outcome.kind !== "created") {
+    return fail(id, INVALID_PARAMS, `rendezvous_new: could not create a room (${outcome.kind})`)
+  }
+
+  const after = deps.findByAddress(principal.address)
+  if (after.kind !== "one") {
+    return fail(id, INVALID_PARAMS, "rendezvous_new: created a room, but could not resolve your new pointer to it")
+  }
+  return ok(id, newResult(after.room.slug, after.room.code, after.room.artifactReady === true))
 }
 
 /** The principal's membership in the room a (normalized) slug names, if any.
@@ -809,7 +910,7 @@ export function createMcpPersonalHandler(
       const tools = [
         RENDEZVOUS_LIST_TOOL,
         RENDEZVOUS_INVITE_TOOL,
-        ...(deps.sendInbound !== undefined ? [RENDEZVOUS_SEND_TOOL] : []),
+        ...(deps.sendInbound !== undefined ? [RENDEZVOUS_SEND_TOOL, RENDEZVOUS_NEW_TOOL] : []),
         ...(deps.roomRead !== undefined ? [RENDEZVOUS_DRAIN_TOOL, RENDEZVOUS_ACK_TOOL] : []),
       ]
       return ok(id, { tools })
@@ -897,6 +998,10 @@ export function createMcpPersonalHandler(
 
       if (params.name === RENDEZVOUS_SEND_TOOL.name) {
         return callSendTool(deps, principal, params, id)
+      }
+
+      if (params.name === RENDEZVOUS_NEW_TOOL.name) {
+        return callNewTool(deps, principal, id)
       }
 
       if (params.name === RENDEZVOUS_DRAIN_TOOL.name) {

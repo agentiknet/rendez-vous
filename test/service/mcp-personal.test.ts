@@ -1042,3 +1042,101 @@ test("rendezvous_ack refuses a room CODE with the SAME code-shaped reason rendez
   assert.equal(ackParts.body, sendParts.body, "the REASON is one shared wording across tools")
   assert.ok(!/not a member/i.test(ack.error?.message ?? ""), "a code-shaped argument is not a membership question")
 })
+
+// --- BRIEF-13 step 3: rendezvous_new. -----------------------------------
+
+function callNew(
+  handler: ReturnType<typeof createMcpPersonalHandler>,
+  authorization: string | undefined,
+): Promise<McpResponse> {
+  return handler({ jsonrpc: "2.0", id: 16, method: "tools/call", params: { name: "rendezvous_new", arguments: {} } }, authorization)
+}
+
+interface NewPayload {
+  roomSlug: string
+  ready: boolean
+}
+
+function newPayload(res: McpResponse): NewPayload {
+  return JSON.parse(contentTextOf(asRpc(res))) as NewPayload
+}
+
+test("rendezvous_new is advertised only when the mount can send, alongside rendezvous_send", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  await store.addMember((await store.create()).code, { displayName: "Alice", tier: "messenger", address: ALICE })
+
+  const plain = createMcpPersonalHandler(deps(store))
+  const plainNames = toolNames(await callToolsList(plain, bearerFor(ALICE)))
+  assert.ok(!plainNames.includes("rendezvous_new"), "rendezvous_new must not be advertised with no send capability wired")
+
+  const { handler } = await buildSendHarness()
+  const names = toolNames(await callToolsList(handler, bearerFor(ALICE)))
+  assert.ok(names.includes("rendezvous_new") && names.includes("rendezvous_send"), `got: ${names.join(", ")}`)
+})
+
+test("rendezvous_new creates a room, moves the caller's pointer off the room they were in, and puts no join code in content text", async () => {
+  const { service, store, handler } = await buildSendHarness()
+  const firstRoom = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(firstRoom.kind, "created")
+  if (firstRoom.kind !== "created") return
+
+  const res = await callNew(handler, sendBearerFor(ALICE))
+  const text = contentTextOf(asRpc(res))
+  const payload = newPayload(res)
+
+  assert.notEqual(payload.roomSlug, firstRoom.room.slug, "a brand-new room must not be the room the caller was already in")
+  assert.ok(payload.roomSlug.length > 0, "the new room must be named by its slug")
+  assert.equal(typeof payload.ready, "boolean")
+
+  const rooms = metaRoomCodes(res)
+  const meta = rooms.find((room) => room.slug === payload.roomSlug)
+  assert.ok(meta !== undefined, "the new room's code must ride in _meta.rooms, the same shape rendezvous_list uses")
+
+  assert.ok(!text.includes(firstRoom.room.code), "content text must never carry the OLD room's join code")
+  assert.ok(meta !== undefined && !text.includes(meta.code), "content text must never carry the NEW room's join code either")
+
+  const oldRoomAfter = store.get(firstRoom.room.code)
+  assert.ok(
+    !(oldRoomAfter?.members ?? []).some((member) => member.address.provider === "whatsapp" && member.address.contactRef === ALICE.contactRef),
+    "rendezvous_new must move the pointer OFF the room the caller was in, exactly like join/resume",
+  )
+
+  const afterLookup = store.findByAddress(ALICE)
+  assert.equal(afterLookup.kind, "one", "the caller must end up in EXACTLY one room after new")
+  if (afterLookup.kind === "one") {
+    assert.equal(afterLookup.room.slug, payload.roomSlug, "the one room the pointer now names must be the room just created")
+  }
+})
+
+test("rendezvous_new carries the caller's own displayName and tier over into the new room", async () => {
+  const { service, store, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+
+  const res = await callNew(handler, sendBearerFor(ALICE))
+  const payload = newPayload(res)
+  const newRoom = store.getBySlug(payload.roomSlug)
+  assert.ok(newRoom !== undefined)
+  const member = newRoom.members.find((candidate) => candidate.address.provider === "whatsapp" && candidate.address.contactRef === ALICE.contactRef)
+  assert.ok(member !== undefined)
+  assert.equal(member.displayName, "Alice", "the caller's own display name carries over, never a placeholder")
+  assert.equal(member.tier, "messenger", "the caller's own tier carries over")
+  assert.equal(payload.ready, newRoom.artifactReady === true, "the reported readiness must be an honest read of the room's own field")
+})
+
+test("a read-only principal token is refused by rendezvous_new, naming the reason and the tool actually called", async () => {
+  const { service, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+
+  const res = asRpc(await callNew(handler, bearerFor(ALICE)))
+  const message = res.error?.message ?? ""
+
+  assert.notEqual(res.status, 401, "the token is valid — it simply does not carry this capability")
+  assert.ok(res.error !== undefined, "never a silent no-op")
+  assert.ok(/read-only/i.test(message), `the refusal must name the reason, got: ${message}`)
+  assert.ok(/can-send/i.test(message), `the refusal must name the remedy, got: ${message}`)
+  assert.ok(message.startsWith("rendezvous_new:"), `the refusal must name the tool actually called, got: ${message}`)
+})
