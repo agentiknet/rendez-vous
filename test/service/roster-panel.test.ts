@@ -8,6 +8,8 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import {
   FAILURES_BEFORE_WARNING,
+  TRANSCRIPT_JUST_ATTACHED_TEXT,
+  TRANSCRIPT_UNREACHABLE_TEXT,
   bannerVisibilityClass,
   diffRosterRows,
   highestRenderedSeq,
@@ -26,6 +28,7 @@ import {
   toolPayload,
   transcriptItemsOf,
   transcriptSeqOf,
+  transcriptStatusText,
   unreadLabelOf,
   type PanelDocument,
   type PanelElement,
@@ -504,4 +507,31 @@ test("the shipped panel drains by slug, then acks the high-water it rendered", (
     html.indexOf("highestRenderedSeq(state.since, items)") < html.indexOf('name: "rendezvous_ack"'),
     "the cursor must be computed from the rendered items BEFORE the ack is sent",
   )
+})
+
+test("an open transcript with nothing rendered says WHY it is empty; quiet says nothing; a failure still says it failed", () => {
+  // Just attached: its own room-web member has no backlog by construction, and
+  // that is the fact the screen must carry — not a blank box.
+  assert.equal(transcriptStatusText(false, 0), TRANSCRIPT_JUST_ATTACHED_TEXT)
+  assert.ok(/member|screen/i.test(TRANSCRIPT_JUST_ATTACHED_TEXT), "the sentence must name what the panel is")
+  assert.ok(
+    /addressed to you/i.test(TRANSCRIPT_JUST_ATTACHED_TEXT) && /from now on/i.test(TRANSCRIPT_JUST_ATTACHED_TEXT),
+    "…and carry the real reason: it only sees mail addressed to it from now on",
+  )
+  assert.notEqual(TRANSCRIPT_JUST_ATTACHED_TEXT, TRANSCRIPT_UNREACHABLE_TEXT)
+
+  // Once at least one message has rendered, a later empty drain is silence.
+  assert.equal(transcriptStatusText(false, 1), "")
+  assert.equal(transcriptStatusText(false, 7), "")
+
+  // A failed drain dominates: "could not read" is never softened into
+  // "nothing addressed to you".
+  assert.equal(transcriptStatusText(true, 0), TRANSCRIPT_UNREACHABLE_TEXT)
+  assert.notEqual(transcriptStatusText(true, 0), TRANSCRIPT_JUST_ATTACHED_TEXT)
+  assert.equal(transcriptStatusText(true, 4), TRANSCRIPT_UNREACHABLE_TEXT, "failure dominates even after messages exist")
+
+  // And the shipped script keys its status line on exactly that decision.
+  const html = rosterPanelHtml({ provider: "whatsapp", contactRef: "+1", displayName: "Alice" }, "https://example.test")
+  assert.ok(html.includes("transcriptStatusText(false, state.renderedCount)"), "the success path must use it")
+  assert.ok(html.includes("transcriptStatusText(true, state.renderedCount)"), "and so must the failure path")
 })

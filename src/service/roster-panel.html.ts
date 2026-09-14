@@ -55,7 +55,14 @@ const ROSTER_UNREACHABLE_TEXT = "could not reach that room — no roster to show
 /** BRIEF-12: a drain that failed must say so. An empty transcript and an
  *  unreachable one are different facts, and rendering them the same is the
  *  absence-as-delivery defect this panel keeps having to unlearn. */
-const TRANSCRIPT_UNREACHABLE_TEXT = "could not load messages — they have not been read"
+export const TRANSCRIPT_UNREACHABLE_TEXT = "could not load messages — they have not been read"
+/** BRIEF-12: what an OPEN transcript says when it has rendered NOTHING since
+ *  attaching. The panel joins the room as its OWN member on first drain, so
+ *  it has no backlog by construction — this reports "attached, and nothing has
+ *  been addressed to you yet", which is a different fact from a room that has
+ *  gone quiet after you were already listening. */
+export const TRANSCRIPT_JUST_ATTACHED_TEXT =
+  "You just joined this room as your own screen. You will only see messages addressed to you from now on — none have been yet."
 
 /** Surfaced verbatim, at the top, in words (BRIEF-19): one address holding a
  *  membership in more than one room at once is BRIEF-13's R1 invariant
@@ -580,6 +587,21 @@ export const highestRenderedSeq = (previous: number, items: readonly TranscriptI
   return seq
 }
 
+/** The status line an OPEN transcript carries after a drain.
+ *
+ *  `renderedCount` is everything this transcript has appended SINCE ATTACHING:
+ *  0 means it has never shown a message, which is the just-attached fact — the
+ *  panel is its own member and has no backlog — not a silent room. Once at
+ *  least one message has rendered, a later empty drain is ordinary silence and
+ *  says nothing. A FAILED drain dominates both: it is never softened into the
+ *  just-attached message, because "could not read" and "nothing addressed to
+ *  you" are different facts. */
+export const transcriptStatusText = (failed: boolean, renderedCount: number): string => {
+  if (failed) return TRANSCRIPT_UNREACHABLE_TEXT
+  if (renderedCount === 0) return TRANSCRIPT_JUST_ATTACHED_TEXT
+  return ""
+}
+
 const STYLE = `
   :root { --accent: #3a6df0; --border: #e2e4ea; --bg: #fafafc; --grey: #6b7280; }
   * { box-sizing: border-box; }
@@ -638,6 +660,7 @@ function script(principalLabel: string, publicUrl: string): string {
     const ROSTER_LOADING_TEXT = ${embedJson(ROSTER_LOADING_TEXT)};
     const ROSTER_UNREACHABLE_TEXT = ${embedJson(ROSTER_UNREACHABLE_TEXT)};
     const TRANSCRIPT_UNREACHABLE_TEXT = ${embedJson(TRANSCRIPT_UNREACHABLE_TEXT)};
+    const TRANSCRIPT_JUST_ATTACHED_TEXT = ${embedJson(TRANSCRIPT_JUST_ATTACHED_TEXT)};
     const LOST_CONTACT_TEXT = ${embedJson(LOST_CONTACT_TEXT)};
     const FAILURES_BEFORE_WARNING = ${embedJson(FAILURES_BEFORE_WARNING)};
 
@@ -664,6 +687,7 @@ function script(principalLabel: string, publicUrl: string): string {
     const transcriptSeqOf = ${transcriptSeqOf.toString()};
     const transcriptItemsOf = ${transcriptItemsOf.toString()};
     const highestRenderedSeq = ${highestRenderedSeq.toString()};
+    const transcriptStatusText = ${transcriptStatusText.toString()};
     const renderRosterRow = ${renderRosterRow.toString()};
 
     const roomsEl = document.getElementById("rooms");
@@ -808,6 +832,7 @@ function script(principalLabel: string, publicUrl: string): string {
         open: false,
         since: 0,
         rendered: {},
+        renderedCount: 0,
         draining: false,
         slug: row.slug,
         el: transcript,
@@ -910,9 +935,13 @@ function script(principalLabel: string, publicUrl: string): string {
           line.textContent = item.text;
           state.el.appendChild(line);
           state.rendered[item.id] = true;
+          state.renderedCount += 1;
         });
         state.since = highestRenderedSeq(state.since, items);
-        state.status.textContent = "";
+        // An OPEN transcript that has never shown a message says WHY it is
+        // empty (its own member has no backlog); once it has shown one, an
+        // empty drain is just silence.
+        state.status.textContent = transcriptStatusText(false, state.renderedCount);
 
         // Ack what we RENDERED, after rendering it — never the payload's
         // room-wide cursor. An empty drain re-asserts the same high-water,
@@ -924,8 +953,10 @@ function script(principalLabel: string, publicUrl: string): string {
         });
       } catch (e) {
         // No ack on failure: a partial (or absent) transcript must not
-        // advance the cursor past records the person never saw.
-        state.status.textContent = TRANSCRIPT_UNREACHABLE_TEXT;
+        // advance the cursor past records the person never saw. The failure
+        // text dominates the just-attached text — "could not read" is not
+        // "nothing addressed to you".
+        state.status.textContent = transcriptStatusText(true, state.renderedCount);
       } finally {
         state.draining = false;
       }
