@@ -494,6 +494,20 @@ export class RoomStore {
     return next
   }
 
+  /** Settle every write already enqueued — the store's own "nothing of mine
+   *  is still touching the disk". Each mutator is handed its own persist to
+   *  await, so a caller that awaits its mutation is already safe; this exists
+   *  for the writes nobody holds, the ones a fire-and-forget caller started
+   *  (the delivery engine's background drain, `DeliveryEngine.whenIdle`'s
+   *  reason to exist). Shutdown — and a test tearing its temp directory down
+   *  — must wait here, or `persist`'s `<file>.<uuid>.tmp` can land in a
+   *  directory that is already being removed. Never rejects: `writeChain` is
+   *  the failure-swallowed tail, and a flush reports "no write is still in
+   *  flight", not whether the last one succeeded. */
+  async flush(): Promise<void> {
+    await this.writeChain
+  }
+
   async create(): Promise<Room> {
     let code = generateCode()
     while (this.rooms.has(code)) {

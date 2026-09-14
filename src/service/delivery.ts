@@ -35,6 +35,12 @@ import {
  *  cannot stall the other members' deliveries behind it. */
 export const SEND_TIMEOUT_MS = 10_000
 
+/** How many times `whenIdle` re-checks for drains a drain itself started
+ *  before it gives up waiting. A real shutdown settles on the first or
+ *  second pass; the cap only exists so a report→accept→drain cycle that
+ *  never converges cannot hang the caller instead of failing it. */
+const WHEN_IDLE_MAX_PASSES = 32
+
 /** How many `delivered` records one room keeps, newest first.
  *
  *  `deliveries` is a work queue, not a log — but a completed record is worth
@@ -365,6 +371,33 @@ export class DeliveryEngine {
       ),
     )
     return run
+  }
+
+  /** Settle every drain currently in flight, including the ones nobody is
+   *  holding. `accept` fires its drain off the handler's critical path
+   *  (`void this.drain(code)`) and returns before a single byte of the
+   *  delivery attempt has been written, so at any instant the engine may
+   *  own writes with no awaiter — which is exactly what made
+   *  `revive-outcome.test.ts` flake: the room's failure notice was accepted,
+   *  the test's assertions ran and passed, and the drain's `mark` was still
+   *  persisting into the temp directory when teardown removed it
+   *  (`ENOTEMPTY`, seen 2026-09-14). Shutdown is the one place that must
+   *  wait.
+   *
+   *  Re-checks after each pass because a drain can legitimately produce more
+   *  work — `reportFinalFailure` reports the correction into the room, which
+   *  can accept another record and kick another drain. Capped so a
+   *  pathological report/accept cycle cannot hang a shutdown forever; the
+   *  caller is already on its way out, and the cap is far above anything a
+   *  real room reaches. */
+  async whenIdle(): Promise<void> {
+    const settled = new Set<Promise<void>>()
+    for (let pass = 0; pass < WHEN_IDLE_MAX_PASSES; pass += 1) {
+      const pending = Array.from(this.locks.values()).filter((lock) => !settled.has(lock))
+      if (pending.length === 0) return
+      await Promise.allSettled(pending)
+      for (const lock of pending) settled.add(lock)
+    }
   }
 
   /** Boot-time retry: every `pending` record under the cap, in every room.

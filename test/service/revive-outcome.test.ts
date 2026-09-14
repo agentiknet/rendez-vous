@@ -32,6 +32,15 @@ const dirs: string[] = []
 const daemons: ExtendedFakeDaemon[] = []
 const services: RoomService[] = []
 
+/** Order is load-bearing, not cosmetic. Every service is stopped FIRST, and
+ *  `RoomService.stop` now settles the delivery engine's background drains and
+ *  flushes the store's write chain — so by the time a directory is removed,
+ *  nothing is left holding it. Before that, the room's failure notice went
+ *  out through `DeliveryEngine.accept`, which schedules its drain with `void`
+ *  and returns; the drain's `mark` was still persisting `rooms.json.<uuid>.tmp`
+ *  while this hook removed the directory, and the removal died on `ENOTEMPTY`
+ *  a run or two in a hundred. The removal itself is recursive and forced, so
+ *  a leftover file is at worst a leftover, never the failure. */
 after(async () => {
   await Promise.all(services.map((service) => service.stop()))
   await Promise.all(daemons.map((daemon) => daemon.close()))

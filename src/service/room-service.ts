@@ -524,12 +524,23 @@ export class RoomService {
     this.idleSweepTimer.unref()
   }
 
+  /** Stopped means stopped: when this resolves, nothing this service owns is
+   *  still writing. The fan-out and the sweep timer were always the obvious
+   *  half; the delivery engine is the quiet one — `accept` schedules its
+   *  drain with `void` so the agent's turn is not held behind provider
+   *  latency, which leaves a store write in flight that no caller is
+   *  awaiting. Draining it here, and then flushing the store's own write
+   *  chain, is what makes "the service is down" a fact a caller can act on
+   *  (a process exiting, or a test removing the directory the store lives
+   *  in). */
   async stop(): Promise<void> {
     if (this.idleSweepTimer !== undefined) {
       clearInterval(this.idleSweepTimer)
       this.idleSweepTimer = undefined
     }
     await this.fanout.stopAll()
+    await this.deliveryEngine.whenIdle()
+    await this.store.flush()
   }
 
   getRoom(code: string): Room | undefined {
