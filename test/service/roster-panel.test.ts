@@ -10,6 +10,7 @@ import {
   FAILURES_BEFORE_WARNING,
   bannerVisibilityClass,
   diffRosterRows,
+  highestRenderedSeq,
   isHostResponse,
   isStandaloneBridge,
   lostContactVisible,
@@ -23,6 +24,8 @@ import {
   rosterPanelHtml,
   standaloneCallTool,
   toolPayload,
+  transcriptItemsOf,
+  transcriptSeqOf,
   unreadLabelOf,
   type PanelDocument,
   type PanelElement,
@@ -443,4 +446,62 @@ test("a row repaints only when a RENDERED field actually changed", () => {
   assert.equal(rosterRowDataChanged(base, { ...base, unreadLabel: "3" }), true)
   assert.equal(rosterRowDataChanged(base, { ...base, presence: { kind: "away", label: "away" } }), true)
   assert.equal(rosterRowDataChanged(base, { ...base, code: "RDV-ZZZZ" }), false, "the code is a capability, never rendered")
+})
+
+// --- BRIEF-12: the panel becomes a device. It appends only what is new and
+// renderable, and the cursor advances to what it ACTUALLY RENDERED. ---
+
+test("the transcript appends only new, renderable deliveries, in seq order", () => {
+  const deliveries = [
+    { id: "d2", memberId: "m1", kind: "say", text: "second" },
+    { id: "d1", memberId: "m1", kind: "say", text: "first" },
+    { id: "d3", memberId: "m1", kind: "say" }, // fetched, but nothing to render
+    null,
+    { memberId: "m1", text: "no id" },
+    { id: "d4", memberId: "m1", kind: "whisper", text: "secret" },
+  ]
+  const items = transcriptItemsOf(deliveries, { d1: true })
+  assert.deepEqual(
+    items.map((entry) => entry.text),
+    ["second", "secret"],
+    "an already-rendered or unrenderable entry is skipped, never rendered as blank",
+  )
+  assert.deepEqual(
+    items.map((entry) => entry.seq),
+    [2, 4],
+    "the rest come back in seq order",
+  )
+
+  assert.equal(transcriptSeqOf("d12"), 12)
+  assert.equal(transcriptSeqOf("nonsense"), 0, "an unparseable id sorts as 0, as deliverySeqOf does")
+})
+
+test("the cursor advances to the highest seq RENDERED, never to what was merely fetched", () => {
+  const fetched = [
+    { id: "d1", memberId: "m1", kind: "say", text: "rendered one" },
+    { id: "d2", memberId: "m1", kind: "say", text: "rendered two" },
+    { id: "d3", memberId: "m1", kind: "say" }, // fetched, no text — not rendered
+  ]
+  const items = transcriptItemsOf(fetched, {})
+  assert.deepEqual(items.map((entry) => entry.seq), [1, 2])
+  assert.equal(
+    highestRenderedSeq(0, items),
+    2,
+    "d3 was fetched but not rendered; acking it would let the room prune a message nobody saw",
+  )
+  assert.equal(highestRenderedSeq(5, items), 5, "the rendered high-water is monotonic")
+})
+
+test("the shipped panel drains by slug, then acks the high-water it rendered", () => {
+  const html = rosterPanelHtml({ provider: "whatsapp", contactRef: "+1", displayName: "Alice" }, "https://example.test")
+  assert.ok(html.includes('name: "rendezvous_drain"'), "the expand drain must exist")
+  assert.ok(html.includes('name: "rendezvous_ack"'), "and the ack that follows it")
+  assert.ok(
+    /arguments: \{ roomSlug: state\.slug, seq: state\.since \}/.test(html),
+    "the ack must name the room by slug and carry the RENDERED high-water, never a fetched cursor",
+  )
+  assert.ok(
+    html.indexOf("highestRenderedSeq(state.since, items)") < html.indexOf('name: "rendezvous_ack"'),
+    "the cursor must be computed from the rendered items BEFORE the ack is sent",
+  )
 })

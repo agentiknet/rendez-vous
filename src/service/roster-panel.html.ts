@@ -52,6 +52,10 @@ const LOADING_TEXT = "Loading…"
 const NO_ROOMS_TEXT = "You are in no rooms yet."
 const ROSTER_LOADING_TEXT = "asking the room who is there…"
 const ROSTER_UNREACHABLE_TEXT = "could not reach that room — no roster to show"
+/** BRIEF-12: a drain that failed must say so. An empty transcript and an
+ *  unreachable one are different facts, and rendering them the same is the
+ *  absence-as-delivery defect this panel keeps having to unlearn. */
+const TRANSCRIPT_UNREACHABLE_TEXT = "could not load messages — they have not been read"
 
 /** Surfaced verbatim, at the top, in words (BRIEF-19): one address holding a
  *  membership in more than one room at once is BRIEF-13's R1 invariant
@@ -511,6 +515,71 @@ export const diffRosterRows = (previous: readonly RosterRowView[], next: readonl
   return { removed, added, kept }
 }
 
+/** One delivery as `rendezvous_drain` reports it, as far as the panel reads
+ *  it. Every field optional: this crossed a host, so a missing field degrades
+ *  to nothing rendered, never to a confident wrong message. */
+export interface TranscriptDelivery {
+  readonly id?: string
+  readonly memberId?: string
+  readonly kind?: string
+  readonly text?: string
+}
+
+/** One line actually appended to a transcript. `seq` comes from the delivery
+ *  id (`d<seq>`) — the same monotonic number the retention floor and the
+ *  cursor ack compare. */
+export interface TranscriptItem {
+  readonly id: string
+  readonly memberId: string
+  readonly kind: string
+  readonly text: string
+  readonly seq: number
+}
+
+/** `d<seq>` → its position; anything unparseable sorts as 0, matching
+ *  `deliverySeqOf` (rooms/types.ts). */
+export const transcriptSeqOf = (id: string): number => {
+  const match = /^d(\d+)$/.exec(id)
+  return match === null ? 0 : Number.parseInt(match[1] ?? "0", 10)
+}
+
+/** The deliveries worth APPENDING: those not already rendered, with text,
+ *  ordered by seq. Dedupe is by `Delivery.id` (D7): the drain is
+ *  at-least-once, so a reconnect replays records the panel already holds.
+ *  Pure, so the ack rule below is testable without a DOM. */
+export const transcriptItemsOf = (
+  deliveries: readonly (TranscriptDelivery | null | undefined)[],
+  alreadyRendered: Readonly<Record<string, boolean>>,
+): readonly TranscriptItem[] => {
+  const items: TranscriptItem[] = []
+  for (const delivery of deliveries) {
+    if (delivery === null || delivery === undefined) continue
+    if (typeof delivery.id !== "string" || delivery.id.length === 0) continue
+    if (alreadyRendered[delivery.id] === true) continue
+    if (typeof delivery.text !== "string") continue
+    items.push({
+      id: delivery.id,
+      memberId: typeof delivery.memberId === "string" ? delivery.memberId : "",
+      kind: typeof delivery.kind === "string" ? delivery.kind : "",
+      text: delivery.text,
+      seq: transcriptSeqOf(delivery.id),
+    })
+  }
+  items.sort((a, b) => a.seq - b.seq)
+  return items
+}
+
+/** The cursor after rendering `items`: the highest seq ACTUALLY RENDERED,
+ *  never the payload's room-wide `cursor`. Advances monotonically — an
+ *  out-of-order replay cannot rewind it. */
+export const highestRenderedSeq = (previous: number, items: readonly TranscriptItem[]): number => {
+  let seq = previous
+  for (const item of items) {
+    if (item.seq > seq) seq = item.seq
+  }
+  return seq
+}
+
 const STYLE = `
   :root { --accent: #3a6df0; --border: #e2e4ea; --bg: #fafafc; --grey: #6b7280; }
   * { box-sizing: border-box; }
@@ -547,6 +616,11 @@ const STYLE = `
   .room-roster .peer { display: inline-flex; align-items: center; gap: 4px; margin: 0 10px 4px 0; }
   .room-roster .peer-name { font-weight: 600; color: #1a1c23; }
   .room-roster .peer-away { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: #fdeaea; color: #b42318; font-weight: 700; }
+  /* BRIEF-12: the room's transcript, rendered only while a row is expanded. */
+  .room-transcript { display: flex; flex-direction: column; gap: 4px; }
+  .room-transcript .message { font-size: 13px; line-height: 1.35; padding: 4px 8px; border-radius: 6px; background: #f4f5f9; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .room-transcript .message-whisper { background: #fef3c7; }
+  .transcript-status { font-size: 12px; font-weight: 600; color: #b42318; }
   .send-note { font-size: 12px; font-weight: 600; }
   .send-note.bad { color: #b42318; }
   .send-note.good { color: #1a7f37; }
@@ -563,6 +637,7 @@ function script(principalLabel: string, publicUrl: string): string {
     const NO_ROOMS_TEXT = ${embedJson(NO_ROOMS_TEXT)};
     const ROSTER_LOADING_TEXT = ${embedJson(ROSTER_LOADING_TEXT)};
     const ROSTER_UNREACHABLE_TEXT = ${embedJson(ROSTER_UNREACHABLE_TEXT)};
+    const TRANSCRIPT_UNREACHABLE_TEXT = ${embedJson(TRANSCRIPT_UNREACHABLE_TEXT)};
     const LOST_CONTACT_TEXT = ${embedJson(LOST_CONTACT_TEXT)};
     const FAILURES_BEFORE_WARNING = ${embedJson(FAILURES_BEFORE_WARNING)};
 
@@ -586,6 +661,9 @@ function script(principalLabel: string, publicUrl: string): string {
     const appendRosterRowMeta = ${appendRosterRowMeta.toString()};
     const rosterRowDataChanged = ${rosterRowDataChanged.toString()};
     const diffRosterRows = ${diffRosterRows.toString()};
+    const transcriptSeqOf = ${transcriptSeqOf.toString()};
+    const transcriptItemsOf = ${transcriptItemsOf.toString()};
+    const highestRenderedSeq = ${highestRenderedSeq.toString()};
     const renderRosterRow = ${renderRosterRow.toString()};
 
     const roomsEl = document.getElementById("rooms");
@@ -719,18 +797,38 @@ function script(principalLabel: string, publicUrl: string): string {
       const roster = document.createElement("div");
       roster.className = "room-roster";
 
+      // BRIEF-12: this row's transcript. The state lives on the record so the
+      // poll can keep draining it while it is open; the toggle owns
+      // open/collapse.
+      const transcript = document.createElement("div");
+      transcript.className = "room-transcript";
+      const transcriptStatus = document.createElement("div");
+      transcriptStatus.className = "transcript-status";
+      const transcriptState = {
+        open: false,
+        since: 0,
+        rendered: {},
+        draining: false,
+        slug: row.slug,
+        el: transcript,
+        status: transcriptStatus,
+      };
+
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.textContent = "who is there";
-      let open = false;
       toggle.addEventListener("click", function () {
-        open = !open;
-        if (!open) {
+        transcriptState.open = !transcriptState.open;
+        if (!transcriptState.open) {
+          // Collapsing is LEAVING: stop draining and do NOT ack. The 90s
+          // staleness does the rest — no presence is manufactured.
           roster.textContent = "";
           return;
         }
-        // row.code, from the closure — never read back out of the DOM.
+        // row.code, from the closure (the spectator roster); the SLUG
+        // addresses the drain. Opening is entering: drain immediately.
         loadRoster(row.code, roster);
+        drainTranscript(transcriptState);
       });
       actions.appendChild(toggle);
 
@@ -782,6 +880,62 @@ function script(principalLabel: string, publicUrl: string): string {
       el.appendChild(actions);
       el.appendChild(note);
       el.appendChild(roster);
+      el.appendChild(transcriptStatus);
+      el.appendChild(transcript);
+      return transcriptState;
+    }
+
+    // BRIEF-12: drain ONE open transcript, render what is new, THEN ack the
+    // highest seq actually rendered. The order is the rule: acking on receipt
+    // would let the room prune a record the person never saw. If anything
+    // throws before the render completes, the catch acks nothing.
+    async function drainTranscript(state) {
+      if (!state.open || state.draining) return;
+      state.draining = true;
+      try {
+        const result = await app.callTool({
+          name: "rendezvous_drain",
+          arguments: { roomSlug: state.slug, since: state.since },
+        });
+        if (result && result.isError === true) throw new Error("the room refused the drain");
+        const payload = toolPayload(result);
+        const deliveries = Array.isArray(payload.deliveries) ? payload.deliveries : [];
+        const items = transcriptItemsOf(deliveries, state.rendered);
+
+        // RENDER FIRST — all of it. Only after every item is in the DOM do we
+        // compute the cursor to ack.
+        items.forEach(function (item) {
+          const line = document.createElement("div");
+          line.className = item.kind ? "message message-" + item.kind : "message";
+          line.textContent = item.text;
+          state.el.appendChild(line);
+          state.rendered[item.id] = true;
+        });
+        state.since = highestRenderedSeq(state.since, items);
+        state.status.textContent = "";
+
+        // Ack what we RENDERED, after rendering it — never the payload's
+        // room-wide cursor. An empty drain re-asserts the same high-water,
+        // which is honest liveness (we really did render up to it), not a
+        // manufactured presence.
+        await app.callTool({
+          name: "rendezvous_ack",
+          arguments: { roomSlug: state.slug, seq: state.since },
+        });
+      } catch (e) {
+        // No ack on failure: a partial (or absent) transcript must not
+        // advance the cursor past records the person never saw.
+        state.status.textContent = TRANSCRIPT_UNREACHABLE_TEXT;
+      } finally {
+        state.draining = false;
+      }
+    }
+
+    function drainOpenTranscripts() {
+      rowRecords.forEach(function (record) {
+        const state = record.transcript;
+        if (state !== undefined && state.open === true) drainTranscript(state);
+      });
     }
 
     // FIX: the poll UPDATES the list instead of rebuilding it. Rebuilding
@@ -799,8 +953,8 @@ function script(principalLabel: string, publicUrl: string): string {
       // refresh those two parts without touching the interactive children.
       const head = el.children[0];
       const meta = el.children[1];
-      addActions(el, row);
-      const record = { el: el, head: head, meta: meta, row: row };
+      const transcript = addActions(el, row);
+      const record = { el: el, head: head, meta: meta, row: row, transcript: transcript };
       rowRecords.set(row.slug, record);
       return record;
     }
@@ -865,6 +1019,9 @@ function script(principalLabel: string, publicUrl: string): string {
         consecutiveFailures = 0;
         connectionEl.className = bannerVisibilityClass(false);
         renderPlan(planRosterRows(toolPayload(result)));
+        // While a row is expanded it is DRAINING: keep its transcript current
+        // on the same poll, and ack what renders. Collapsed rows do neither.
+        drainOpenTranscripts();
       } catch (e) {
         consecutiveFailures += 1;
         if (lostContactVisible(consecutiveFailures)) {
