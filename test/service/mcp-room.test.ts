@@ -683,3 +683,94 @@ test("BRIEF-23A: recover_identity result carries no field named 'sent', and the 
   const payload = JSON.parse(String(content[0]?.text ?? "{}")) as Record<string, unknown>
   assert.ok(!("sent" in payload), "the result must not carry a field named 'sent'")
 })
+
+// --- BRIEF-31: markers work in say/whisper, one extractor shared with RoomFanout ---
+
+test("BRIEF-31: say with [[say...]] marker strips the marker and delivers spoken words without leaking [[", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const res = asRpc(await callTool(h.handler, "say", { text: "[[say meeting at noon]]" }, h.code))
+  assert.equal(res.status, 200)
+  await h.engine.drain(h.code)
+
+  const sends = h.transport.sends
+  assert.ok(sends.length > 0)
+  for (const send of sends) {
+    assert.ok(!send.text.includes("[["), "member must not receive literal brackets")
+    assert.ok(send.text.includes("noon"), "member receives the spoken words")
+  }
+})
+
+test("BRIEF-31: text around a [[say...]] marker survives, in order, without leaking [[", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const res = asRpc(
+    await callTool(h.handler, "say", { text: "Start\n[[say mid]]\nEnd" }, h.code),
+  )
+  assert.equal(res.status, 200)
+  await h.engine.drain(h.code)
+
+  for (const send of h.transport.sends) {
+    assert.ok(!send.text.includes("[["), "member must not receive literal brackets")
+    assert.ok(send.text.includes("Start"), "text before marker survives")
+    assert.ok(send.text.includes("End"), "text after marker survives")
+    assert.ok(send.text.includes("mid"), "spoken words reach the member")
+  }
+})
+
+test("BRIEF-31: a say with no marker is delivered byte-identical to today", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const text = "Just a regular message, no markers at all."
+  const res = asRpc(await callTool(h.handler, "say", { text }, h.code))
+  assert.equal(res.status, 200)
+  await h.engine.drain(h.code)
+
+  const sends = h.transport.sends
+  assert.ok(sends.length > 0)
+  for (const send of sends) {
+    assert.equal(send.text, text, "text without markers passes through unchanged")
+  }
+})
+
+test("BRIEF-31: whisper with [[say...]] marker strips the marker and delivers spoken words without leaking [[", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const target = h.memberIds[0]!
+  const res = asRpc(await callTool(h.handler, "whisper", { text: "[[say whisper this]]", to: target }, h.code))
+  assert.equal(res.status, 200)
+  await h.engine.drain(h.code)
+
+  const targetSend = h.transport.sends.find((s) => s.memberId === target)
+  assert.ok(targetSend !== undefined, "target member received the whisper")
+  assert.ok(!targetSend.text.includes("[["), "target must not receive literal brackets")
+  assert.ok(targetSend.text.includes("whisper this"), "target receives the spoken words")
+})
+
+test("BRIEF-31: TTS unconfigured with deliverAttachment wired — spoken words delivered as text, no [[", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const room = h.store.get(h.code)
+  assert.ok(room !== undefined)
+
+  const deliveredAttachments: { memberId: string; caption: string }[] = []
+  const deps: McpRoomDeps = {
+    rooms: () => [room],
+    deliveries: h.engine,
+    deliverAttachment: async (_code, memberId, attachment) => {
+      deliveredAttachments.push({ memberId, caption: attachment.caption ?? "" })
+    },
+  }
+  const handler = createMcpRoomHandler(deps)
+
+  const res = asRpc(await callTool(handler, "say", { text: "[[say TTS-fallback-text]]" }, h.code))
+  assert.equal(res.status, 200)
+  await h.engine.drain(h.code)
+
+  // With deliverAttachment wired but no tts/mediaStore, renderSpeech returns
+  // empty-URL attachments. deliverAttachment should be called for each
+  // accepted member with the caption containing the spoken words.
+  const memberIds = h.memberIds
+  for (const memberId of memberIds) {
+    const note = deliveredAttachments.find((d) => d.memberId === memberId)
+    assert.ok(note !== undefined, `member ${memberId} got a voice-note delivery`)
+    assert.ok(note.caption.includes("TTS-fallback-text"), "voice-note caption carries the spoken words")
+  }
+  const allOutput = JSON.stringify(res)
+  assert.ok(!allOutput.includes("[["), "the tool response must not contain literal brackets")
+})

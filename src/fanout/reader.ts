@@ -2,18 +2,13 @@ import type { RoomStore } from "../rooms/store.ts"
 import { deliveryModeOf, deliverySeqOf, type Ask, type Delivery, type Member, type Room } from "../rooms/types.ts"
 import type { TtsProvider } from "../media/openai.ts"
 import { env } from "../env.ts"
-import { publicArtifactUrl, publicMediaUrl } from "../service/artifact-proxy.ts"
-import type { MediaRecord, SaveMediaInput } from "../service/media-store.ts"
+import { publicArtifactUrl } from "../service/artifact-proxy.ts"
 import {
   type OutboundAttachment,
 } from "../service/transports.ts"
 import { attachmentUrl, parseAttachments, parseSpeech, type ParsedAttachment } from "./attach.ts"
-
-/** Structural subset of `MediaStore` the speech path needs — injectable so
- *  tests never touch a real directory. */
-export interface SpeechMediaStore {
-  save(roomCode: string, data: Buffer, opts: SaveMediaInput): Promise<MediaRecord>
-}
+import { renderSpeech } from "../markers.ts"
+import type { SpeechMediaStore } from "../markers.ts"
 import { renderForTier } from "./render.ts"
 import type { FanoutRecord, Transport } from "./types.ts"
 import { DeliveryEngine } from "../service/delivery.ts"
@@ -347,61 +342,6 @@ export class RoomFanout {
   /** One attachment to one member. Never throws: a provider rejecting a file
    *  must not take down the rest of the turn's delivery, and the failure is
    *  logged rather than swallowed. */
-  /**
-   * Render each `[[say …]]` into a real voice note, once per turn rather than
-   * once per member: the audio is identical for everyone, and TTS is the
-   * expensive part.
-   *
-   * Returns `[]` when TTS is not configured or a render fails — and in the
-   * failure case the words are NOT lost, because `renderSpeech`'s caller has
-   * already put them in the caption. A room where the voice note fails should
-   * read the sentence, not fall silent.
-   */
-  private async renderSpeech(code: string, spoken: readonly string[]): Promise<OutboundAttachment[]> {
-    if (spoken.length === 0) return []
-    const tts = this.tts
-    const mediaStore = this.mediaStore
-    if (tts === undefined || mediaStore === undefined) {
-      // Nothing to render with. The text is already back in the caption path
-      // below, so members still get the words.
-      return spoken.map((text) => ({
-        url: "",
-        filename: "",
-        mimeType: "",
-        kind: "audio" as const,
-        caption: text,
-      }))
-    }
-
-    const notes: OutboundAttachment[] = []
-    for (const text of spoken) {
-      try {
-        const audio = await tts.speak(text)
-        if (audio === undefined) {
-          notes.push({ url: "", filename: "", mimeType: "", kind: "audio", caption: text })
-          continue
-        }
-        const record = await mediaStore.save(code, Buffer.from(audio.bytes), {
-          contentType: audio.mime,
-          pages: 1,
-        })
-        notes.push({
-          url: publicMediaUrl(code, record.id),
-          filename: `voice.${audio.extension}`,
-          mimeType: audio.mime,
-          kind: "audio",
-          caption: text,
-        })
-      } catch (error: unknown) {
-        console.error(
-          `tts failed for room ${code}: ${error instanceof Error ? error.message : String(error)}`,
-        )
-        notes.push({ url: "", filename: "", mimeType: "", kind: "audio", caption: text })
-      }
-    }
-    return notes
-  }
-
   /** Deliver an already-built attachment. A voice note whose render failed
    *  has no URL — it is sent as its caption, so the sentence still arrives. */
   private async deliverAttachment(member: Member, code: string, attachment: OutboundAttachment): Promise<void> {
@@ -477,7 +417,7 @@ export class RoomFanout {
     const withoutAttachments = parseAttachments(rawText)
     const { text, spoken } = parseSpeech(withoutAttachments.text)
     const attachments = withoutAttachments.attachments
-    const voiceNotes = await this.renderSpeech(code, spoken)
+    const voiceNotes = await renderSpeech(code, spoken, this.tts, this.mediaStore)
 
     // Nothing is claimed without proof: each attachment URL is probed once
     // per turn (not once per member) and only confirmed-alive files go out.

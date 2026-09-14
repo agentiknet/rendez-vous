@@ -46,6 +46,10 @@ import type { Room } from "../rooms/types.ts"
 import { sendReachedNobody } from "./post-turn-assertions.ts"
 import { roomViewHtml } from "./room-view.html.ts"
 import type { McpResponse, McpServerMount } from "./mcp-canvakit.ts"
+import type { TtsProvider } from "../media/openai.ts"
+import type { SpeechMediaStore } from "../markers.ts"
+import { parseSpeech, renderSpeech } from "../markers.ts"
+import type { OutboundAttachment } from "./transports.ts"
 
 /** The delivery half of the audience tools (PLAN §3.2): the `say`/`whisper`
  *  handlers below only ACCEPT — validation, `pending` `Delivery` records and
@@ -157,6 +161,20 @@ export interface McpRoomDeps {
     code: string,
     memberId: string,
   ) => Promise<"accepted" | "no-surface" | "conflict" | "unknown">
+  /** TTS provider for rendering `[[say …]]` markers inside say/whisper
+   *  calls. Both `tts` and `mediaStore` must be set for audio to be
+   *  produced; when either is absent the spoken words are delivered as
+   *  text. */
+  readonly tts?: TtsProvider
+  readonly mediaStore?: SpeechMediaStore
+  /** Deliver a voice-note attachment (the result of rendering a `[[say …]]`
+   *  marker inside a say/whisper call) to one member. When absent, spoken
+   *  words from markers are included in the delivery text instead. */
+  readonly deliverAttachment?: (
+    code: string,
+    memberId: string,
+    attachment: OutboundAttachment,
+  ) => Promise<void>
 }
 
 // --- JSON-RPC / MCP wire handling: same hand-rolled surface as canvakit's
@@ -535,11 +553,26 @@ export function createMcpRoomHandler(
         const args = isRecord(params.arguments) ? params.arguments : {}
         const parsed = parseAudienceSendArgs(args, privacy)
         if ("error" in parsed) return fail(id, INVALID_REQUEST, parsed.error)
-        // Target resolution (`to` omitted = every current member,
-        // deliberately) and the unroutable-outcome conversion are the
-        // contract's (`sendAudience`), never the envelope's.
-        const outcome = await sendAudience(room, deliveries, parsed.input)
+        // BRIEF-31: parse markers from the text so `[[say …]]` is stripped
+        // from delivery and rendered as a voice note (or its text fallback).
+        // One extractor shared with RoomFanout — never a second parser.
+        const { text: cleanText, spoken } = parseSpeech(parsed.input.text)
+        let textToDeliver = cleanText
+        if (spoken.length > 0) {
+          if (deps.deliverAttachment === undefined) {
+            textToDeliver = [cleanText, ...spoken].filter((s) => s.length > 0).join("\n")
+          }
+        }
+        const outcome = await sendAudience(room, deliveries, { ...parsed.input, text: textToDeliver })
         if (!outcome.ok) return fail(id, INVALID_REQUEST, `unroutable delivery: ${outcome.message}`)
+        if (spoken.length > 0 && outcome.accepted.length > 0 && deps.deliverAttachment !== undefined) {
+          const notes = await renderSpeech(room.code, spoken, deps.tts, deps.mediaStore)
+          for (const memberId of outcome.accepted) {
+            for (const note of notes) {
+              await deps.deliverAttachment(room.code, memberId, note)
+            }
+          }
+        }
         // Assertion 2 (BRIEF-15, post-turn-assertions): every id the agent
         // explicitly named was unknown, so the send reached nobody — a fact
         // already in `outcome`, nothing new computed. Observed, never
