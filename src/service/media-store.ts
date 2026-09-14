@@ -100,6 +100,7 @@ export class MediaStore {
     if (type === "image/jpeg") return "jpg"
     if (type === "image/webp") return "webp"
     if (type === "image/gif") return "gif"
+    if (type === "audio/ogg") return "ogg"
     return "bin"
   }
 

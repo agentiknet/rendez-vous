@@ -2095,3 +2095,80 @@ test("BRIEF-31: roomMcpDeps wires tts/mediaStore/deliverAttachment when openai k
   assert.equal(withoutKey.mediaStore, undefined, "mediaStore omitted without openai key")
   assert.equal(withoutKey.deliverAttachment, undefined, "deliverAttachment omitted without openai key")
 })
+
+// BRIEF-35: the egress media route serves the record's own contentType,
+// not a hardcoded application/pdf for everything.
+
+test("BRIEF-35: egress media record saved as audio/ogg is served with content-type audio/ogg", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const mediaStore = new MediaStore(dir)
+  const service = new RoomService({
+    store, client, booter, transport: new MemoryTransport(),
+    daemon: { baseUrl: daemon.url, token: undefined }, mediaStore,
+  })
+  services.push(service)
+
+  const created = await service.handleInbound({
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+1" },
+    displayName: "Alice", tier: "messenger", text: "new",
+  })
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") throw new Error("unreachable")
+
+  const audioBytes = Buffer.from("fake-ogg-data")
+  const record = await mediaStore.save(created.room.code, audioBytes, { contentType: "audio/ogg", pages: 1 })
+
+  const server = createHttpServer(service, { mediaStore, renders: new ArtifactRenderStore(dir) })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const address = server.address()
+  if (!isAddressInfo(address)) throw new Error("failed to bind")
+  servers.push({ close: () => new Promise<void>((resolve) => server.close(() => resolve())) })
+  const baseUrl = `http://127.0.0.1:${address.port}`
+
+  const res = await fetch(`${baseUrl}/r/${created.room.code}/media/${record.id}`)
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get("content-type"), "audio/ogg")
+  const served = Buffer.from(await res.arrayBuffer())
+  assert.deepEqual(served, audioBytes)
+})
+
+test("BRIEF-35: egress media record saved as application/pdf is still served with content-type application/pdf", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const mediaStore = new MediaStore(dir)
+  const service = new RoomService({
+    store, client, booter, transport: new MemoryTransport(),
+    daemon: { baseUrl: daemon.url, token: undefined }, mediaStore,
+  })
+  services.push(service)
+
+  const created = await service.handleInbound({
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+1" },
+    displayName: "Alice", tier: "messenger", text: "new",
+  })
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") throw new Error("unreachable")
+
+  const pdfBytes = Buffer.from("%PDF-1.7 fake")
+  const record = await mediaStore.save(created.room.code, pdfBytes, { contentType: "application/pdf", pages: 1 })
+
+  const server = createHttpServer(service, { mediaStore, renders: new ArtifactRenderStore(dir) })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const address = server.address()
+  if (!isAddressInfo(address)) throw new Error("failed to bind")
+  servers.push({ close: () => new Promise<void>((resolve) => server.close(() => resolve())) })
+  const baseUrl = `http://127.0.0.1:${address.port}`
+
+  const res = await fetch(`${baseUrl}/r/${created.room.code}/media/${record.id}`)
+  assert.equal(res.status, 200)
+  assert.equal(res.headers.get("content-type"), "application/pdf")
+  const served = Buffer.from(await res.arrayBuffer())
+  assert.deepEqual(served, pdfBytes)
+})

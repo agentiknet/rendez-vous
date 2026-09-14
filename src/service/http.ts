@@ -1038,7 +1038,6 @@ async function handleRoomAgui(
  *  both 404; because the store is keyed `roomCode/mediaId`, a record landed
  *  in another room is not served under this code either. */
 async function handleRoomMedia(
-  service: RoomService,
   media: MediaIngress,
   res: ServerResponse,
   encodedCode: string,
@@ -1057,12 +1056,17 @@ async function handleRoomMedia(
     res.end(data)
     return
   }
-  const data = await service.readMedia(code, id)
+  const egressRecord = media.store.get(code, id)
+  if (egressRecord === undefined) {
+    sendJson(res, 404, { error: "not_found" })
+    return
+  }
+  const data = await media.store.read(code, id)
   if (data === undefined) {
     sendJson(res, 404, { error: "not_found" })
     return
   }
-  res.writeHead(200, { "content-type": "application/pdf", "content-length": data.length })
+  res.writeHead(200, { "content-type": egressRecord.contentType, "content-length": data.length })
   res.end(data)
 }
 
@@ -1358,7 +1362,7 @@ async function handle(
       sendJson(res, 400, { error: "invalid_code" })
       return
     }
-    await handleRoomMedia(service, media, res, encodedCode, encodedId)
+    await handleRoomMedia(media, res, encodedCode, encodedId)
     return
   }
 

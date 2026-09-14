@@ -561,6 +561,8 @@ export function createMcpRoomHandler(
         if (spoken.length > 0) {
           if (deps.deliverAttachment === undefined) {
             textToDeliver = [cleanText, ...spoken].filter((s) => s.length > 0).join("\n")
+          } else if (cleanText.length === 0) {
+            textToDeliver = spoken.join("\n")
           }
         }
         const outcome = await sendAudience(room, deliveries, { ...parsed.input, text: textToDeliver })

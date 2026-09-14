@@ -774,3 +774,28 @@ test("BRIEF-31: TTS unconfigured with deliverAttachment wired — spoken words d
   const allOutput = JSON.stringify(res)
   assert.ok(!allOutput.includes("[["), "the tool response must not contain literal brackets")
 })
+
+test("BRIEF-35: a say with only [[say...]] and deliverAttachment wired never carries empty text in the delivery record", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const room = h.store.get(h.code)
+  assert.ok(room !== undefined)
+
+  const deliveries: { memberId: string; text: string }[] = []
+  const deps: McpRoomDeps = {
+    rooms: () => [room],
+    deliveries: h.engine,
+    deliverAttachment: async (_code, memberId, attachment) => {
+      deliveries.push({ memberId, text: attachment.caption ?? "" })
+    },
+  }
+  const handler = createMcpRoomHandler(deps)
+
+  const res = asRpc(await callTool(handler, "say", { text: "[[say hello there]]" }, h.code))
+  assert.equal(res.status, 200)
+  await h.engine.drain(h.code)
+
+  for (const send of h.transport.sends) {
+    assert.ok(send.text.length > 0, "delivery text must not be empty when a [[say…]] marker is the only content")
+    assert.ok(send.text.includes("hello there"), "delivery text must carry the spoken words")
+  }
+})
