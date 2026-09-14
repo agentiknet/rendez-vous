@@ -43,9 +43,10 @@
  */
 
 import type { OutboundMessage, Transport } from "../../fanout/types.ts"
-import type { Member } from "../../rooms/types.ts"
+import { SendBlockedError } from "../../fanout/types.ts"
+import { deliveryModeOf, type Member } from "../../rooms/types.ts"
 import { attachmentFallbackText, type OutboundAttachment } from "../../service/transports.ts"
-import { AgentpushToolClient, type AgentpushToolClientOptions, isUploadMediaResult } from "./tools-client.ts"
+import { AgentpushToolClient, type AgentpushToolClientOptions, isSendMessageResult, isUploadMediaResult } from "./tools-client.ts"
 
 type MessengerProvider = "whatsapp" | "telegram" | "sms"
 
@@ -63,9 +64,9 @@ export class AgentpushTransport implements Transport {
   }
 
   async send(member: Member, message: OutboundMessage): Promise<void> {
-    const provider = messengerProvider(member.address.provider)
+    const provider = this.providerFor(member)
     if (provider === undefined) return
-    await this.sendText(member.id, provider, member.address.contactRef, message.text)
+    await this.checkedSend(member.id, provider, member.address.contactRef, { text: message.text })
   }
 
   /** Two real paths, one fallback:
@@ -83,7 +84,7 @@ export class AgentpushTransport implements Transport {
    *    real; treating it as unfixable was not.
    */
   async sendMedia(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<void> {
-    const provider = messengerProvider(member.address.provider)
+    const provider = this.providerFor(member)
     if (provider === undefined) return
 
     if (provider !== "whatsapp") {
@@ -91,9 +92,9 @@ export class AgentpushTransport implements Transport {
         await this.sendText(member.id, provider, member.address.contactRef, caption)
         return
       }
-      await this.client.call(`member ${member.id}`, "send_message", {
-        to: { channel: provider, address: member.address.contactRef },
-        content: { text: caption, media: [{ type: "image", url: publicUrl, caption }] },
+      await this.checkedSend(member.id, provider, member.address.contactRef, {
+        text: caption,
+        media: [{ type: "image", url: publicUrl, caption }],
       })
       return
     }
@@ -104,9 +105,9 @@ export class AgentpushTransport implements Transport {
       return
     }
 
-    await this.client.call(`member ${member.id}`, "send_message", {
-      to: { channel: provider, address: member.address.contactRef },
-      content: { text: caption, media: [{ type: "image", providerMediaId: mediaId, caption }] },
+    await this.checkedSend(member.id, provider, member.address.contactRef, {
+      text: caption,
+      media: [{ type: "image", providerMediaId: mediaId, caption }],
     })
   }
 
@@ -117,7 +118,7 @@ export class AgentpushTransport implements Transport {
    *  Telegram alike, with no per-provider branch. SMS has no media at all and
    *  degrades to the URL as text. */
   async sendAttachment(member: Member, attachment: OutboundAttachment): Promise<void> {
-    const provider = messengerProvider(member.address.provider)
+    const provider = this.providerFor(member)
     if (provider === undefined) return
 
     if (provider === "sms") {
@@ -125,25 +126,76 @@ export class AgentpushTransport implements Transport {
       return
     }
 
-    await this.client.call(`member ${member.id}`, "send_message", {
-      to: { channel: provider, address: member.address.contactRef },
-      content: {
-        ...(attachment.caption !== undefined ? { text: attachment.caption } : {}),
-        media: [
-          {
-            type: attachment.kind,
-            url: attachment.url,
-            filename: attachment.filename,
-            mimeType: attachment.mimeType,
-            ...(attachment.caption !== undefined ? { caption: attachment.caption } : {}),
-          },
-        ],
-      },
+    await this.checkedSend(member.id, provider, member.address.contactRef, {
+      ...(attachment.caption !== undefined ? { text: attachment.caption } : {}),
+      media: [
+        {
+          type: attachment.kind,
+          url: attachment.url,
+          filename: attachment.filename,
+          mimeType: attachment.mimeType,
+          ...(attachment.caption !== undefined ? { caption: attachment.caption } : {}),
+        },
+      ],
     })
   }
 
+  /** BRIEF-42: which messenger provider — and when `undefined`, is the
+   *  silence legitimate? A room-web member is a PULL recipient: they have no
+   *  push transport at all, so this transport doing nothing is correct (the
+   *  existing no-op tests pin that). But a PUSH member whose provider this
+   *  messenger transport cannot name (`email`, `console`, anything unknown)
+   *  reaching here is a caller bug — returning silently would be stamped
+   *  `confirmedBy: "transport"` just like a blocked send. It throws. */
+  private providerFor(member: Member): MessengerProvider | undefined {
+    const provider = messengerProvider(member.address.provider)
+    if (provider !== undefined) return provider
+    let mode: "push" | "pull"
+    try {
+      mode = deliveryModeOf(member)
+    } catch {
+      // An address nobody routes at all (deliveryFromAddress threw) is
+      // push-shaped by MemberSender's own convention — and equally unable
+      // to be delivered here.
+      mode = "push"
+    }
+    if (mode === "pull") return undefined
+    throw new Error(
+      `agentpush transport cannot deliver to member ${member.id}: unrecognized push provider "${member.address.provider}"`,
+    )
+  }
+
+  /** One `send_message` whose result is actually read: a `blocked` refusal
+   *  becomes a `SendBlockedError` carrying the blocked_reason verbatim
+   *  (permanent — the engine must not retry it), a `failed` result or a
+   *  missing result becomes a plain error (transient — the ordinary retry
+   *  path runs). BRIEF-42: `client.call` never throws, so without this
+   *  every one of these resolved silently and the caller stamped a
+   *  confirmation for a hand-off that never happened. Shared by `send`,
+   *  `sendMedia` and `sendAttachment`. */
+  private async checkedSend(
+    memberId: string,
+    provider: MessengerProvider,
+    address: string,
+    content: Record<string, unknown>,
+  ): Promise<void> {
+    const result = await this.client.call(`member ${memberId}`, "send_message", {
+      to: { channel: provider, address },
+      content,
+    })
+    if (result === undefined) {
+      throw new Error(`agentpush send_message returned no result for member ${memberId}`)
+    }
+    if (isSendMessageResult(result) && result.status === "blocked") {
+      throw new SendBlockedError(result.blocked_reason)
+    }
+    if (isSendMessageResult(result) && result.status === "failed") {
+      throw new Error(result.error)
+    }
+  }
+
   private async sendText(memberId: string, provider: MessengerProvider, address: string, text: string): Promise<void> {
-    await this.client.call(`member ${memberId}`, "send_message", { to: { channel: provider, address }, content: { text } })
+    await this.checkedSend(memberId, provider, address, { text })
   }
 
   private async uploadImage(memberId: string, provider: MessengerProvider, png: Uint8Array): Promise<string | undefined> {

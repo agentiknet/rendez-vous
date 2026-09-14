@@ -18,6 +18,7 @@
 
 import { renderForTier } from "../fanout/render.ts"
 import type { OutboundMessage, Transport } from "../fanout/types.ts"
+import { SendBlockedError } from "../fanout/types.ts"
 import { whisperNoticeOf } from "../audience/contract.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import {
@@ -596,6 +597,22 @@ export class DeliveryEngine {
           }
           return
         } catch (error: unknown) {
+          if (error instanceof SendBlockedError) {
+            // BRIEF-42: the provider itself refused (its policy gate, HTTP
+            // 200) — a deterministic, permanent refusal, not a flaky send.
+            // Retrying would replay the same refusal four more times, so the
+            // record goes straight to `failed` with the blocked_reason
+            // verbatim as `lastError`, and the agent is told once. No
+            // `confirmedBy` here — nobody confirmed anything.
+            const failures = MAX_DELIVERY_ATTEMPTS
+            await this.mark(code, delivery.id, {
+              failures,
+              status: "failed",
+              lastError: error.blockedReason,
+            })
+            await this.reportFinalFailure(code, delivery, failures, error.blockedReason)
+            return
+          }
           lastError = messageOf(error)
         }
       }
