@@ -175,9 +175,12 @@ export class RoomFanout {
    *  inbound message started the room's CURRENT/most recent turn, if any —
    *  wired by `RoomService` to the sender it already resolves in
    *  `handleMessage`, right before it fans the message into the session.
-   *  `undefined` (the default: no wiring, or no inbound has triggered a turn
-   *  yet) means the fact does not exist, so the assertion is skipped — never
-   *  guessed. */
+   *  The fact is a ONE-SHOT obligation (brief 36): the production wiring
+   *  consumes it on read, so the first post-turn check that runs for an
+   *  inbound discharges it, and a later turn that member did not start is
+   *  never judged against it. `undefined` (the default: no wiring, no
+   *  inbound, or the obligation already discharged) means the fact does not
+   *  exist, so the assertion is skipped — never guessed. */
   private readonly triggeredBy: (code: string) => string | undefined
 
   /** Both undefined unless TTS is configured. `[[say …]]` needs somewhere to
@@ -209,8 +212,10 @@ export class RoomFanout {
     probeUrl?: ArtifactProbe
     reportUnservable?: (code: string, correction: string) => Promise<void>
     /** Assertion 4's fact (BRIEF-15, post-turn-assertions) — see
-     *  `triggeredBy`'s doc. Omitted in every existing harness that never
-     *  wires it, which is exactly "no fact, skip the assertion". */
+     *  `triggeredBy`'s doc. One-shot in production (brief 36): the wiring
+     *  consumes the fact on read, so each inbound is checked exactly once.
+     *  Omitted in every existing harness that never wires it, which is
+     *  exactly "no fact, skip the assertion". */
     triggeredBy?: (code: string) => string | undefined
   }) {
     this.store = opts.store

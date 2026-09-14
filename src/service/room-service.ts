@@ -355,9 +355,18 @@ export class RoomService {
   private readonly sender: MemberSender
   private readonly fanout: RoomFanout
   /** Assertion 4's fact (BRIEF-15, post-turn-assertions): the member whose
-   *  inbound message most recently started this room's turn, set right
-   *  before `handleMessage` fans it into the session and read back by the
-   *  fan-out's post-turn check via `triggeredBy`. In-process only, like
+   *  inbound message started this room's turn, set right before
+   *  `handleMessage` fans it into the session and read back by the fan-out's
+   *  post-turn check via `triggeredBy`. A ONE-SHOT obligation (brief 36),
+   *  not a standing property of the room: the first post-turn check that
+   *  reads it consumes it, so once the check has run for an inbound it is
+   *  discharged and a later turn that member did not start (an idle sweep,
+   *  a resume, another member's message) is never judged against it. The
+   *  old set-and-never-cleared shape made the fact mean "who most recently
+   *  sent anything, possibly long ago", so a turn the agent ended without
+   *  speaking — after a resume banner had already answered the member —
+   *  fired "your message did not get a reply" at someone who had just been
+   *  answered: delivery reading as absence. In-process only, like
    *  `lastSeenCursor` below — a restart loses the fact, which just means the
    *  first turn after a restart skips the assertion rather than guessing. */
   private readonly lastInboundMemberId = new Map<string, string>()
@@ -495,7 +504,14 @@ export class RoomService {
       reportUnservable: (code, correction) => this.reportUnservableArtifact(code, correction),
       // Assertion 4 (BRIEF-15, post-turn-assertions): who started the turn
       // the fan-out is about to flush, if it was an ordinary inbound message.
-      triggeredBy: (code) => this.lastInboundMemberId.get(code),
+      // One-shot (brief 36): reading it discharges it, so the obligation is
+      // asked once per inbound and never re-asked on a later turn that
+      // member did not start.
+      triggeredBy: (code) => {
+        const memberId = this.lastInboundMemberId.get(code)
+        this.lastInboundMemberId.delete(code)
+        return memberId
+      },
       ...(opts.probeUrl !== undefined ? { probeUrl: opts.probeUrl } : {}),
       ...(openaiKey !== undefined ? { tts: new OpenAiTtsProvider(openaiKey), mediaStore: this.mediaStore } : {}),
     })
@@ -1305,7 +1321,8 @@ export class RoomService {
 
     // Assertion 4's fact (BRIEF-15, post-turn-assertions): recorded right
     // before the fan-in that starts the turn, so the fan-out's post-turn
-    // check has someone to compare its deliveries against.
+    // check has someone to compare its deliveries against. One-shot (brief
+    // 36): the first check that reads it consumes it.
     this.lastInboundMemberId.set(room.code, member.id)
     const result = await fanIn(this.client, room.sessionId, { ...member, channel: member.address.provider }, input.text)
     await this.touchActivity(room.code)

@@ -1347,3 +1347,122 @@ test("a telegram principal whose contactRef equals a browser's OWN claimed room-
   assert.notEqual(screen.displayName, "Human In The Browser")
   assert.equal(screen.address.contactRef, "telegram:6371794295")
 })
+
+// ---------------------------------------------------------------------------
+// BRIEF 36: assertion 4's trigger fact is a ONE-SHOT obligation, not a
+// standing property of the room. The measured sequence on `RDV-W6H6`
+// (rehearsal 02, finding 1): the member was answered — the resume banner's
+// `say`, minted on the room's own path — and five seconds later the same
+// room told him "Your message did not get a reply this turn.", because the
+// trigger fact was set and never cleared, so a later flush that minted
+// nothing was still judged against it. Delivery reading as absence.
+//
+// These run through the REAL wiring — `handleInbound` sets the fact, the
+// fan-out's post-turn check consumes it — so the take-once discharge in
+// `RoomService` is exactly what is under test.
+// ---------------------------------------------------------------------------
+
+const REPLY_WARNING = "Your message did not get a reply this turn."
+
+function replyWarnings(transport: MemoryTransport): RecordedSend[] {
+  return transport.sends.filter((send) => send.message.text.includes(REPLY_WARNING))
+}
+
+interface Brief36Room {
+  service: RoomService
+  store: RoomStore
+  transport: MemoryTransport
+  daemon: ExtendedFakeDaemon
+  code: string
+  aliceId: string
+  sessionId: string
+}
+
+async function brief36Room(): Promise<Brief36Room> {
+  const { service, store, transport, daemon } = await buildHarness()
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") throw new Error("room creation failed")
+  const aliceMember = created.room.members[0]
+  assert.ok(aliceMember !== undefined)
+  const sessionId = created.room.sessionId
+  assert.ok(sessionId !== undefined)
+  return { service, store, transport, daemon, code: created.room.code, aliceId: aliceMember.id, sessionId }
+}
+
+async function runDaemonTurn(daemon: ExtendedFakeDaemon, sessionId: string, store: RoomStore, code: string, seq: number, text: string): Promise<void> {
+  daemon.pushRecord(sessionId, { seq, kind: "text-delta", text })
+  daemon.pushRecord(sessionId, { seq: seq + 1, kind: "turn-end", reason: "completed" })
+  const target = seq + 1
+  await waitFor(() => (store.get(code)?.cursor ?? 0) === target)
+}
+
+test("BRIEF-36: the measured sequence — banner answers on one flush, a later empty flush must not fire turn-answered-nobody", async () => {
+  const { service, store, transport, daemon, code, aliceId, sessionId } = await brief36Room()
+
+  const inbound = await service.handleInbound(alice("On en etait ou ?"))
+  assert.equal(inbound.kind, "message")
+
+  // The resume banner, minted the way the room's own voice mints it: a
+  // `say` and a `system` record, both addressed to the member who spoke.
+  await service.deliveryEngine.accept(code, "say", "Room shale-lagoon-sage is back — I still have us at: le PDF envoyé.", [aliceId])
+  await service.deliveryEngine.accept(code, "system", "Room resumed. https://rdv.clipgen.co/r/shale-lagoon-sage/artifact/", [aliceId])
+
+  // First flush: the banner is in this turn's window, so the member WAS
+  // answered — and the obligation is discharged here.
+  await runDaemonTurn(daemon, sessionId, store, code, 1, "reprise de la salle")
+
+  // Second flush mints nothing. The stale trigger must not fire here.
+  await runDaemonTurn(daemon, sessionId, store, code, 3, "thinking, nothing minted")
+
+  assert.equal(replyWarnings(transport).length, 0, "a member who was answered by the banner must not be told nobody replied")
+})
+
+test("BRIEF-36: a genuine silent turn — an inbound the agent never answers — still reports exactly once, to that member alone", async () => {
+  const { service, store, transport, daemon, code, aliceId, sessionId } = await brief36Room()
+
+  const inbound = await service.handleInbound(alice("hello?"))
+  assert.equal(inbound.kind, "message")
+
+  // The turn mints nothing addressed to anyone — the assertion must not be
+  // weakened into uselessness by the one-shot discharge.
+  await runDaemonTurn(daemon, sessionId, store, code, 1, "prose only, no tool call")
+
+  const warnings = replyWarnings(transport)
+  assert.equal(warnings.length, 1, "a genuinely unanswered inbound must still produce the warning, exactly once")
+  assert.equal(warnings[0]?.member.id, aliceId, "the warning goes to the member who was not answered, alone")
+})
+
+test("BRIEF-36: after M's turn is answered and discharged, a turn M did not start mints nothing for M and fires nothing", async () => {
+  const { service, store, transport, daemon, code, aliceId, sessionId } = await brief36Room()
+
+  const inbound = await service.handleInbound(alice("what did we decide?"))
+  assert.equal(inbound.kind, "message")
+  await service.deliveryEngine.accept(code, "say", "We decided on the 1200€ plan.", [aliceId])
+  await runDaemonTurn(daemon, sessionId, store, code, 1, "answering alice")
+
+  // A turn alice did not start — an idle sweep, a resume, anything — with
+  // no new inbound and nothing minted for her. Without the discharge this
+  // flush is still judged against her stale trigger.
+  await runDaemonTurn(daemon, sessionId, store, code, 3, "thinking, nothing minted")
+
+  assert.equal(replyWarnings(transport).length, 0, "a member must never be judged on a turn they did not start")
+})
+
+test("BRIEF-36: two inbounds in a row from the same member — the first answered, the second not — and the second still fires", async () => {
+  const { service, store, transport, daemon, code, aliceId, sessionId } = await brief36Room()
+
+  const first = await service.handleInbound(alice("first question"))
+  assert.equal(first.kind, "message")
+  await service.deliveryEngine.accept(code, "say", "Here is the answer.", [aliceId])
+  await runDaemonTurn(daemon, sessionId, store, code, 1, "answering the first question")
+
+  // The obligation is per-inbound: a second unanswered inbound re-arms it.
+  const second = await service.handleInbound(alice("second question"))
+  assert.equal(second.kind, "message")
+  await runDaemonTurn(daemon, sessionId, store, code, 3, "thinking, nothing minted for the second")
+
+  const warnings = replyWarnings(transport)
+  assert.equal(warnings.length, 1, "the second inbound was genuinely unanswered — exactly one warning")
+  assert.equal(warnings[0]?.member.id, aliceId)
+})
