@@ -255,6 +255,39 @@ export const mergeRoomCodes = (
   }
 }
 
+/** One incoming JSON-RPC message, as far as the panel classifies it: enough
+ *  to tell a RESPONSE (an `id`, no `method`) from a REQUEST or notification
+ *  (a `method`). Every field optional because this is `event.data` off a
+ *  postMessage boundary, which is not this panel's to trust. */
+export interface HostMessage {
+  readonly jsonrpc?: string
+  readonly id?: number | null
+  readonly method?: string | null
+}
+
+/**
+ * FIX 1 — a request is not a response.
+ *
+ * A JSON-RPC message carrying a `method` is a REQUEST (or a notification);
+ * only a message with an `id` and no `method` may settle a pending call.
+ * `hostRequest` posts `ui/initialize` to `window.parent`; in standalone mode
+ * `window.parent === window`, so that request echoed straight back into this
+ * panel's own listener, every old guard passed, and `message.result` — which
+ * is `undefined` on a request — was resolved as a successful answer. The
+ * list then read as "You are in no rooms yet." with zero errors.
+ *
+ * agentproto's own bridge requires the same: `panel-bridge.ts`'s
+ * `if (msg.id != null && msg.method == null)` before it looks up the waiter.
+ * A message that is not a response returns `false`, the waiter stays
+ * pending, and the poll loop fails visibly.
+ */
+export const isHostResponse = (message: HostMessage | null): boolean => {
+  if (message === null || typeof message !== "object") return false
+  if (message.jsonrpc !== "2.0") return false
+  if (message.id === undefined || message.id === null) return false
+  return message.method === undefined || message.method === null
+}
+
 /** One row's PRESENTATION, shared by the shipped panel and the tests.
  *  Everything here is `textContent` on an element whose only other property
  *  is a `className` — no attribute is ever set, so the room identity cannot
@@ -378,6 +411,7 @@ function script(principalLabel: string, publicUrl: string): string {
     const unreadLabelOf = ${unreadLabelOf.toString()};
     const planRosterRows = ${planRosterRows.toString()};
     const mergeRoomCodes = ${mergeRoomCodes.toString()};
+    const isHostResponse = ${isHostResponse.toString()};
     const renderRosterRow = ${renderRosterRow.toString()};
 
     const roomsEl = document.getElementById("rooms");
@@ -396,8 +430,11 @@ function script(principalLabel: string, publicUrl: string): string {
     window.addEventListener("message", function (event) {
       if (event.source !== window.parent) return;
       const message = event.data;
-      if (message === null || typeof message !== "object") return;
-      if (message.jsonrpc !== "2.0" || message.id === undefined) return;
+      // FIX 1: a message carrying a "method" is a REQUEST, never a response.
+      // In standalone mode (window.parent === window) this panel's own
+      // request echoes back here; the old guard read it as a successful
+      // empty answer. See isHostResponse.
+      if (!isHostResponse(message)) return;
       const waiter = pending.get(message.id);
       if (waiter === undefined) return;
       pending.delete(message.id);

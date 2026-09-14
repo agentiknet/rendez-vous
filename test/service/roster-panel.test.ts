@@ -7,6 +7,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import {
+  isHostResponse,
   mergeRoomCodes,
   planRosterRows,
   presenceViewOf,
@@ -240,4 +241,33 @@ test("the panel sends through the host, and fetches only the auth-free spectator
   const line = html.split("\n").find((candidate) => /\bfetch\(/.test(candidate)) ?? ""
   assert.ok(line.includes('PUBLIC_URL + "/r/"'), `the one fetch must be the spectator projection, got: ${line.trim()}`)
   assert.ok(line.includes('"/state"'), `…/state and nothing else, got: ${line.trim()}`)
+})
+
+// --- FIX 1: a request is not a response. The panel's own `ui/initialize`
+// echoed back to it in standalone mode must never settle the pending call —
+// otherwise its own question is read as a successful empty answer. ---
+
+test("an echoed request is never read as its answer: the pending call stays pending", () => {
+  const ownRequest = { jsonrpc: "2.0", id: 7, method: "ui/initialize", params: {} }
+  assert.equal(isHostResponse(ownRequest), false, "a message carrying a method is a REQUEST, not the response")
+
+  const notification = { jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} }
+  assert.equal(isHostResponse(notification), false, "a notification has no id and can settle nothing")
+
+  // The consequence in the shipped listener: the waiter keyed by the id it
+  // would otherwise resolve is never touched, so the 15s timeout is what
+  // ends this call — an honest failure, not a fabricated success.
+  const pending = new Map<number, string>([[7, "waiter for ui/initialize"]])
+  if (isHostResponse(ownRequest)) pending.delete(ownRequest.id)
+  assert.equal(pending.has(7), true, "the panel's own question must not be consumed as its answer")
+
+  // The real response shapes still settle (and a host refusal still rejects).
+  const response = { jsonrpc: "2.0", id: 7, result: { ok: true } }
+  assert.equal(isHostResponse(response), true)
+  const refusal = { jsonrpc: "2.0", id: 7, error: { message: "refused" } }
+  assert.equal(isHostResponse(refusal), true, "an error response is still a response")
+
+  assert.equal(isHostResponse(null), false)
+  const wrongVersion = { jsonrpc: "1.0", id: 7 }
+  assert.equal(isHostResponse(wrongVersion), false, "not JSON-RPC 2.0")
 })
