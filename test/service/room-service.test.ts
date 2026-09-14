@@ -430,17 +430,22 @@ test("BRIEF-15: an ordinary message from an address ambiguously in two rooms rep
   assert.ok(joined.kind === "joined" || joined.kind === "moved")
 
   transport.sends.length = 0
-  // Another message without a room code — ambiguity persists (R3 is per-message).
+  // BRIEF-27: `join <code>` now resolves the ambiguity — after the join, the
+  // address is in exactly one room, and the next message is no longer treated
+  // as ambiguous-sender. The read-side invariant (an unaddressed message from
+  // an address genuinely in several rooms is NOT silently routed) is verified
+  // by the first part of this test, above.
   const warnings2: string[] = []
   const warn2 = console.warn
   console.warn = (...args: unknown[]) => { warnings2.push(args.map(String).join(" ")) }
   try {
-    await service.handleInbound(alice("still no room code?"))
+    const next = await service.handleInbound(alice("still no room code?"))
+    assert.ok(next.kind !== "unknown-sender", "after a join that resolves the ambiguity, the next message routes normally")
   } finally {
     console.warn = warn2
   }
   const assertionWarnings2 = warnings2.filter((w) => w.includes("ambiguous-sender"))
-  assert.ok(assertionWarnings2.length > 0, "the next message without a room code still triggers the assertion")
+  assert.equal(assertionWarnings2.length, 0, "the ambiguity is resolved by the join, so the next message does not trigger ambiguous-sender")
 })
 
 test("BRIEF-20: 'join <slug>' refuses a stranger, resolves for an existing member, and 'resume <slug>' revives a paused room for that member", async () => {

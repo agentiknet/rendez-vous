@@ -55,7 +55,7 @@ const parseTable: Array<[string, unknown]> = [
   ["LEAVE", { kind: "leave" }],
   ["  leave  ", { kind: "leave" }],
   ["leaves", undefined],
-  ["leave RDV-7F3K", undefined],
+  ["leave RDV-7F3K", { kind: "leave", code: "RDV-7F3K" }],
 ]
 
 for (const [input, expected] of parseTable) {
@@ -272,4 +272,167 @@ test("BRIEF-13 R1: 'resume' on a different room than the one the address is alre
 
   const memberships = roomsContaining(store, alice().address)
   assert.deepEqual(memberships, [roomB.room.code], "alice must hold exactly one membership store-wide, in the room she resumed into")
+})
+
+/** BRIEF-27: join from an address in THREE rooms into a fourth ends the address
+ *  in exactly one room — the named one. Asserting only "is in the named room"
+ *  passes against today's broken code (which adds a fourth membership for the
+ *  new room without removing any of the three), so assert the COUNT too. */
+test("BRIEF-27 R1: join from three rooms into a fourth ends the address in exactly one room", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+
+  const roomA = await handleCommand(store, { kind: "new" }, bob())
+  assert.ok(roomA.ok)
+  if (!roomA.ok) return
+  const roomB = await handleCommand(store, { kind: "new" }, bob())
+  assert.ok(roomB.ok)
+  if (!roomB.ok) return
+  const roomC = await handleCommand(store, { kind: "new" }, bob())
+  assert.ok(roomC.ok)
+  if (!roomC.ok) return
+  const roomD = await handleCommand(store, { kind: "new" }, bob())
+  assert.ok(roomD.ok)
+  if (!roomD.ok) return
+
+  // Put alice into three rooms by manually adding her to each (create is
+  // R1-gated and would move her away; store.addMember has no such guard).
+  await store.addMember(roomA.room.code, alice())
+  await store.addMember(roomB.room.code, alice())
+  await store.addMember(roomC.room.code, alice())
+  assert.equal(roomsContaining(store, alice().address).length, 3, "alice must be in exactly three rooms before the join")
+
+  const joined = await handleCommand(store, { kind: "join", code: roomD.room.code }, alice())
+  assert.equal(joined.ok, true)
+  if (!joined.ok) return
+  assert.equal(joined.room.code, roomD.room.code)
+
+  const memberships = roomsContaining(store, alice().address)
+  assert.equal(memberships.length, 1, "alice must hold exactly one membership store-wide")
+  assert.deepEqual(memberships, [roomD.room.code], "alice must be in the room she joined, not any of the three she was in")
+})
+
+/** BRIEF-27: when several rooms were left, the result must report every one
+ *  of them, not silently name one and hide the rest. */
+test("BRIEF-27: join from ambiguous reports every room left in movedFrom", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+
+  const roomA = await handleCommand(store, { kind: "new" }, bob())
+  assert.ok(roomA.ok)
+  if (!roomA.ok) return
+  const roomB = await handleCommand(store, { kind: "new" }, bob())
+  assert.ok(roomB.ok)
+  if (!roomB.ok) return
+  const roomC = await handleCommand(store, { kind: "new" }, bob())
+  assert.ok(roomC.ok)
+  if (!roomC.ok) return
+  const roomD = await handleCommand(store, { kind: "new" }, bob())
+  assert.ok(roomD.ok)
+  if (!roomD.ok) return
+
+  await store.addMember(roomA.room.code, alice())
+  await store.addMember(roomB.room.code, alice())
+  await store.addMember(roomC.room.code, alice())
+
+  const joined = await handleCommand(store, { kind: "join", code: roomD.room.code }, alice())
+  assert.equal(joined.ok, true)
+  if (!joined.ok) return
+
+  const codes = [roomA.room.code, roomB.room.code, roomC.room.code]
+  const movedFrom = (joined as { ok: true; movedFrom: string | string[] }).movedFrom
+  assert.ok(Array.isArray(movedFrom), "movedFrom must be an array when several rooms were left")
+  assert.equal((movedFrom as string[]).length, 3, "movedFrom must name all three left rooms")
+  for (const code of codes) {
+    assert.ok((movedFrom as string[]).includes(code), `movedFrom must include ${code}`)
+  }
+})
+
+/** BRIEF-27: join from an address in exactly one other room still behaves as
+ *  it does today — the unchanged arm. Without this, the fix could be a
+ *  rewrite that regresses the common path. */
+test("BRIEF-27: join from one other room still moves and reports movedFrom as a single string", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+
+  const roomA = await handleCommand(store, { kind: "new" }, alice())
+  assert.ok(roomA.ok)
+  if (!roomA.ok) return
+  const roomB = await handleCommand(store, { kind: "new" }, bob())
+  assert.ok(roomB.ok)
+  if (!roomB.ok) return
+
+  const joined = await handleCommand(store, { kind: "join", code: roomB.room.code }, alice())
+  assert.equal(joined.ok, true)
+  if (!joined.ok) return
+  assert.equal(joined.room.code, roomB.room.code)
+
+  const memberships = roomsContaining(store, alice().address)
+  assert.equal(memberships.length, 1, "alice must hold exactly one membership")
+  assert.deepEqual(memberships, [roomB.room.code], "alice must be in roomB")
+
+  const movedFrom = (joined as { ok: true; movedFrom: string | string[] }).movedFrom
+  assert.equal(typeof movedFrom, "string", "movedFrom is a single code when one room was left")
+  assert.equal(movedFrom, roomA.room.code, "movedFrom names the room alice left")
+})
+
+/** BRIEF-27: leave with no argument from an address in four rooms leaves all
+ *  of them — unambiguous because they asked to be out and no winner exists
+ *  when the answer is "none of them". Does NOT report not-in-room. */
+test("BRIEF-27: leave with no argument from four rooms leaves all of them", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+
+  const rooms: string[] = []
+  for (let i = 0; i < 4; i++) {
+    const created = await handleCommand(store, { kind: "new" }, bob())
+    assert.ok(created.ok)
+    if (!created.ok) return
+    rooms.push(created.room.code)
+  }
+
+  for (const code of rooms) {
+    await store.addMember(code, alice())
+  }
+  assert.equal(roomsContaining(store, alice().address).length, 4, "alice must be in four rooms before the leave")
+
+  const left = await handleCommand(store, { kind: "leave" }, alice())
+  assert.equal(left.ok, true)
+  if (!left.ok) return
+
+  const memberships = roomsContaining(store, alice().address)
+  assert.equal(memberships.length, 0, "alice must hold zero memberships store-wide")
+})
+
+/** BRIEF-27: leave <code> from an address in four rooms leaves exactly that
+ *  one, and the other three are untouched. */
+test("BRIEF-27: leave <code> from four rooms leaves exactly that one", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+
+  const rooms: string[] = []
+  for (let i = 0; i < 4; i++) {
+    const created = await handleCommand(store, { kind: "new" }, bob())
+    assert.ok(created.ok)
+    if (!created.ok) return
+    rooms.push(created.room.code)
+  }
+
+  for (const code of rooms) {
+    await store.addMember(code, alice())
+  }
+
+  assert.equal(rooms.length, 4, "need four rooms for this test")
+  const [target, ...others] = rooms
+  assert.ok(target !== undefined, "target room must be defined")
+  const result = await handleCommand(store, { kind: "leave", code: target }, alice())
+  assert.equal(result.ok, true)
+  if (!result.ok) return
+
+  const memberships = roomsContaining(store, alice().address)
+  assert.equal(memberships.length, 3, "alice must be in exactly three rooms still")
+  assert.ok(!memberships.includes(target), `alice must NOT be in ${target}`)
+  for (const code of others) {
+    assert.ok(memberships.includes(code), `alice must still be in ${code}`)
+  }
 })

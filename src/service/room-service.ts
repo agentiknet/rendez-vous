@@ -43,7 +43,7 @@ export interface InboundInput {
 export type InboundOutcome =
   | { kind: "created"; room: Room; member: Member }
   | { kind: "joined"; room: Room; member: Member }
-  | { kind: "moved"; room: Room; member: Member; from: string }
+  | { kind: "moved"; room: Room; member: Member; from: string | string[] }
   | { kind: "resumed"; room: Room; member: Member }
   | { kind: "message"; room: Room; member: Member }
   | { kind: "left"; room: Room; member: Member }
@@ -993,9 +993,12 @@ export class RoomService {
       // just typed by the sender themselves (an explicit admission act), but
       // an ordinary "here's where you ended up" confirmation is not that,
       // and neither is naming the room they came from.
-      const fromSlug = this.store.get(result.movedFrom)?.slug ?? result.movedFrom
+      // BRIEF-27: movedFrom may name one room (a clean single-room move) or
+      // several (the address was in multiple rooms). Name every room left.
+      const fromSlugs = (Array.isArray(result.movedFrom) ? result.movedFrom : [result.movedFrom])
+        .map((code) => this.store.get(code)?.slug ?? code)
       await this.sender.send(result.room.code, result.member, {
-        text: `Moved from ${fromSlug} to ${result.room.slug}.`,
+        text: `Moved from ${fromSlugs.join(", ")} to ${result.room.slug}.`,
         artifactUrl: memberFacingArtifactUrl(result.room),
       })
       return { kind: "moved", room: result.room, member: result.member, from: result.movedFrom }
