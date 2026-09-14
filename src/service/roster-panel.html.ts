@@ -66,8 +66,24 @@ const AMBIGUOUS_TEXT =
  *  `room-view.html.ts` — one dropped poll is noise on a 3s cadence, three in
  *  a row is the panel actually losing contact — and cleared on the very next
  *  success. */
-const FAILURES_BEFORE_WARNING = 3
+export const FAILURES_BEFORE_WARNING = 3
 const LOST_CONTACT_TEXT = "lost contact with the host — this list may be stale"
+
+/** The class that REVEALS a banner the stylesheet hides by default; `""`
+ *  leaves it hidden. This is not a style preference: `el.style.display = ""`
+ *  does NOT show an element the stylesheet declares `display: none` — it only
+ *  removes the inline declaration, so the stylesheet's `none` wins and the
+ *  banner could never draw. Visibility must be a class the stylesheet knows
+ *  how to reveal (`#ambiguous.visible`, `#connection-lost.visible`). */
+export const bannerVisibilityClass = (visible: boolean): string => (visible ? "visible" : "")
+
+/** The banner class for a plan: the payload's `ambiguous` carried straight
+ *  through, never re-derived. */
+export const planBannerClass = (plan: { readonly ambiguous: boolean }): string => bannerVisibilityClass(plan.ambiguous)
+
+/** Whether the "lost contact" banner has earned its place after this many
+ *  consecutive failed polls. */
+export const lostContactVisible = (consecutiveFailures: number): boolean => consecutiveFailures >= FAILURES_BEFORE_WARNING
 
 /** The pieces of a DOM element the shared row renderer is allowed to touch.
  *  Deliberately narrow: a real `HTMLElement` satisfies it, and the test's
@@ -436,6 +452,10 @@ const STYLE = `
   .principal { font-size: 12px; color: var(--grey); font-weight: 600; }
   #connection-lost { color: #b42318; font-weight: 600; font-size: 12px; padding: 6px 14px; display: none; background: #fdeaea; border-bottom: 1px solid #f2c4c0; }
   #ambiguous { color: #92400e; font-weight: 600; font-size: 12px; padding: 8px 14px; display: none; background: #fef3c7; border-bottom: 1px solid #fcd34d; }
+  /* The only thing that may reveal either banner. An id+class selector so it
+     beats each id's own display: none above — a bare .visible would lose
+     to the id. */
+  #connection-lost.visible, #ambiguous.visible { display: block; }
   main { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
   .room { border: 1px solid var(--border); border-radius: 10px; background: #fff; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
   .room.active { border-color: var(--accent); }
@@ -487,6 +507,9 @@ function script(principalLabel: string, publicUrl: string): string {
     const unreadLabelOf = ${unreadLabelOf.toString()};
     const planRosterRows = ${planRosterRows.toString()};
     const mergeRoomCodes = ${mergeRoomCodes.toString()};
+    const bannerVisibilityClass = ${bannerVisibilityClass.toString()};
+    const planBannerClass = ${planBannerClass.toString()};
+    const lostContactVisible = ${lostContactVisible.toString()};
     const isHostResponse = ${isHostResponse.toString()};
     const toolPayload = ${toolPayload.toString()};
     const isStandaloneBridge = ${isStandaloneBridge.toString()};
@@ -690,7 +713,7 @@ function script(principalLabel: string, publicUrl: string): string {
     }
 
     function renderPlan(plan) {
-      ambiguousEl.style.display = plan.ambiguous ? "" : "none";
+      ambiguousEl.className = planBannerClass(plan);
       roomsEl.textContent = "";
       emptyEl.textContent = plan.rows.length === 0 ? NO_ROOMS_TEXT : "";
       plan.rows.forEach(function (row) {
@@ -706,12 +729,12 @@ function script(principalLabel: string, publicUrl: string): string {
       try {
         const result = await app.callTool({ name: "rendezvous_list", arguments: {} });
         consecutiveFailures = 0;
-        connectionEl.style.display = "none";
+        connectionEl.className = bannerVisibilityClass(false);
         renderPlan(planRosterRows(toolPayload(result)));
       } catch (e) {
         consecutiveFailures += 1;
-        if (consecutiveFailures >= FAILURES_BEFORE_WARNING) {
-          connectionEl.style.display = "";
+        if (lostContactVisible(consecutiveFailures)) {
+          connectionEl.className = bannerVisibilityClass(true);
         }
       }
     }

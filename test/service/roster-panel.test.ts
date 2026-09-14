@@ -7,9 +7,13 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import {
+  FAILURES_BEFORE_WARNING,
+  bannerVisibilityClass,
   isHostResponse,
   isStandaloneBridge,
+  lostContactVisible,
   mergeRoomCodes,
+  planBannerClass,
   planRosterRows,
   presenceViewOf,
   renderRosterRow,
@@ -329,4 +333,49 @@ test("standalone callTool translates {name, arguments} into (name, args) and kee
   assert.equal(plan.rows.length, 2, "both rooms must render once _meta re-attaches the codes")
   assert.deepEqual(plan.rows.map((r) => r.identity), ["harbor-lantern-ember", "copper-meadow-signal"])
   assert.deepEqual(plan.rows.map((r) => r.code), ["RDV-AAAA", "RDV-BBBB"], "the _meta codes must survive the standalone path")
+})
+
+// --- The panel's two truth-telling banners must actually be able to draw.
+// The stylesheet hides each by default; the old `el.style.display = ""` only
+// REMOVED the inline declaration, so the stylesheet's `display: none` kept
+// winning and neither banner could ever appear. Visibility is a class. ---
+
+test("the banners are revealed by a class the stylesheet honours, never by an empty inline display", () => {
+  const html = rosterPanelHtml({ provider: "whatsapp", contactRef: "+1", displayName: "Alice" }, "https://example.test")
+
+  assert.match(
+    html,
+    /#connection-lost\.visible\s*,\s*#ambiguous\.visible\s*\{\s*display:\s*block;?\s*\}/,
+    "the stylesheet must have a rule that REVEALS the visible class (id+class, so it beats the id's display:none)",
+  )
+  assert.match(html, /#connection-lost \{[^}]*display:\s*none/, "the connection banner hides by default without the class")
+  assert.match(html, /#ambiguous \{[^}]*display:\s*none/, "the ambiguity banner hides by default without the class")
+  assert.ok(
+    !/\.style\.display\s*=\s*""/.test(html),
+    "an empty inline display re-hides the banner the stylesheet already hides — the bug this fix removes",
+  )
+
+  assert.equal(bannerVisibilityClass(true), "visible")
+  assert.equal(bannerVisibilityClass(false), "")
+})
+
+test("a plan marked ambiguous ends up with the ambiguous banner visible", () => {
+  const shown = new FakeElement("div")
+  shown.className = planBannerClass({ ambiguous: true })
+  assert.ok(shown.className.split(" ").includes("visible"), "ambiguous:true must leave the banner visible")
+
+  const quiet = new FakeElement("div")
+  quiet.className = planBannerClass({ ambiguous: false })
+  assert.ok(!quiet.className.split(" ").includes("visible"), "an unambiguous plan must not show the banner")
+})
+
+test("after FAILURES_BEFORE_WARNING consecutive failures the connection banner ends up visible", () => {
+  assert.equal(lostContactVisible(FAILURES_BEFORE_WARNING - 1), false, "one short of the threshold stays hidden")
+  assert.equal(lostContactVisible(FAILURES_BEFORE_WARNING), true, "the threshold itself must show")
+
+  const banner = new FakeElement("div")
+  for (let failures = 1; failures <= FAILURES_BEFORE_WARNING; failures += 1) {
+    banner.className = bannerVisibilityClass(lostContactVisible(failures))
+  }
+  assert.ok(banner.className.split(" ").includes("visible"), "three failed polls in a row must draw the banner")
 })
