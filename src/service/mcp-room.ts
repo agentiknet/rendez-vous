@@ -169,6 +169,14 @@ export interface McpRoomDeps {
    *  text. */
   readonly tts?: TtsProvider
   readonly mediaStore?: SpeechMediaStore
+  /** BRIEF-10 step 2: the outbox recorder behind `room_view`'s announcement.
+   *  The same dep `mcp-canvakit.ts` takes for `render_artifact`, for the same
+   *  reason — the announcement rides the real engine, which already mints for
+   *  PULL members only (`DeliveryEngine.recordToolCall`'s tier filter lives at
+   *  the mint, so this surface cannot get it wrong). Omitting it leaves
+   *  `room_view` exactly as the step-1 surface: announced to nobody, which —
+   *  unlike a record minted for a member with no surface — claims nothing. */
+  readonly recordToolCall?: (code: string, toolName: string, args: unknown) => Promise<void>
   /** Deliver a voice-note attachment (the result of rendering a `[[say …]]`
    *  marker inside a say/whisper call) to one member. When absent, spoken
    *  words from markers are included in the delivery text instead. */
@@ -399,9 +407,19 @@ function rosterResult(room: Room): Record<string, unknown> {
 async function roomViewResult(
   room: Room,
   storedRender: McpRoomDeps["storedRender"],
-): Promise<Record<string, unknown>> {
+): Promise<{
+  result: Record<string, unknown>
+  /** BRIEF-10 step 2: the summary recorded in the outbox when this view
+   *  succeeds. Ids, counts and booleans ONLY — the file-top HARD RULE is
+   *  doubly binding here, because delivery `text` lands in a member's
+   *  transcript, so a display name recorded in it is a leak, not a
+   *  projection. The shape is fixed by what a roster card can show without
+   *  a migration: which room, how many members, whether a document exists. */
+  summary: { roomCode: string; memberCount: number; artifactRendered: boolean }
+}> {
   const render = storedRender === undefined ? undefined : await storedRender(room.code)
-  return {
+  const artifactRendered = render !== undefined
+  const result: Record<string, unknown> = {
     content: [
       {
         type: "text",
@@ -410,9 +428,9 @@ async function roomViewResult(
           state: room.state === "paused" ? "paused" : "live",
           member_count: room.members.length,
           artifact:
-            render === undefined
-              ? { rendered: false }
-              : { rendered: true, rendered_at: render.renderedAt },
+            artifactRendered
+              ? { rendered: true, rendered_at: render.renderedAt }
+              : { rendered: false },
         }),
       },
     ],
@@ -420,6 +438,14 @@ async function roomViewResult(
     // Redundant with the `tools/list` definition's `_meta` — see
     // `ROOM_VIEW_TOOL`'s doc comment for why both are written.
     _meta: { ui: { resourceUri: ROOM_VIEW_RESOURCE_URI } },
+  }
+  return {
+    result,
+    summary: {
+      roomCode: room.code,
+      memberCount: room.members.length,
+      artifactRendered,
+    },
   }
 }
 
@@ -540,7 +566,23 @@ export function createMcpRoomHandler(
       }
 
       if (params.name === ROOM_VIEW_TOOL.name) {
-        return ok(id, await roomViewResult(room, deps.storedRender))
+        const view = await roomViewResult(room, deps.storedRender)
+        // BRIEF-10 step 2, after the result exists — never before, so a
+        // failed view cannot announce itself (the same ordering rule
+        // `render_artifact`'s arm follows). Nothing here selects the
+        // audience: the engine's mint is where the pull-only tier filter
+        // lives, so a messenger member gets no record and the absence
+        // claims nothing. Never fatal: the view succeeded and the agent
+        // must be told so even if the outbox refused.
+        if (deps.recordToolCall !== undefined) {
+          try {
+            await deps.recordToolCall(room.code, ROOM_VIEW_TOOL.name, view.summary)
+          } catch (error) {
+            const why = error instanceof Error ? error.message : String(error)
+            console.error(`failed to record the room_view of ${room.code} in the outbox: ${why}`)
+          }
+        }
+        return ok(id, view.result)
       }
 
       if (params.name === SAY_TOOL.name || params.name === WHISPER_TOOL.name) {

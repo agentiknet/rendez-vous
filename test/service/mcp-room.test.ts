@@ -422,7 +422,13 @@ async function deliveryHarness(members: Member[]): Promise<DeliveryHarness> {
   const memberIds = live.members.map((member) => member.id)
   const transport = new FakeTransport()
   const engine = new DeliveryEngine({ store, transport })
-  const deps: McpRoomDeps = { rooms: () => [live], deliveries: engine }
+  const deps: McpRoomDeps = {
+    rooms: () => [live],
+    deliveries: engine,
+    recordToolCall: async (code, toolName, args) => {
+      await engine.recordToolCall(code, toolName, args)
+    },
+  }
   return { store, code: created.code, memberIds, transport, engine, handler: createMcpRoomHandler(deps) }
 }
 
@@ -873,4 +879,60 @@ test("BRIEF-41: a whisper with [[attach ...]] delivers the file only to the targ
   }
   assert.ok(delivered.includes(`${target}:secret.txt`), "target got the file")
   assert.ok(!delivered.some((d) => d.startsWith(`${other}:`)), "non-target got nothing")
+})
+
+// --- BRIEF-10 step 2: room_view reaches the outbox -----------------------
+
+const DISTINCTIVE_NAME = "Quixotarrh"
+
+test("BRIEF-10 step 2: a successful room_view mints exactly one kind:tool delivery with toolName room_view, for the pull member", async () => {
+  const h = await deliveryHarness([
+    member("m1", DISTINCTIVE_NAME, "room-web", "room-web"),
+  ])
+
+  const res = asRpc(await callTool(h.handler, "room_view", {}, h.code))
+  assert.equal(res.status, 200)
+  assert.equal(res.result?.isError, false)
+
+  const records = h.store.get(h.code)?.deliveries ?? []
+  const tools = records.filter((record) => record.kind === "tool")
+  assert.equal(tools.length, 1, "exactly one tool record for the one pull member")
+  assert.equal(tools[0]?.toolName, "room_view")
+  assert.equal(tools[0]?.memberId, h.memberIds[0])
+  // The recorded args are the count shape, never the roster.
+  assert.deepEqual(JSON.parse(tools[0]?.text ?? "{}"), {
+    roomCode: h.code,
+    memberCount: 1,
+    artifactRendered: false,
+  })
+})
+
+test("BRIEF-10 step 2: the same room_view from a messenger member mints nothing — a record for a surface that cannot render it would read as delivery", async () => {
+  const h = await deliveryHarness([
+    member("m1", DISTINCTIVE_NAME, "messenger", "telegram"),
+  ])
+
+  const res = asRpc(await callTool(h.handler, "room_view", {}, h.code))
+  assert.equal(res.status, 200)
+  assert.equal(res.result?.isError, false, "the view itself still succeeds for the agent")
+
+  const records = h.store.get(h.code)?.deliveries ?? []
+  assert.equal(records.length, 0, "no record of any kind: the absence claims nothing")
+})
+
+test("BRIEF-10 step 2: the recorded text carries no display name — the delivery text lands in a transcript, a name there is a leak", async () => {
+  const h = await deliveryHarness([
+    member("m1", DISTINCTIVE_NAME, "room-web", "room-web"),
+    member("m2", "Bob", "messenger", "whatsapp"),
+  ])
+
+  const res = asRpc(await callTool(h.handler, "room_view", {}, h.code))
+  assert.equal(res.status, 200)
+
+  const records = h.store.get(h.code)?.deliveries ?? []
+  const tools = records.filter((record) => record.kind === "tool")
+  assert.equal(tools.length, 1)
+  const recorded = tools.map((record) => record.text).join("\n")
+  assert.ok(!recorded.includes(DISTINCTIVE_NAME), "the pull member's display name must never appear in the record")
+  assert.ok(!recorded.includes("Bob"), "no other member's display name either")
 })

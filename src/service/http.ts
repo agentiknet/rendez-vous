@@ -1537,6 +1537,12 @@ export function roomMcpDeps(
     deliveries: service.deliveryEngine,
     storedRender: getStoredRender,
     recoverIdentity,
+    // BRIEF-10 step 2: `room_view` announces itself on the SAME engine
+    // `say`/`whisper` go through — one outbox, one cursor, no second channel
+    // re-deriving them (docs/OUTBOX.md §2.1).
+    recordToolCall: async (code, toolName, args) => {
+      await service.deliveryEngine.recordToolCall(code, toolName, args)
+    },
     ...(openaiKey !== undefined
       ? {
           tts: new OpenAiTtsProvider(openaiKey),
