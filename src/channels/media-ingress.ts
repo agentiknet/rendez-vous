@@ -111,13 +111,18 @@ export interface NormalizedInboundMedia {
 
 const FETCH_TIMEOUT_MS = 20_000
 
-export function kindForMediaType(type: string): MediaKind {
+export function kindForMediaType(type: string, mimeType?: string): MediaKind {
   const normalized = type.trim().toLowerCase()
-  if (normalized === "voice" || normalized === "audio" || normalized === "ptt" || normalized.endsWith("/audio")) {
+  if (normalized === "voice" || normalized === "audio" || normalized === "ptt" || normalized.startsWith("audio/")) {
     return "voice"
   }
   if (normalized === "image" || normalized === "photo" || normalized.startsWith("image/")) {
     return "image"
+  }
+  if (mimeType !== undefined) {
+    const mime = mimeType.trim().toLowerCase()
+    if (mime.startsWith("audio/")) return "voice"
+    if (mime.startsWith("image/")) return "image"
   }
   return "file"
 }
@@ -182,7 +187,7 @@ export async function normalizeInboundMedia(
   const kinds = new Set<MediaKind>()
 
   for (const item of items) {
-    const kind = kindForMediaType(item.type)
+    const kind = kindForMediaType(item.type, item.mimeType)
     kinds.add(kind)
 
     let record: IngressMediaRecord

@@ -13,6 +13,7 @@ import { join } from "node:path"
 import { after, test } from "node:test"
 import { NullProviders, normalizeInboundMedia, kindForMediaType } from "../../src/channels/media-ingress.ts"
 import type { InboundEnvelope } from "../../src/channels/agentpush/inbound.ts"
+import type { SttProvider, VisionProvider } from "../../src/channels/media-ingress.ts"
 import { MediaStore } from "../../src/service/media-store.ts"
 
 const dirs: string[] = []
@@ -70,6 +71,91 @@ function envelope(overrides: Partial<InboundEnvelope> = {}): InboundEnvelope {
     ...overrides,
   }
 }
+
+test("BRIEF-30: type: document + mimeType: image/jpeg kinds as image and calls the vision provider", async () => {
+  const store = await freshMediaStore()
+  let visionCalled = false
+  let visionBytes: Uint8Array | undefined
+  const vision: VisionProvider = {
+    caption(bytes) {
+      visionCalled = true
+      visionBytes = bytes
+      return Promise.resolve("the caption")
+    },
+  }
+  const result = await normalizeInboundMedia(
+    envelope({
+      media: [{ type: "document", providerMediaId: undefined, url: "https://cdn.example/photo.jpg", mimeType: "image/jpeg", size: undefined }],
+    }),
+    { store, vision, fetch: () => Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)) }) },
+  )
+  const record = result.records[0]
+  assert.ok(record !== undefined)
+  assert.equal(result.attributionSuffix, "image")
+  assert.equal(record.kind, "image")
+  assert.ok(visionCalled, "vision provider must be called for mime-type-detected image")
+  assert.equal(visionBytes?.byteLength, 4)
+})
+
+test("BRIEF-30: mimeType: audio/ogg kinds as voice and calls the STT provider", async () => {
+  const store = await freshMediaStore()
+  let sttCalled = false
+  const stt: SttProvider = {
+    transcribe() {
+      sttCalled = true
+      return Promise.resolve("the transcription")
+    },
+  }
+  const result = await normalizeInboundMedia(
+    envelope({
+      media: [{ type: "document", providerMediaId: undefined, url: "https://cdn.example/voice.ogg", mimeType: "audio/ogg", size: undefined }],
+    }),
+    { store, stt, fetch: () => Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(new ArrayBuffer(8)) }) },
+  )
+  const record = result.records[0]
+  assert.ok(record !== undefined)
+  assert.equal(result.attributionSuffix, "voice")
+  assert.equal(record.kind, "voice")
+  assert.ok(sttCalled, "STT provider must be called for mime-type-detected audio")
+})
+
+test("BRIEF-30: type: document + mimeType: application/pdf stays file; neither provider is called", async () => {
+  const store = await freshMediaStore()
+  let sttCalled = false
+  let visionCalled = false
+  const stt: SttProvider = { transcribe() { sttCalled = true; return Promise.resolve("x") } }
+  const vision: VisionProvider = { caption() { visionCalled = true; return Promise.resolve("x") } }
+  const result = await normalizeInboundMedia(
+    envelope({
+      media: [{ type: "document", providerMediaId: undefined, url: "https://cdn.example/doc.pdf", mimeType: "application/pdf", size: undefined }],
+    }),
+    { store, stt, vision, fetch: () => Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(new ArrayBuffer(16)) }) },
+  )
+  const record = result.records[0]
+  assert.ok(record !== undefined)
+  assert.equal(result.attributionSuffix, "file")
+  assert.equal(record.kind, "file")
+  assert.equal(result.text, `(file, media:${record.mediaId})`)
+  assert.equal(sttCalled, false, "STT must NOT be called for a file")
+  assert.equal(visionCalled, false, "vision must NOT be called for a file")
+})
+
+test("BRIEF-30: a mime-driven image produces a caption success line, not a file line", async () => {
+  const store = await freshMediaStore()
+  const result = await normalizeInboundMedia(
+    envelope({
+      media: [{ type: "document", providerMediaId: undefined, url: "https://cdn.example/photo.jpg", mimeType: "image/jpeg", size: undefined }],
+    }),
+    {
+      store,
+      vision: { caption: () => Promise.resolve("screenshot of the error") },
+      fetch: () => Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)) }),
+    },
+  )
+  const record = result.records[0]
+  assert.ok(record !== undefined)
+  assert.equal(result.text, `(image) screenshot of the error  media:${record.mediaId}`)
+})
 
 test("kindForMediaType maps the free-string type to voice/image/file", () => {
   assert.equal(kindForMediaType("audio"), "voice")
