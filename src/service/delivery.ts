@@ -570,6 +570,8 @@ export class DeliveryEngine {
           "a member"
         text = `(the agent whispered to ${targetName})`
       }
+    } else if (delivery.kind === "system") {
+      text = `Room: ${delivery.text}`
     } else {
       text = delivery.text
     }

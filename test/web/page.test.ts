@@ -303,6 +303,23 @@ test("the embedded page renders a tool record as its own bubble and never prints
   assert.ok(!toolArm.includes("body.textContent = item.text"), "a tool record's args must never be written into the transcript body")
 })
 
+// --- BRIEF-29: the room's own voice on the page ---
+
+test("BRIEF-29: a system record renders distinctly from a member message and from an agent say — the room's voice has its own badge and bubble style", () => {
+  const html = renderRoomPage(fakeRoom(), fakeLinks())
+  // The badge label for system records is "room · to you" — distinct from "agent · to you".
+  assert.ok(html.includes('"room · to you"'), "the system record badge must say 'room · to you'")
+  assert.ok(html.includes('"agent · to you"'), "the say/whisper record badge must say 'agent · to you' for comparison")
+  // The bubble CSS class for system records is "assistant system" — distinct from plain "assistant".
+  assert.ok(html.includes('"assistant system"'), "the system bubble class must be 'assistant system'")
+  assert.ok(html.includes('"assistant whisper"'), "the whisper bubble class must be 'assistant whisper' for comparison")
+  // The system bubble has its own CSS rule.
+  assert.ok(html.includes('.bubble.system {'), "the system bubble has its own CSS rule")
+  assert.ok(html.includes('.bubble.assistant {'), "the assistant bubble has its own CSS rule for comparison")
+  // No bracketed system syntax reaches a person.
+  assert.ok(!html.includes('[system ·'), "no [system · syntax reaches the page")
+})
+
 // --- BRIEF-15 step 2: the page as an AG-UI client ----------------------
 
 /** Builds the SSE body the AG-UI endpoint actually writes. */

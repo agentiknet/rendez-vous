@@ -427,6 +427,99 @@ test("BRIEF-15: a turn that says/whispers to the triggering member does NOT repo
   assert.equal(fired.length, 0, "the say above named the triggering member — the turn did answer them")
 })
 
+// --- BRIEF-29: system records from the room count as having told the member ---
+
+test("BRIEF-29: assertion 4 does NOT fire when a system record was delivered to the trigger member — the room spoke to them", async () => {
+  const h = await harness("tools")
+  const fanout = new RoomFanout({
+    store: h.store,
+    transport: h.transport,
+    source: h.source.read(),
+    triggeredBy: () => h.aliceId,
+  })
+  fanout.start(h.code)
+  await runTurn(h, fanout, "first turn, establishes the baseline", 1)
+
+  const engine = new DeliveryEngine({ store: h.store, transport: h.transport, autoDrain: false })
+  await engine.accept(h.code, "system", "the room's own notice to alice", [h.aliceId])
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "))
+  }
+  try {
+    await runTurn(h, fanout, "thinking, system notice to alice above, no say/whisper", 3)
+  } finally {
+    console.warn = original
+    await fanout.stopAll()
+  }
+
+  const fired = warnings.filter((w) => w.includes("turn-answered-nobody"))
+  assert.equal(fired.length, 0, "a system record to the trigger member must not fire assertion 4")
+})
+
+test("BRIEF-29: assertion 4 still fires when the trigger member got nothing at all — no say, no whisper, no system", async () => {
+  const h = await harness("tools")
+  const fanout = new RoomFanout({
+    store: h.store,
+    transport: h.transport,
+    source: h.source.read(),
+    triggeredBy: () => h.aliceId,
+  })
+  fanout.start(h.code)
+  await runTurn(h, fanout, "first turn, establishes the baseline", 1)
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "))
+  }
+  try {
+    await runTurn(h, fanout, "thinking only, no delivery of any kind to anyone this turn", 3)
+  } finally {
+    console.warn = original
+    await fanout.stopAll()
+  }
+
+  const fired = warnings.filter((w) => w.includes("turn-answered-nobody"))
+  assert.equal(fired.length, 1, "a turn with nothing at all for the trigger must still fire assertion 4")
+  assert.ok(fired[0]?.includes(h.code))
+  assert.ok(fired[0]?.includes(h.aliceId))
+})
+
+test("BRIEF-29: assertion 4 still fires when a system record went to a DIFFERENT member — someone else being told is not this person being told", async () => {
+  const h = await harness("tools")
+  const fanout = new RoomFanout({
+    store: h.store,
+    transport: h.transport,
+    source: h.source.read(),
+    triggeredBy: () => h.aliceId,
+  })
+  fanout.start(h.code)
+  await runTurn(h, fanout, "first turn, establishes the baseline", 1)
+
+  const engine = new DeliveryEngine({ store: h.store, transport: h.transport, autoDrain: false })
+  await engine.accept(h.code, "system", "the room's own notice to bob", [h.bobId])
+
+  const warnings: string[] = []
+  const original = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "))
+  }
+  try {
+    await runTurn(h, fanout, "thinking, system notice to bob above, nothing for alice", 3)
+  } finally {
+    console.warn = original
+    await fanout.stopAll()
+  }
+
+  const fired = warnings.filter((w) => w.includes("turn-answered-nobody"))
+  assert.equal(fired.length, 1, "a system record to bob must not count as telling alice — assertion 4 fires for alice")
+  assert.ok(fired[0]?.includes(h.code))
+  assert.ok(fired[0]?.includes(h.aliceId))
+})
+
 test("a pre-upgrade room (no spokenSeq in the persisted JSON) round-trips and warns on a silent turn", async () => {
   const dir = await freshDir()
   const room = {

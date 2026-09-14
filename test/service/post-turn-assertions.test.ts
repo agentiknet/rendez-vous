@@ -113,10 +113,34 @@ test("turnAnsweredNobody does not fire when a say/whisper minted this turn targe
   assert.equal(turnAnsweredNobody("alice", minted), false)
 })
 
-test("turnAnsweredNobody ignores system/tool records even when addressed to the trigger — neither is audience speech", () => {
-  const minted = [
+test("turnAnsweredNobody does NOT count a system record addressed to the trigger as 'nobody' — it is the room telling them something. A tool record alone still does not count", () => {
+  const withSystem = [
     { kind: "system" as const, memberId: "alice" },
     { kind: "tool" as const, memberId: "alice" },
+  ]
+  assert.equal(turnAnsweredNobody("alice", withSystem), false, "a system record to the trigger IS the room speaking")
+  const onlyTool = [
+    { kind: "tool" as const, memberId: "alice" },
+  ]
+  assert.equal(turnAnsweredNobody("alice", onlyTool), true, "a tool record alone is still not audience speech")
+})
+
+test("turnAnsweredNobody does NOT fire when a system record was delivered to the trigger member — the room spoke to them", () => {
+  const minted = [
+    { kind: "system" as const, memberId: "alice" },
+    { kind: "tool" as const, memberId: "bob" },
+  ]
+  assert.equal(turnAnsweredNobody("alice", minted), false)
+})
+
+test("turnAnsweredNobody still fires when the trigger member got nothing at all — no say, no whisper, no system", () => {
+  const minted: readonly Pick<import("../../src/rooms/types.ts").Delivery, "kind" | "memberId">[] = []
+  assert.equal(turnAnsweredNobody("alice", minted), true)
+})
+
+test("turnAnsweredNobody still fires when a system record went to a DIFFERENT member — someone else being told is not this person being told", () => {
+  const minted = [
+    { kind: "system" as const, memberId: "bob" },
   ]
   assert.equal(turnAnsweredNobody("alice", minted), true)
 })

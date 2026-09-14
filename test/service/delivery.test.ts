@@ -925,3 +925,22 @@ test("a tool record minted for a PUSH member (a caller bug this engine cannot mi
   assert.equal(record?.failures, 1)
   assert.match(record?.lastError ?? "", /nothing to render/)
 })
+
+// --- BRIEF-29: the room's own voice on messenger channels ---
+
+test("BRIEF-29: a system record delivered to a messenger member carries the room-voice prefix and contains no [system, no assertion name, no member id, no room code", async () => {
+  const { store, code, alice } = await roomWith()
+  const transport = new FakeTransport()
+  const eng = engine(store, transport)
+
+  await eng.accept(code, "system", "Room resumed. https://example.test/artifact/", [alice.id])
+  await eng.drain(code)
+
+  assert.equal(transport.sends.length, 1)
+  const text = transport.sends[0]?.text ?? ""
+  assert.ok(text.startsWith("Room:"), "the messenger prefix must identify the room as the speaker")
+  assert.ok(!text.includes("[system"), "no bracketed system prefix reaches a person")
+  assert.ok(!text.includes("turn-answered-nobody"), "no assertion name reaches a person")
+  assert.ok(!text.includes(code), "no room code reaches a person")
+  assert.ok(!text.includes(alice.id), "no member id reaches a person")
+})
