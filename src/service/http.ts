@@ -694,6 +694,34 @@ async function handleRoomClaim(
   })
 }
 
+/** `POST /rooms/:code/pause` (BRIEF-28) — pause a room on demand through
+ *  the daemon-level bearer token, so only the operator (who holds the daemon
+ *  credential) can force a pause. Refuses a missing or wrong token with the
+ *  same 401 body regardless of whether the room exists. An unknown code is
+ *  a 404. An already-paused room answers 200 — `pauseRoom` is a no-op there
+ *  and the caller asked for a state, not a transition. */
+async function handleRoomPause(
+  service: RoomService,
+  daemon: DaemonExtraOptions,
+  req: IncomingMessage,
+  res: ServerResponse,
+  encodedCode: string,
+): Promise<void> {
+  const provided = bearerOf(req.headers.authorization)
+  if (provided === undefined || daemon.token === undefined || !tokensMatch(provided, daemon.token)) {
+    sendJson(res, 401, { error: "unauthorized" })
+    return
+  }
+  const code = decodeURIComponent(encodedCode)
+  const room = service.getRoom(code)
+  if (room === undefined) {
+    sendJson(res, 404, { error: "not_found" })
+    return
+  }
+  await service.pauseRoom(code)
+  sendJson(res, 200, { state: "paused" })
+}
+
 /** `POST /rooms/:code/recover` (BRIEF-23) — redeem a one-time identity-
  *  recovery pointer. The token and the name it was issued for are the whole
  *  request; success hands back the member's own claim, which the page stores
@@ -1484,6 +1512,17 @@ async function handle(
       return
     }
     await handleRoomClaim(service, req, res, encodedCode)
+    return
+  }
+
+  const pauseMatch = /^\/rooms\/([^/]+)\/pause$/.exec(url.pathname)
+  if (pauseMatch !== null && req.method === "POST") {
+    const encodedCode = pauseMatch[1]
+    if (encodedCode === undefined) {
+      sendJson(res, 400, { error: "invalid_code" })
+      return
+    }
+    await handleRoomPause(service, daemon, req, res, encodedCode)
     return
   }
 

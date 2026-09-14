@@ -1937,3 +1937,130 @@ test("POST /rooms/:code/agui carries a kind:'tool' record as the TOOL_CALL tripl
   assert.equal(frames[0]?.type, "RUN_STARTED")
   assert.equal(frames[frames.length - 1]?.type, "RUN_FINISHED")
 })
+
+// --- POST /rooms/:code/pause (BRIEF-28: the demo's best beat) ----------------
+
+const PAUSE_TOKEN = "test-pause-token"
+
+async function pauseRoomHarness(): Promise<{
+  service: RoomService
+  daemon: ExtendedFakeDaemon
+  baseUrl: string
+  code: string
+}> {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const transport = new MemoryTransport()
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: PAUSE_TOKEN },
+    mediaStore: await freshMediaStore(),
+  })
+  services.push(service)
+
+  const created = await service.handleInbound({
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+1" },
+    displayName: "Alice",
+    tier: "messenger",
+    text: "new",
+  })
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") throw new Error("unreachable")
+
+  const baseUrl = await listenOnRandomPort(service, { daemon: { baseUrl: daemon.url, token: PAUSE_TOKEN } })
+  return { service, daemon, baseUrl, code: created.room.code }
+}
+
+async function pauseRoomCall(
+  baseUrl: string,
+  code: string,
+  token: string | undefined,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const headers: Record<string, string> = { "content-type": "application/json" }
+  if (token !== undefined) headers.authorization = `Bearer ${token}`
+  const res = await fetch(`${baseUrl}/rooms/${code}/pause`, { method: "POST", headers })
+  return { status: res.status, body: await readJson(res) }
+}
+
+test("POST /rooms/:code/pause with a valid daemon token pauses an active room — state is paused, no session advertised", async () => {
+  const { baseUrl, service, code } = await pauseRoomHarness()
+  const roomBefore = service.getRoom(code)!
+  assert.equal(roomBefore.state, "active")
+  assert.ok(roomBefore.sessionId !== undefined)
+
+  const { status, body } = await pauseRoomCall(baseUrl, code, PAUSE_TOKEN)
+  assert.equal(status, 200)
+  assert.equal(body.state, "paused")
+
+  const roomAfter = service.getRoom(code)!
+  assert.equal(roomAfter.state, "paused")
+  assert.equal(roomAfter.sessionId, undefined, "paused room has no live session")
+})
+
+test("POST /rooms/:code/pause on an already-paused room succeeds and changes nothing", async () => {
+  const { baseUrl, service, code } = await pauseRoomHarness()
+  await service.pauseRoom(code)
+  const pre = service.getRoom(code)!
+  assert.equal(pre.state, "paused")
+
+  const { status, body } = await pauseRoomCall(baseUrl, code, PAUSE_TOKEN)
+  assert.equal(status, 200)
+  assert.equal(body.state, "paused")
+
+  const post = service.getRoom(code)!
+  assert.equal(post.state, "paused")
+  assert.equal(post.sessionId, undefined)
+  assert.equal(post.lastActivityAt, pre.lastActivityAt, "nothing changed")
+})
+
+test("POST /rooms/:code/pause with a valid daemon token on an unknown room is refused — 404, distinguishable from 'already paused'", async () => {
+  const { baseUrl } = await pauseRoomHarness()
+  const { status, body } = await pauseRoomCall(baseUrl, "RDV-ZZZZ", PAUSE_TOKEN)
+  assert.equal(status, 404)
+  assert.ok(body.error !== undefined)
+
+  const existing = await pauseRoomCall(baseUrl, "RDV-ZZZZ", PAUSE_TOKEN)
+  assert.equal(existing.status, 404)
+
+  assert.notEqual(existing.status, 200)
+})
+
+test("POST /rooms/:code/pause without a credential or with a wrong credential is refused — identical refusals that do not reveal whether the room exists", async () => {
+  const { baseUrl } = await pauseRoomHarness()
+  const noCred = await pauseRoomCall(baseUrl, "RDV-KNOWN", undefined)
+  assert.equal(noCred.status, 401)
+
+  const wrongCred = await pauseRoomCall(baseUrl, "RDV-KNOWN", "wrong-token")
+  assert.equal(wrongCred.status, 401)
+
+  assert.deepEqual(noCred.body, wrongCred.body, "no-credential and wrong-credential refusals must be identical")
+
+  const noCredUnknown = await pauseRoomCall(baseUrl, "RDV-ZZZZ", undefined)
+  assert.equal(noCredUnknown.status, 401)
+  assert.deepEqual(noCredUnknown.body, noCred.body)
+})
+
+test("POST /rooms/:code/pause then resume brings the room back — the beat the brief exists for", async () => {
+  const { baseUrl, service, code } = await pauseRoomHarness()
+
+  const pauseRes = await pauseRoomCall(baseUrl, code, PAUSE_TOKEN)
+  assert.equal(pauseRes.status, 200)
+  assert.equal(service.getRoom(code)!.state, "paused")
+
+  const resumed = await service.handleInbound({
+    address: { provider: "whatsapp", source: "agentpush", contactRef: "+1" },
+    displayName: "Alice",
+    tier: "messenger",
+    text: `resume ${code}`,
+  })
+  assert.equal(resumed.kind, "resumed")
+  if (resumed.kind !== "resumed") throw new Error("unreachable")
+  assert.equal(resumed.room.state, "active")
+  assert.ok(resumed.room.sessionId !== undefined, "resumed room has a live session")
+})

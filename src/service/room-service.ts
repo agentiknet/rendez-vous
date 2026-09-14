@@ -604,11 +604,15 @@ export class RoomService {
   /** Pause a room right now, regardless of idle time — the idle sweep's own
    *  early exit, exposed so callers (the no-phone e2b proof) can force the
    *  same path without waiting out the real threshold. A no-op for a room
-   *  that's already paused or doesn't exist. */
+   *  that's already paused or doesn't exist. Tells every current member
+   *  through the room's own system voice. */
   async pauseRoom(code: string): Promise<void> {
     const room = this.store.get(code)
     if (room === undefined || room.state !== "active") return
     await this.doPause(room)
+    await Promise.allSettled(
+      room.members.map((member) => this.sender.send(code, member, { text: "Room paused.", artifactUrl: undefined })),
+    )
   }
 
   /** Checked every `idleSweepSeconds`; pauses any active room whose cursor
