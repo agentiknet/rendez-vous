@@ -1140,3 +1140,148 @@ test("a read-only principal token is refused by rendezvous_new, naming the reaso
   assert.ok(/can-send/i.test(message), `the refusal must name the remedy, got: ${message}`)
   assert.ok(message.startsWith("rendezvous_new:"), `the refusal must name the tool actually called, got: ${message}`)
 })
+
+// --- BRIEF-13 step 4: rendezvous_leave. ---------------------------------
+
+function callLeave(
+  handler: ReturnType<typeof createMcpPersonalHandler>,
+  authorization: string | undefined,
+  args: { roomSlug: string },
+): Promise<McpResponse> {
+  return handler({ jsonrpc: "2.0", id: 17, method: "tools/call", params: { name: "rendezvous_leave", arguments: args } }, authorization)
+}
+
+interface LeavePayload {
+  roomSlug: string
+  remaining: number
+}
+
+function leavePayload(res: McpResponse): LeavePayload {
+  return JSON.parse(contentTextOf(asRpc(res))) as LeavePayload
+}
+
+test("rendezvous_leave is advertised only when the mount can send, alongside rendezvous_send/rendezvous_new", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  await store.addMember((await store.create()).code, { displayName: "Alice", tier: "messenger", address: ALICE })
+
+  const plain = createMcpPersonalHandler(deps(store))
+  const plainNames = toolNames(await callToolsList(plain, bearerFor(ALICE)))
+  assert.ok(!plainNames.includes("rendezvous_leave"), "rendezvous_leave must not be advertised with no send capability wired")
+
+  const { handler } = await buildSendHarness()
+  const names = toolNames(await callToolsList(handler, bearerFor(ALICE)))
+  assert.ok(
+    names.includes("rendezvous_leave") && names.includes("rendezvous_send") && names.includes("rendezvous_new"),
+    `got: ${names.join(", ")}`,
+  )
+})
+
+test("rendezvous_leave removes the caller from the named room, puts no code in content text, and reports zero rooms remaining", async () => {
+  const { service, store, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+
+  const res = await callLeave(handler, sendBearerFor(ALICE), { roomSlug: created.room.slug })
+  const text = contentTextOf(asRpc(res))
+  const payload = leavePayload(res)
+
+  assert.equal(payload.roomSlug, created.room.slug)
+  assert.equal(payload.remaining, 0, "leaving the only room the caller was in leaves zero rooms")
+  assert.ok(!text.includes(created.room.code), "content text must never carry the room's join code")
+
+  assert.equal(
+    (store.get(created.room.code)?.members ?? []).length,
+    0,
+    "the caller must actually be removed from the room's roster",
+  )
+  assert.equal(store.findByAddress(ALICE).kind, "none", "the caller is now a member of no room at all")
+})
+
+test("rendezvous_leave on a room the caller is ambiguously in touches ONLY the named room, and reports the one room still remaining", async () => {
+  const { service, store, handler } = await buildSendHarness()
+  const roomA = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(roomA.kind, "created")
+  if (roomA.kind !== "created") return
+
+  // Force a second membership for the same address without going through
+  // ensureMembership's move semantics — a genuinely ambiguous address, the
+  // exact state the panel's #ambiguous banner is about.
+  const roomB = await store.create()
+  await store.addMember(roomB.code, { displayName: "Alice", tier: "messenger", address: ALICE })
+  assert.equal(store.findByAddress(ALICE).kind, "ambiguous", "the fixture must start genuinely ambiguous")
+
+  const res = await callLeave(handler, sendBearerFor(ALICE), { roomSlug: roomA.room.slug })
+  const payload = leavePayload(res)
+
+  assert.equal(payload.roomSlug, roomA.room.slug)
+  assert.equal(payload.remaining, 1, "the OTHER room the address was ambiguously in must still count")
+  assert.equal((store.get(roomA.room.code)?.members ?? []).length, 0, "the named room lost its member")
+  assert.equal((store.get(roomB.code)?.members ?? []).length, 1, "the room NOT named must be untouched")
+
+  const after = store.findByAddress(ALICE)
+  assert.equal(after.kind, "one", "the ambiguity is now resolved — exactly one room remains")
+  if (after.kind === "one") assert.equal(after.room.code, roomB.code)
+})
+
+test("a read-only principal token is refused by rendezvous_leave, naming the reason and the tool actually called", async () => {
+  const { service, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+
+  const res = asRpc(await callLeave(handler, bearerFor(ALICE), { roomSlug: created.room.slug }))
+  const message = res.error?.message ?? ""
+
+  assert.notEqual(res.status, 401, "the token is valid — it simply does not carry this capability")
+  assert.ok(res.error !== undefined, "never a silent no-op")
+  assert.ok(/read-only/i.test(message), `the refusal must name the reason, got: ${message}`)
+  assert.ok(/can-send/i.test(message), `the refusal must name the remedy, got: ${message}`)
+  assert.ok(message.startsWith("rendezvous_leave:"), `the refusal must name the tool actually called, got: ${message}`)
+})
+
+test("rendezvous_leave for a room the principal is not a member of gets the SAME reason rendezvous_send gives, prefixed with its OWN tool name", async () => {
+  const { service, store, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+
+  const stranger = await store.create()
+  await store.addMember(stranger.code, {
+    displayName: "Bob",
+    tier: "messenger",
+    address: { provider: "telegram", source: "telegram", contactRef: "+15550002222" },
+  })
+
+  const leave = asRpc(await callLeave(handler, sendBearerFor(ALICE), { roomSlug: stranger.slug }))
+  const send = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomSlug: stranger.slug, text: "hello?" }))
+
+  assert.notEqual(leave.status, 401, "a good credential naming the wrong room is not an authentication failure")
+  assert.ok(leave.error !== undefined, "never a silent no-op")
+
+  const leaveParts = refusalPrefixAndBody(leave.error?.message)
+  const sendParts = refusalPrefixAndBody(send.error?.message)
+  assert.equal(leaveParts.prefix, "rendezvous_leave", "the refusal must name the tool actually called, not rendezvous_send")
+  assert.equal(sendParts.prefix, "rendezvous_send")
+  assert.equal(leaveParts.body, sendParts.body, "the REASON is one shared wording across tools")
+})
+
+test("rendezvous_leave refuses a room CODE with the SAME code-shaped reason rendezvous_send gives, correctly prefixed, never the membership one", async () => {
+  const { service, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+
+  const leave = asRpc(await callLeave(handler, sendBearerFor(ALICE), { roomSlug: created.room.code }))
+  const send = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomSlug: created.room.code, text: "hello" }))
+
+  assert.notEqual(leave.status, 401, "the token is good; the ARGUMENT is the wrong shape")
+  assert.ok(leave.error !== undefined, "never a silent no-op")
+
+  const leaveParts = refusalPrefixAndBody(leave.error?.message)
+  const sendParts = refusalPrefixAndBody(send.error?.message)
+  assert.equal(leaveParts.prefix, "rendezvous_leave", "the refusal must name the tool actually called, not rendezvous_send")
+  assert.equal(sendParts.prefix, "rendezvous_send")
+  assert.equal(leaveParts.body, sendParts.body, "the REASON is one shared wording across tools")
+  assert.ok(!/not a member/i.test(leave.error?.message ?? ""), "a code-shaped argument is not a membership question")
+})

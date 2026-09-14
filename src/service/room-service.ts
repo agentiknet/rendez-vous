@@ -1106,7 +1106,7 @@ export class RoomService {
         case "resume-by-slug":
           return this.handleResumeBySlug(command.slug, sender, input)
         case "leave":
-          return this.handleLeave(sender, input)
+          return this.handleLeave(sender, input, command.code)
         case "where":
           return this.handleWhere(sender, input)
       }
@@ -1272,9 +1272,22 @@ export class RoomService {
     return { kind: "joined", room: result.room, member: result.member }
   }
 
-  private async handleLeave(sender: Omit<Member, "id" | "joinedAt">, input: InboundInput): Promise<InboundOutcome> {
-    const result = await handleCommand(this.store, { kind: "leave" }, sender)
+  /** `identifier` is `parseCommand`'s parsed `leave <code-or-slug>` argument
+   *  (BRIEF-13 step 4) — previously parsed and then DROPPED here, so "leave
+   *  RDV-XXXX"/"leave some-slug" behaved exactly like bare "leave" for every
+   *  inbound caller, phone or MCP: `leaveCurrent` (commands.ts) already
+   *  resolves a given identifier to a SPECIFIC named room, by design (its own
+   *  doc comment: "the person named it, so there is nothing to guess") — that
+   *  mechanism was simply never reached. Fixed here, not worked around, so
+   *  `rendezvous_leave` (and a real "leave <room>" message) leaves the room
+   *  actually named, not whichever room `findByAddress` happens to resolve. */
+  private async handleLeave(sender: Omit<Member, "id" | "joinedAt">, input: InboundInput, identifier?: string): Promise<InboundOutcome> {
+    const result = await handleCommand(this.store, identifier === undefined ? { kind: "leave" } : { kind: "leave", code: identifier }, sender)
     if (!result.ok) {
+      if (result.reason === "unknown-code") {
+        await this.replyGuidance(input, "That room isn't known. Send `where` to see your rooms, or `new`/`join RDV-XXXX`.")
+        return { kind: "unknown-code" }
+      }
       await this.replyGuidance(input, "You're not in a room. Send `new` or `join RDV-XXXX`.")
       return { kind: "not-in-room" }
     }

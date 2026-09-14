@@ -255,6 +255,37 @@ const RENDEZVOUS_NEW_TOOL = {
   inputSchema: { type: "object", properties: {} },
 } as const
 
+/** `rendezvous_leave` (BRIEF-13 step 4). The `leave` command already exists
+ *  (`commands.ts`) and no tool exposed it — the only way to stop being a
+ *  member of a room from this mount, before this, was to let the panel's
+ *  90s staleness eventually report the address as `away`, which is
+ *  PRESENCE, not departure: it still drains and still receives whatever is
+ *  addressed to it. Built the same way `rendezvous_new` was: a documented
+ *  door to `deps.sendInbound`, reusing the existing `leave <slug>` parse and
+ *  command path — not a second removal mechanism.
+ *
+ *  Two facts the description states because both are surprising and both
+ *  are silent otherwise: leaving is NOT the same as collapsing the panel's
+ *  row (a collapsed row still receives what is sent while you are away; a
+ *  left room never will, because you are off its roster); and leaving can
+ *  put the caller in NO room at all (`findByAddress` → `"none"`), which
+ *  silently changes where a phone message from that address lands — it
+ *  will no longer land anywhere. `remaining` in the result is exactly that
+ *  fact, so the caller does not need a second `rendezvous_list` call to
+ *  learn it. */
+const RENDEZVOUS_LEAVE_TOOL = {
+  name: "rendezvous_leave",
+  description:
+    "Leave a room YOUR principal is a member of, addressed by roomSlug. This is NOT the same as collapsing the panel's row: leaving takes you OFF that room's roster, so a message sent there afterwards will never reach you — where a collapsed row still would once you re-drain. After leaving you may be a member of NO room at all, which is a real state that changes where a phone message from you lands (nowhere, until you join or start a new one). Requires a send-capable credential; a read-only one is refused. Returns {roomSlug, remaining} — remaining is how many rooms you are still a member of after leaving this one, 0 if none.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      roomSlug: { type: "string", description: "A room slug from rendezvous_list — one you are a member of." },
+    },
+    required: ["roomSlug"],
+  },
+} as const
+
 /** `rendezvous_drain` (BRIEF-12) — this mount's one LISTENING tool: the
  *  member's own deliveries, the transcript the person could not otherwise
  *  hear. Keyed by `roomSlug` (BRIEF-20: the slug identifies) and authorised
@@ -711,6 +742,79 @@ function matchPrincipalRoom(
   return matches.find((candidate) => normalizeSlug(candidate.room.slug) === normalizedSlug)
 }
 
+/** The `rendezvous_leave` result. Same rule as everywhere on this mount:
+ *  names the room only by SLUG, never a code. `remaining` is the fact the
+ *  caller cannot otherwise get without a second `rendezvous_list` call —
+ *  after leaving, this address may be a member of NO room at all (0), which
+ *  is a real state (`findByAddress` → `"none"`) that changes where a phone
+ *  message from this address lands. */
+function leaveResult(roomSlug: string, remaining: number): Record<string, unknown> {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({ roomSlug, remaining }),
+      },
+    ],
+    isError: false,
+  }
+}
+
+/** `rendezvous_leave`'s whole body (BRIEF-13 step 4). Same guards, same
+ *  order, as every other slug-taking tool on this mount: empty check
+ *  (naming the field), `codeShapedRefusal` by SHAPE before membership, then
+ *  `matchPrincipalRoom` and `membershipRefusal`. Reuses `deps.sendInbound`
+ *  with the room's OWN canonical slug (`match.room.slug`, never the raw
+ *  argument) as `leave <slug>` — the exact text `parseCommand`'s
+ *  `LEAVE_PATTERN`/`SLUG_PATTERN` already parse into `{kind: "leave", code:
+ *  slug}`, which `leaveCurrent` (commands.ts) resolves via `store.getBySlug`
+ *  and then removes ONLY that membership. Requires `send`: leaving is a
+ *  write, exactly like `rendezvous_send`/`rendezvous_new`.
+ *
+ *  Membership is already confirmed by `matchPrincipalRoom` immediately
+ *  before this call, against the same store `leaveCurrent` reads, so
+ *  `outcome.kind` should always be `"left"`; anything else is reported
+ *  loudly rather than guessed at. */
+async function callLeaveTool(
+  deps: McpPersonalDeps,
+  principal: ResolvedPrincipal,
+  params: Record<string, unknown>,
+  id: string | number | null,
+): Promise<McpResponse> {
+  const sendInbound = deps.sendInbound
+  if (sendInbound === undefined) {
+    return fail(id, METHOD_NOT_FOUND, `unknown tool: ${RENDEZVOUS_LEAVE_TOOL.name}`)
+  }
+  if (principal.capability !== "send") return readOnlyRefusal(id, RENDEZVOUS_LEAVE_TOOL.name)
+
+  const args = isRecord(params.arguments) ? params.arguments : {}
+  const roomSlug = typeof args.roomSlug === "string" ? args.roomSlug.trim() : ""
+  if (roomSlug.length === 0) {
+    return fail(id, INVALID_PARAMS, "rendezvous_leave: arguments.roomSlug must be a room slug you are a member of")
+  }
+  if (normalizeCode(roomSlug) !== undefined) {
+    // Same guard, same position as every other slug-taking tool: refused by
+    // SHAPE, before membership.
+    return codeShapedRefusal(id, RENDEZVOUS_LEAVE_TOOL.name)
+  }
+
+  const match = matchPrincipalRoom(deps, principal, normalizeSlug(roomSlug))
+  if (match === undefined) return membershipRefusal(id, RENDEZVOUS_LEAVE_TOOL.name, roomSlug)
+
+  const outcome = await sendInbound({
+    address: principal.address,
+    displayName: match.member.displayName,
+    tier: match.member.tier,
+    text: `leave ${match.room.slug}`,
+  })
+  if (outcome.kind !== "left") {
+    return fail(id, INVALID_PARAMS, `rendezvous_leave: could not leave ${roomSlug} (${outcome.kind})`)
+  }
+
+  const remaining = matchesOf(deps.findByAddress(principal.address)).length
+  return ok(id, leaveResult(match.room.slug, remaining))
+}
+
 /** The `rendezvous_invite` result. `content[0].text` names only the room, by
  *  SLUG — never a link, never the code (see `RENDEZVOUS_INVITE_TOOL`'s
  *  warning). `_meta.invite` carries every link `joinLinks` built for THIS
@@ -910,7 +1014,7 @@ export function createMcpPersonalHandler(
       const tools = [
         RENDEZVOUS_LIST_TOOL,
         RENDEZVOUS_INVITE_TOOL,
-        ...(deps.sendInbound !== undefined ? [RENDEZVOUS_SEND_TOOL, RENDEZVOUS_NEW_TOOL] : []),
+        ...(deps.sendInbound !== undefined ? [RENDEZVOUS_SEND_TOOL, RENDEZVOUS_NEW_TOOL, RENDEZVOUS_LEAVE_TOOL] : []),
         ...(deps.roomRead !== undefined ? [RENDEZVOUS_DRAIN_TOOL, RENDEZVOUS_ACK_TOOL] : []),
       ]
       return ok(id, { tools })
@@ -1002,6 +1106,10 @@ export function createMcpPersonalHandler(
 
       if (params.name === RENDEZVOUS_NEW_TOOL.name) {
         return callNewTool(deps, principal, id)
+      }
+
+      if (params.name === RENDEZVOUS_LEAVE_TOOL.name) {
+        return callLeaveTool(deps, principal, params, id)
       }
 
       if (params.name === RENDEZVOUS_DRAIN_TOOL.name) {
