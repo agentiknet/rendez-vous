@@ -222,6 +222,105 @@ export const presenceViewOf = (room: { readonly presence?: string; readonly pres
   return { kind: "present", label: "present" }
 }
 
+/** BRIEF-13 step 1: the artifact fact as `GET /r/:code/state` already
+ *  carries it (`http.ts`'s `RoomStatePayload.artifact`). The panel has been
+ *  fetching this snapshot to expand a row and throwing this field away. */
+export interface ArtifactStateView {
+  readonly url?: string
+  readonly ready?: boolean
+  readonly renderedAt?: string
+}
+
+/** The artifact as ONE expanded row renders it — or nothing. `frameUrl` is
+ *  the payload's own member-facing stable URL, which is `memberFacingArtifactUrl`
+ *  (`room-service.ts:32`): already `undefined` whenever the box is gone. So
+ *  this view function INVENTS no second liveness rule — `ready !== true` or a
+ *  missing URL degrades to NO view, which the row renders as nothing at all,
+ *  not as an empty frame. An absent `artifact` is the same nothing: a room
+ *  whose artifact does not exist yet is not a failure and says nothing.
+ *
+ *  `frameKey` is `renderedAt` — the only change signal this URL has (there is
+ *  no cache-buster on it). A re-render produces a new key, and the script
+ *  rebuilds the iframe on a changed key so the person cannot keep watching a
+ *  stale page believing it is live. A live box with no stored render yet keys
+ *  on "" — mounted once, never re-keyed by a poll that cannot tell renders
+ *  apart. */
+export interface ArtifactFrameView {
+  readonly frameUrl: string
+  readonly frameKey: string
+  readonly openUrl: string
+  readonly pdfUrl: string
+}
+
+export const artifactFrameViewOf = (
+  artifact: ArtifactStateView | null | undefined,
+): ArtifactFrameView | undefined => {
+  if (artifact === null || artifact === undefined) return undefined
+  if (artifact.ready !== true) return undefined
+  if (typeof artifact.url !== "string" || artifact.url.length === 0) return undefined
+  const frameKey = typeof artifact.renderedAt === "string" ? artifact.renderedAt : ""
+  // The PDF is deliberately a SUBPATH of the artifact URL
+  // (`publicArtifactPdfUrl`, artifact-proxy.ts:63), so panel-side it is
+  // derived from the URL the state payload already carries — no second fetch,
+  // no second capability. A stored render is what `renderedAt` records, and a
+  // stored render is what holds a deliverable — so the PDF link is offered
+  // exactly when `renderedAt` says a render exists, and never dangles on a
+  // live box whose deliverable is not built yet.
+  const pdfUrl = frameKey === "" ? "" : artifact.url + "deliverable.pdf"
+  return { frameUrl: artifact.url, frameKey: frameKey, openUrl: artifact.url, pdfUrl: pdfUrl }
+}
+
+/** Whether an expanded row's artifact frame must be (re)built: a view where
+ *  there was none, or a `frameKey` the row has not mounted yet. This is the
+ *  stale-page guard — same URL + a new `renderedAt` is a NEW page, and the
+ *  old iframe must be replaced, not left watching. */
+export const artifactFrameNeedsBuild = (mountedKey: string | undefined, view: ArtifactFrameView | undefined): boolean => {
+  if (view === undefined) return false
+  return mountedKey !== view.frameKey
+}
+
+/** Words the link beside the frame carries. An iframe that fails to load
+ *  inside a host's sandbox must not be the only way to reach the artifact. */
+export const ARTIFACT_OPEN_TEXT = "open the artifact in a tab"
+export const ARTIFACT_PDF_TEXT = "open the PDF"
+
+/** Render the artifact block for one expanded row: the frame, keyed on
+ *  `renderedAt` via a `data-` attribute the script reads back to decide
+ *  whether a later state snapshot is a re-render, and a plain link beside it.
+ *  The frame `src` is the state payload's own member-facing URL — built
+ *  panel-side, never returned as text from a tool and never carrying a
+ *  token. The PDF link is rendered only when a render actually exists
+ *  (`pdfUrl` non-empty): a link that 404s is absence dressed as delivery. */
+export const renderArtifactFrame = (doc: PanelDocument, view: ArtifactFrameView): PanelElement => {
+  const wrap = doc.createElement("div")
+  wrap.className = "room-artifact"
+
+  const frame = doc.createElement("iframe")
+  frame.className = "artifact-frame"
+  frame.setAttribute("src", view.frameUrl)
+  frame.setAttribute("data-frame-key", view.frameKey)
+  wrap.appendChild(frame)
+
+  const open = doc.createElement("a")
+  open.className = "artifact-open"
+  open.setAttribute("href", view.openUrl)
+  open.setAttribute("target", "_blank")
+  open.setAttribute("rel", "noreferrer")
+  open.textContent = ARTIFACT_OPEN_TEXT
+  wrap.appendChild(open)
+
+  if (view.pdfUrl !== "") {
+    const pdf = doc.createElement("a")
+    pdf.className = "artifact-pdf"
+    pdf.setAttribute("href", view.pdfUrl)
+    pdf.setAttribute("target", "_blank")
+    pdf.setAttribute("rel", "noreferrer")
+    pdf.textContent = ARTIFACT_PDF_TEXT
+    wrap.appendChild(pdf)
+  }
+  return wrap
+}
+
 /** 0 unread renders as NOTHING, not as "0" (BRIEF-19). A zero badge is
  *  visual noise that says the same thing as blank space, and a non-number
  *  (a field an older server did not send) is not a zero — it is also
@@ -643,6 +742,12 @@ const STYLE = `
   .room-transcript .message { font-size: 13px; line-height: 1.35; padding: 4px 8px; border-radius: 6px; background: #f4f5f9; white-space: pre-wrap; overflow-wrap: anywhere; }
   .room-transcript .message-whisper { background: #fef3c7; }
   .transcript-status { font-size: 12px; font-weight: 600; color: #b42318; }
+  /* BRIEF-13 step 1: the artifact, inside the row. The frame is keyed on
+     renderedAt by the script; a re-render replaces it wholesale. The link
+     beside it is the path in when a host refuses to load the frame. */
+  .room-artifact { display: flex; flex-direction: column; gap: 4px; }
+  .room-artifact .artifact-frame { width: 100%; height: 280px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+  .room-artifact a { font: inherit; font-size: 12px; font-weight: 600; color: var(--accent); width: fit-content; }
   .send-note { font-size: 12px; font-weight: 600; }
   .send-note.bad { color: #b42318; }
   .send-note.good { color: #1a7f37; }
@@ -661,6 +766,8 @@ function script(principalLabel: string, publicUrl: string): string {
     const ROSTER_UNREACHABLE_TEXT = ${embedJson(ROSTER_UNREACHABLE_TEXT)};
     const TRANSCRIPT_UNREACHABLE_TEXT = ${embedJson(TRANSCRIPT_UNREACHABLE_TEXT)};
     const TRANSCRIPT_JUST_ATTACHED_TEXT = ${embedJson(TRANSCRIPT_JUST_ATTACHED_TEXT)};
+    const ARTIFACT_OPEN_TEXT = ${embedJson(ARTIFACT_OPEN_TEXT)};
+    const ARTIFACT_PDF_TEXT = ${embedJson(ARTIFACT_PDF_TEXT)};
     const LOST_CONTACT_TEXT = ${embedJson(LOST_CONTACT_TEXT)};
     const FAILURES_BEFORE_WARNING = ${embedJson(FAILURES_BEFORE_WARNING)};
 
@@ -688,6 +795,9 @@ function script(principalLabel: string, publicUrl: string): string {
     const transcriptItemsOf = ${transcriptItemsOf.toString()};
     const highestRenderedSeq = ${highestRenderedSeq.toString()};
     const transcriptStatusText = ${transcriptStatusText.toString()};
+    const artifactFrameViewOf = ${artifactFrameViewOf.toString()};
+    const artifactFrameNeedsBuild = ${artifactFrameNeedsBuild.toString()};
+    const renderArtifactFrame = ${renderArtifactFrame.toString()};
     const renderRosterRow = ${renderRosterRow.toString()};
 
     const roomsEl = document.getElementById("rooms");
@@ -777,12 +887,32 @@ function script(principalLabel: string, publicUrl: string): string {
     // spectator projection. It uses the room CODE because the code IS the
     // capability to read that room — correct, and untouched by amendment 1,
     // which is about what is DISPLAYED, not about what addresses a request.
-    async function loadRoster(code, target) {
+    // BRIEF-13 step 1: the artifact the row's state fetch ALREADY carried and
+    // discarded. ready:false (or no artifact at all) renders NOTHING — not an
+    // empty frame, not an error; a room whose artifact does not exist yet is
+    // not a failure. A view whose frameKey (renderedAt) differs from the one
+    // mounted REPLACES the frame — otherwise the person watches a stale page
+    // believing it is live.
+    function applyArtifact(state, payload) {
+      const view = artifactFrameViewOf(payload === undefined ? undefined : payload.artifact);
+      if (view === undefined) {
+        state.el.textContent = "";
+        state.key = undefined;
+        return;
+      }
+      if (!artifactFrameNeedsBuild(state.key, view)) return;
+      state.el.textContent = "";
+      state.el.appendChild(renderArtifactFrame(document, view));
+      state.key = view.frameKey;
+    }
+
+    async function loadRoster(code, target, artifact) {
       target.textContent = ROSTER_LOADING_TEXT;
       try {
         const res = await fetch(PUBLIC_URL + "/r/" + encodeURIComponent(code) + "/state");
         if (!res.ok) throw new Error("state fetch failed: " + res.status);
         const state = await res.json();
+        applyArtifact(artifact, state);
         const members = Array.isArray(state.members) ? state.members : [];
         target.textContent = "";
         if (members.length === 0) {
@@ -839,6 +969,12 @@ function script(principalLabel: string, publicUrl: string): string {
         status: transcriptStatus,
       };
 
+      // BRIEF-13 step 1: the artifact block for this row, filled by the state
+      // fetch each expand. "key" is the mounted frameKey (renderedAt).
+      const artifactEl = document.createElement("div");
+      artifactEl.className = "room-artifact-slot";
+      const artifactState = { key: undefined, el: artifactEl };
+
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.textContent = "who is there";
@@ -852,7 +988,7 @@ function script(principalLabel: string, publicUrl: string): string {
         }
         // row.code, from the closure (the spectator roster); the SLUG
         // addresses the drain. Opening is entering: drain immediately.
-        loadRoster(row.code, roster);
+        loadRoster(row.code, roster, artifactState);
         drainTranscript(transcriptState);
       });
       actions.appendChild(toggle);
@@ -904,6 +1040,7 @@ function script(principalLabel: string, publicUrl: string): string {
 
       el.appendChild(actions);
       el.appendChild(note);
+      el.appendChild(artifactEl);
       el.appendChild(roster);
       el.appendChild(transcriptStatus);
       el.appendChild(transcript);

@@ -7,7 +7,11 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import {
+  ARTIFACT_OPEN_TEXT,
+  ARTIFACT_PDF_TEXT,
   FAILURES_BEFORE_WARNING,
+  artifactFrameNeedsBuild,
+  artifactFrameViewOf,
   TRANSCRIPT_JUST_ATTACHED_TEXT,
   TRANSCRIPT_UNREACHABLE_TEXT,
   bannerVisibilityClass,
@@ -21,6 +25,7 @@ import {
   planRosterRows,
   presenceViewOf,
   renderRosterRow,
+  renderArtifactFrame,
   rosterRowDataChanged,
   roomIdentityLabel,
   rosterPanelHtml,
@@ -30,6 +35,7 @@ import {
   transcriptSeqOf,
   transcriptStatusText,
   unreadLabelOf,
+  type ArtifactFrameView,
   type PanelDocument,
   type PanelElement,
   type RosterListPayload,
@@ -81,6 +87,13 @@ function row(overrides: Partial<RosterRowView> = {}): RosterRowView {
     displayName: "Alice",
     ...overrides,
   }
+}
+
+function renderArtifact(view: ArtifactFrameView): FakeElement {
+  const el = renderArtifactFrame(fakeDocument, view)
+  assert.ok(el instanceof FakeElement)
+  if (!(el instanceof FakeElement)) throw new Error("unreachable")
+  return el
 }
 
 function render(view: RosterRowView): FakeElement {
@@ -148,13 +161,25 @@ test("the room identity is rendered as plain text and never as a link, a data at
   assert.ok(!nodes.some((node) => node.tag === "a"), "no anchor may be rendered for the identity")
 })
 
-test("the shipped panel has no join affordance anywhere: no href, no anchor, no clipboard, no QR", () => {
+test("the shipped panel has no join affordance: no clipboard, no QR, and the only anchors are the artifact links beside the frame", () => {
   const html = rosterPanelHtml({ provider: "whatsapp", contactRef: "+1", displayName: "Alice" }, "https://example.test")
-  assert.ok(!/href/i.test(html), "an href would make a displayed room code one click from a join")
-  assert.ok(!/<a[\s>]/i.test(html), "no anchor elements")
   assert.ok(!/clipboard/i.test(html), "a copy button is the affordance amendment 1 forbids")
   assert.ok(!/\bqr\b/i.test(html), "a QR of a room code is a join capability in image form")
-  assert.ok(!/setAttribute/.test(html), "no attribute may ever carry the identity")
+
+  // BRIEF-13 step 1 introduced exactly one anchor: the link BESIDE the
+  // artifact frame, built from the state payload's member-facing URL — the
+  // URL `memberFacingArtifactUrl` already governs, not a room code and not a
+  // join. Pin the anchor count, and pin the embedded renderer to building its
+  // hrefs from the view (never from `row.code`, which is the capability).
+  assert.deepEqual(
+    html.match(/createElement\("a"\)/g),
+    ['createElement("a")', 'createElement("a")'],
+    "the open-the-artifact and open-the-PDF links are the only anchors in the panel",
+  )
+  const renderer = /const renderArtifactFrame = ([\s\S]*?);\n\n    const roomsEl/.exec(html)?.[1] ?? ""
+  assert.notEqual(renderer, "", "the renderer must be embedded so the panel and the tests run the same code")
+  assert.ok(renderer.includes("view.openUrl") && renderer.includes("view.pdfUrl"), "hrefs come from the artifact view")
+  assert.ok(!renderer.includes("code"), "no room code may reach an href — the artifact URL is the payload's own")
 })
 
 test("roomIdentityLabel is the single accessor, and planRosterRows is its only call site per render", () => {
@@ -532,6 +557,117 @@ test("an open transcript with nothing rendered says WHY it is empty; quiet says 
 
   // And the shipped script keys its status line on exactly that decision.
   const html = rosterPanelHtml({ provider: "whatsapp", contactRef: "+1", displayName: "Alice" }, "https://example.test")
-  assert.ok(html.includes("transcriptStatusText(false, state.renderedCount)"), "the success path must use it")
+   assert.ok(html.includes("transcriptStatusText(false, state.renderedCount)"), "the success path must use it")
   assert.ok(html.includes("transcriptStatusText(true, state.renderedCount)"), "and so must the failure path")
+})
+
+// --- BRIEF-13 step 1: the artifact, inside the row. The panel already
+// fetches `/r/:code/state` to expand a row and that payload already carries
+// `artifact: {url, ready, renderedAt}` — it was being discarded. These tests
+// pin the three honest behaviours: ready:false renders NO frame, the frame is
+// keyed on renderedAt so a re-render replaces it, and a plain link beside the
+// frame covers a host that refuses to load the iframe. ---
+
+const artifactUrl = "https://example.test/r/RDV-AAAA/artifact/"
+
+test("BRIEF-13: ready:false and an absent artifact render NO frame — not an empty one, not an error", () => {
+  // The mirror of memberFacingArtifactUrl (room-service.ts:32): a dead box is
+  // hidden, never drawn as an empty frame. And a room whose artifact does not
+  // exist YET is not a failure — it says nothing.
+  assert.equal(artifactFrameViewOf(undefined), undefined, "no artifact field at all: nothing rendered, nothing said")
+  assert.equal(artifactFrameViewOf(null), undefined)
+  assert.equal(artifactFrameViewOf({}), undefined)
+  assert.equal(
+    artifactFrameViewOf({ ready: false, renderedAt: "2026-09-14T10:00:00Z" }),
+    undefined,
+    "ready:false hides the artifact — it must not draw an empty frame",
+  )
+  assert.equal(
+    artifactFrameViewOf({ url: artifactUrl, ready: false }),
+    undefined,
+    "even a URL with ready:false stays hidden",
+  )
+  assert.equal(artifactFrameViewOf({ url: artifactUrl, ready: true })?.frameUrl, artifactUrl, "ready:true with a URL is the one thing that renders")
+
+  // The shipped expand path does exactly this: read the field the state
+  // fetch ALREADY carried, and let `undefined` clear the slot to nothing.
+  const html = rosterPanelHtml({ provider: "whatsapp", contactRef: "+1", displayName: "Alice" }, "https://example.test")
+  assert.ok(
+    html.includes("artifactFrameViewOf(payload === undefined ? undefined : payload.artifact)"),
+    "the expand path must read the artifact the state fetch already carried and was discarding",
+  )
+  assert.match(
+    html,
+    /if \(view === undefined\) \{\s*state\.el\.textContent = "";\s*state\.key = undefined;\s*return;/,
+    "ready:false clears the slot to NOTHING — no empty frame, no error text",
+  )
+  assert.ok(html.includes("renderArtifactFrame(document, view)"), "and only a defined view ever builds a frame")
+})
+
+test("BRIEF-13: the frame is keyed on renderedAt, so a re-render replaces it instead of leaving a stale page", () => {
+  const first = artifactFrameViewOf({ url: artifactUrl, ready: true, renderedAt: "2026-09-14T10:00:00Z" })
+  const second = artifactFrameViewOf({ url: artifactUrl, ready: true, renderedAt: "2026-09-14T11:00:00Z" })
+  assert.equal(first?.frameKey, "2026-09-14T10:00:00Z")
+  assert.equal(second?.frameKey, "2026-09-14T11:00:00Z")
+
+  // renderedAt is the ONLY change signal this URL has — no cache-buster. Same
+  // URL + a new renderedAt is a NEW page; the mounted frame must be replaced.
+  assert.equal(artifactFrameNeedsBuild(undefined, first), true, "a first view mounts")
+  assert.equal(artifactFrameNeedsBuild("2026-09-14T10:00:00Z", second), true, "a re-render must replace the frame")
+  assert.equal(artifactFrameNeedsBuild("2026-09-14T11:00:00Z", second), false, "the same render must not reload on every poll")
+  assert.equal(artifactFrameNeedsBuild("2026-09-14T10:00:00Z", undefined), false, "a view that vanished is not a rebuild")
+  assert.equal(artifactFrameNeedsBuild(undefined, undefined), false)
+
+  // The mounted key is legible in the DOM the renderer produces.
+  assert.ok(first !== undefined)
+  if (first === undefined) throw new Error("unreachable")
+  const el = renderArtifact(first)
+  const frame = flatten(el).find((node) => node.tag === "iframe")
+  assert.ok(
+    frame?.attributes.some((a) => a.name === "data-frame-key" && a.value === "2026-09-14T10:00:00Z"),
+    "the frame carries its renderedAt so the script can tell a re-render from a poll",
+  )
+
+  // And the shipped script remembers what it mounted and rebuilds only on a
+  // changed key — the stale-page guard.
+  const html = rosterPanelHtml({ provider: "whatsapp", contactRef: "+1", displayName: "Alice" }, "https://example.test")
+  assert.ok(html.includes("state.key = view.frameKey"), "the script must record the mounted frameKey")
+  assert.ok(html.includes("artifactFrameNeedsBuild(state.key, view)"), "and rebuild the frame only when the key changed")
+})
+
+test("BRIEF-13: a plain link beside the frame, and the PDF offered only when a render exists", () => {
+  const renderedView = artifactFrameViewOf({ url: artifactUrl, ready: true, renderedAt: "2026-09-14T10:00:00Z" })
+  assert.ok(renderedView !== undefined)
+  if (renderedView === undefined) throw new Error("unreachable")
+  const rendered = renderedView
+  const el = renderArtifact(rendered)
+  const nodes = flatten(el)
+
+  const iframe = nodes.find((node) => node.tag === "iframe")
+  assert.ok(iframe?.attributes.some((a) => a.name === "src" && a.value === artifactUrl), "the frame loads the member-facing URL")
+
+  // A host sandbox may refuse to load the iframe — that must not be the only
+  // way to reach the artifact.
+  const open = nodes.find((node) => node.textContent === ARTIFACT_OPEN_TEXT)
+  assert.equal(open?.tag, "a", "the escape hatch is a plain link")
+  assert.ok(open?.attributes.some((a) => a.name === "href" && a.value === artifactUrl), "pointing at the same member-facing URL")
+  assert.ok(open?.attributes.some((a) => a.name === "target" && a.value === "_blank"), "opening in a tab, not navigating the panel")
+
+  // The PDF is a SUBPATH of the artifact URL (publicArtifactPdfUrl), offered
+  // only when renderedAt says a render — and its bytes — actually exist.
+  const pdf = nodes.find((node) => node.textContent === ARTIFACT_PDF_TEXT)
+  assert.ok(
+    pdf?.attributes.some((a) => a.name === "href" && a.value === artifactUrl + "deliverable.pdf"),
+    "the PDF link is the artifact URL's deliverable.pdf subpath",
+  )
+
+  const unrenderedView = artifactFrameViewOf({ url: artifactUrl, ready: true })
+  assert.ok(unrenderedView !== undefined)
+  if (unrenderedView === undefined) throw new Error("unreachable")
+  const unrendered = unrenderedView
+  assert.equal(unrendered.pdfUrl, "", "no stored render → no PDF to offer")
+  assert.ok(
+    !flatten(renderArtifact(unrendered)).some((node) => node.textContent === ARTIFACT_PDF_TEXT),
+    "a PDF link on a room with no render is a link to a 404 — absence dressed as delivery",
+  )
 })
