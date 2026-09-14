@@ -186,11 +186,22 @@ test("whisper: target gets the text, other messengers get the content-free notic
   await eng.drain(code)
 
   const toAlice = transport.sends.find((send) => send.memberId === alice.id)
-  const toBob = transport.sends.find((send) => send.memberId === bob.id)
+  const bobPrivate = transport.sends.find((send) => send.memberId === bob.id && send.text.startsWith("(private)"))
+  const bobNotice = transport.sends.find((send) => send.memberId === bob.id && send.text.includes("(the agent whispered to Alice)"))
   assert.equal(toAlice?.text, "(private) the vault code is 44-21")
-  assert.equal(toBob?.text, "(the agent whispered to Alice)")
-  assert.ok(!toBob?.text.includes("44-21"))
+  // BRIEF-39: the outsider notice is a system record, so it renders with the
+  // room's voice on push; the room-web screen gets the record in its outbox,
+  // never over the transport.
+  assert.equal(bobNotice?.text, "Room: (the agent whispered to Alice)")
+  assert.ok(!bobNotice?.text.includes("44-21"))
+  assert.ok(bobPrivate !== undefined)
   assert.equal(transport.sends.some((send) => send.memberId === screen.id), false)
+  const screenNotice = deliveriesOf(store.get(code)).find(
+    (delivery) => delivery.memberId === screen.id && delivery.kind === "system",
+  )
+  assert.ok(screenNotice !== undefined)
+  assert.ok(screenNotice.text.includes("(the agent whispered to Alice)"))
+  assert.ok(!screenNotice.text.includes("44-21"))
 })
 
 test("a transport that throws for one member still delivers to the others; at the cap the record fails and the reactive channel is told", async () => {

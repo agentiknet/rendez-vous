@@ -608,10 +608,11 @@ test("a whisper through the contract reaches exactly one, and the room gets the 
   const toBob = h.transport.sends.find((send) => send.memberId === bobId)
   assert.equal(toBob?.text, "(private) the vault code is 44-21")
   // The room is TOLD the whisper happened — content-free, in the contract's
-  // own words (whisperNoticeOf). The other messenger gets it; the pull
-  // member (room-web) draws no transport call.
+  // own words (whisperNoticeOf). The other messenger gets it over the
+  // transport with the room's voice (a BRIEF-39 system record); the pull
+  // member (room-web) gets the record in its outbox, no transport call.
   const toAlice = h.transport.sends.find((send) => send.memberId === aliceId)
-  assert.equal(toAlice?.text, "(the agent whispered to Bob)")
+  assert.equal(toAlice?.text, "Room: (the agent whispered to Bob)")
   assert.ok(!toAlice?.text.includes("44-21"))
   assert.equal(h.transport.sends.some((send) => send.memberId === screenId), false)
 })

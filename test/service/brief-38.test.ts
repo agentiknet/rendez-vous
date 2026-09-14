@@ -94,9 +94,10 @@ test("whisper to one of a human's two ids reaches BOTH of that human's members a
     privateTexts.map((send) => send.memberId).sort(),
     [jeremy1.id, jeremy2.id].sort(),
   )
-  // Arm 2 — nobody else saw the content, and the notice fired once.
+  // Arm 2 — nobody else saw the content, and the notice fired once as a
+  // system record, over the transport to the outsider (BRIEF-39 shape).
   assert.ok(transport.sends.every((send) => send.memberId !== mathilde.id || !send.text.includes("the real numbers")))
-  const notices = transport.sends.filter((send) => send.text === "(the agent whispered to Jeremy)")
+  const notices = transport.sends.filter((send) => send.text.includes("(the agent whispered to Jeremy)"))
   assert.equal(notices.length, 1)
   assert.equal(notices[0]?.memberId, mathilde.id)
 })

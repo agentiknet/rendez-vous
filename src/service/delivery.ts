@@ -18,6 +18,7 @@
 
 import { renderForTier } from "../fanout/render.ts"
 import type { OutboundMessage, Transport } from "../fanout/types.ts"
+import { whisperNoticeOf } from "../audience/contract.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import {
   MAX_DELIVERY_ATTEMPTS,
@@ -324,62 +325,80 @@ export class DeliveryEngine {
           .filter((member) => humanNames.has(member.displayName.toLowerCase()))
           .map((member) => member.id)
       }
-      const now = this.now()
-      // The counter, never the array length: the array is pruned, so a
-      // length-derived id would be handed out twice and `mark` would patch
-      // the wrong record. `deliveries.length` is only the fallback for a room
-      // written before the counter existed, whose ids are exactly `d1..dN`.
-      const lastSeq = room.deliverySeq ?? room.deliveries?.length ?? 0
-      const created: Delivery[] = recipients.map((memberId, index) => ({
-        id: `d${lastSeq + index + 1}`,
-        memberId,
-        kind,
-        // Written only when supplied, so a non-tool record round-trips
-        // through `JSON.stringify` with the key genuinely absent rather than
-        // present-and-undefined (the rule `confirmedBy` follows).
-        ...(toolName !== undefined ? { toolName } : {}),
-        text,
-        status: "pending",
-        failures: 0,
-        lastError: undefined,
-        createdAt: now,
-        deliveredAt: undefined,
-      }))
-      const nowMs = this.nowMs()
-      const before = [...(room.deliveries ?? []), ...created]
-      // The prune carries the room's per-member retention floors: a live pull
-      // member's undrained records survive the cap and the age window — its
-      // own records only, never anyone else's (brief A). Whatever the prune
-      // dropped raises the room's low-water mark (brief B).
-      const after = pruneDeliveries(before, nowMs, retentionFloors(room, nowMs))
-      const pruned = prunedUpTo(before, after)
-      // `spokenSeq` moves with the mint, in the SAME patch that mints the
-      // records: the mint is the event, not the later `delivered`/`failed`
-      // status (an agent that called `say` into a dead transport did speak —
-      // the failure is reported on its own channel). `system` mints leave it
-      // where it was, so the room's own notices never read as speech.
-      const spoken = spokenSeqFor(kind, lastSeq + created.length)
-      await this.store.update(code, {
-        deliveries: after,
-        ...(pruned !== undefined ? { deliveryLowWater: pruned } : {}),
-        deliverySeq: lastSeq + created.length,
-        ...(spoken !== undefined ? { spokenSeq: spoken } : {}),
-      })
-      // The mint is the event (see `onMint`'s doc): discharged the moment
-      // the records exist, never waiting for a flush that may never see
-      // them. The RECIPIENTS, not the accepted ids (BRIEF-38): an answer
-      // addressed to one of a human's two devices answers that human — the
-      // obligation of the device that actually asked must discharge even
-      // when the agent picked the sibling id out of the roster.
-      this.onMint?.(code, kind, recipients)
-      if (this.autoDrain) {
-        // Off the handler's critical path: the tool has already returned
-        // "accepted"; provider latency must not stall the agent's turn.
-        void this.drain(code)
-      }
+      await this.mintRecords(code, kind, text, recipients, toolName, true)
     }
 
     return { accepted, unknown }
+  }
+
+  /** The one mint body: append one `pending` record per recipient, advance the
+   *  room's delivery seq, prune, and optionally discharge brief 36's
+   *  turn-answered-nobody obligation through `onMint`. `accept` uses it with
+   *  `discharge: true`; BRIEF-39's whisper notice mints through it with
+   *  `discharge: false` — see `announceWhisper` for why. */
+  private async mintRecords(
+    code: string,
+    kind: Delivery["kind"],
+    text: string,
+    recipients: readonly string[],
+    toolName: string | undefined,
+    discharge: boolean,
+  ): Promise<void> {
+    const room = this.store.get(code)
+    if (room === undefined) return
+    const now = this.now()
+    // The counter, never the array length: the array is pruned, so a
+    // length-derived id would be handed out twice and `mark` would patch
+    // the wrong record. `deliveries.length` is only the fallback for a room
+    // written before the counter existed, whose ids are exactly `d1..dN`.
+    const lastSeq = room.deliverySeq ?? room.deliveries?.length ?? 0
+    const created: Delivery[] = recipients.map((memberId, index) => ({
+      id: `d${lastSeq + index + 1}`,
+      memberId,
+      kind,
+      // Written only when supplied, so a non-tool record round-trips
+      // through `JSON.stringify` with the key genuinely absent rather than
+      // present-and-undefined (the rule `confirmedBy` follows).
+      ...(toolName !== undefined ? { toolName } : {}),
+      text,
+      status: "pending",
+      failures: 0,
+      lastError: undefined,
+      createdAt: now,
+      deliveredAt: undefined,
+    }))
+    const nowMs = this.nowMs()
+    const before = [...(room.deliveries ?? []), ...created]
+    // The prune carries the room's per-member retention floors: a live pull
+    // member's undrained records survive the cap and the age window — its
+    // own records only, never anyone else's (brief A). Whatever the prune
+    // dropped raises the room's low-water mark (brief B).
+    const after = pruneDeliveries(before, nowMs, retentionFloors(room, nowMs))
+    const pruned = prunedUpTo(before, after)
+    // `spokenSeq` moves with the mint, in the SAME patch that mints the
+    // records: the mint is the event, not the later `delivered`/`failed`
+    // status (an agent that called `say` into a dead transport did speak —
+    // the failure is reported on its own channel). `system` mints leave it
+    // where it was, so the room's own notices never read as speech.
+    const spoken = spokenSeqFor(kind, lastSeq + created.length)
+    await this.store.update(code, {
+      deliveries: after,
+      ...(pruned !== undefined ? { deliveryLowWater: pruned } : {}),
+      deliverySeq: lastSeq + created.length,
+      ...(spoken !== undefined ? { spokenSeq: spoken } : {}),
+    })
+    // The mint is the event (see `onMint`'s doc): discharged the moment
+    // the records exist, never waiting for a flush that may never see
+    // them. The RECIPIENTS, not the accepted ids (BRIEF-38): an answer
+    // addressed to one of a human's two devices answers that human — the
+    // obligation of the device that actually asked must discharge even
+    // when the agent picked the sibling id out of the roster.
+    if (discharge) this.onMint?.(code, kind, recipients)
+    if (this.autoDrain) {
+      // Off the handler's critical path: the tool has already returned
+      // "accepted"; provider latency must not stall the agent's turn.
+      void this.drain(code)
+    }
   }
 
   /** Record that the agent called a tool, as one `kind: "tool"` record per
@@ -498,13 +517,25 @@ export class DeliveryEngine {
   }
 
   private async drainRoom(code: string): Promise<void> {
-    const room = this.store.get(code)
-    if (room === undefined) return
-    const pending = (room.deliveries ?? []).filter(
-      (delivery) => delivery.status === "pending" && delivery.failures < MAX_DELIVERY_ATTEMPTS,
-    )
-    for (const delivery of pending) {
-      await this.attempt(code, delivery)
+    // Records minted WHILE a drain is running — a BRIEF-39 whisper notice is
+    // minted by the very attempt delivering the whisper — must not wait for
+    // another drain: they are attempted here, the moment the mint lands.
+    // Only NEW ids are picked up (each record attempted at most once per
+    // drain call), so the retry semantics — one attempt per record per
+    // drain, the cap counted across drains — are untouched. Terminates:
+    // the notice mints are finite per whisper (the sibling guard).
+    const attempted = new Set<string>()
+    for (;;) {
+      const room = this.store.get(code)
+      if (room === undefined) return
+      const fresh = (room.deliveries ?? []).filter(
+        (delivery) => delivery.status === "pending" && delivery.failures < MAX_DELIVERY_ATTEMPTS && !attempted.has(delivery.id),
+      )
+      if (fresh.length === 0) return
+      for (const delivery of fresh) {
+        attempted.add(delivery.id)
+        await this.attempt(code, delivery)
+      }
     }
   }
 
@@ -534,6 +565,14 @@ export class DeliveryEngine {
           deliveredAt: this.now(),
           ...(alreadyAcked ? { confirmedBy: "recipient" as const } : {}),
         })
+        // BRIEF-39: the outbox record IS the pull member's delivery — it
+        // landed as surely as a transport send. A whisper delivered to a
+        // pull member (the projected screen, the camera's surface) must
+        // announce exactly like a push one; skipping this arm is the first
+        // gate that hid the notice from room-web.
+        if (delivery.kind === "whisper") {
+          await this.announceWhisper(code, member, delivery)
+        }
         return
       }
       if (message === undefined) {
@@ -575,10 +614,11 @@ export class DeliveryEngine {
   /** The content-free notice every OTHER member sees once a whisper has
    *  actually landed on its target — the same observable visibility an
    *  announced `[[whisper]]` marker gets (whisper.ts:209-211: the room is
-   *  told the whisper happened, never its content; room-web is a screen,
-   *  and `renderForTier` already returns `undefined` for it). Sent only on
-   *  success: announcing a whisper that failed to arrive would be a lie.
-   *  A notice send that throws is logged, never fatal.
+   *  told the whisper happened, never its content). Sent only after the
+   *  whisper has actually LANDED — push via a transport-confirmed send, pull
+   *  via its outbox record — because announcing a whisper that failed to
+   *  arrive would be a lie (BRIEF-39: both tiers announce, from both
+   *  delivered arms of `attempt`).
    *
    *  BRIEF-38: one whisper to one human now mints one record per surface,
    *  so this runs once per record of the SAME whisper. Two consequences are
@@ -589,7 +629,28 @@ export class DeliveryEngine {
    *  - the outsider notice must fire ONCE per whisper, not once per record:
    *    a sibling record of the same whisper that already announced silences
    *    this one (whichever surface drains first announces; the rest see it
-   *    and stay quiet). */
+   *    and stay quiet).
+   *
+   *  BRIEF-39 — the notice is a `system` RECORD, not a direct send. The old
+   *  loop rendered per tier and shipped over the transport, which made
+   *  `renderForTier`'s correct `room-web → undefined` the second gate: the
+   *  projected screen (a pull member) could never learn a whisper happened,
+   *  and the camera filmed the one surface showing nothing. A record routes
+   *  by delivery mode instead — push members get it over the transport
+   *  through `attempt` (rendered `Room: …`), pull members through their
+   *  outbox — with no change to `renderForTier`.
+   *
+   *  THE MINT-DISCHARGE CALL (the one judgement in this brief): the notice
+   *  does NOT go through `accept`, because `accept` discharges brief 36's
+   *  turn-answered-nobody obligation for whoever a mint is addressed to —
+   *  and that is a lie for this record. "The agent whispered to Jeremy"
+   *  tells Mathilde nothing about HER message; if she started the turn and
+   *  the answer went to Jeremy as a whisper, her genuine "you got no reply"
+   *  must still fire. (The resume banner's discharge is a different fact:
+   *  the room speaking to the room, not a notice about someone else's
+   *  private message.) So the mint goes through `mintRecords` with
+   *  `discharge: false` — same records, same transports, no obligation
+   *  silenced. */
   private async announceWhisper(code: string, target: Member, delivery: Delivery): Promise<void> {
     const room = this.store.get(code)
     if (room === undefined) return
@@ -604,17 +665,11 @@ export class DeliveryEngine {
         ),
     )
     if (siblingAnnounced) return
-    const notice = `(the agent whispered to ${target.displayName})`
-    for (const member of room.members) {
-      if (sameHumanName(member.displayName, target.displayName)) continue
-      const message = renderForTier(member.tier, notice, undefined, false)
-      if (message === undefined) continue
-      try {
-        await withTimeout(this.transport.send(member, message), this.sendTimeoutMs)
-      } catch (error: unknown) {
-        console.error(`failed to announce a whisper to ${member.id} in ${code}: ${messageOf(error)}`)
-      }
-    }
+    const outsiders = room.members
+      .filter((member) => !sameHumanName(member.displayName, target.displayName))
+      .map((member) => member.id)
+    if (outsiders.length === 0) return
+    await this.mintRecords(code, "system", whisperNoticeOf(target.displayName), outsiders, undefined, false)
   }
 
   /** Per-tier rendering, shared with `RoomFanout.flush`. `artifactUrl` is
