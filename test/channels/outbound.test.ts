@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
 import { test } from "node:test"
 import { AgentpushTransport } from "../../src/channels/agentpush/outbound.ts"
+import { SendBlockedError } from "../../src/fanout/types.ts"
 import type { Member } from "../../src/rooms/types.ts"
 
 // Fixture endpoints/bodies mirror the real agentpush REST contract
@@ -147,33 +148,36 @@ test("send is a no-op for a room-web member", async () => {
   }
 })
 
-test("a policy-blocked send (HTTP 200, status: blocked) does not throw", async () => {
+test("a policy-blocked send (HTTP 200, status: blocked) throws SendBlockedError with blocked_reason verbatim", async () => {
   const fake = await startFakeAgentpush()
   fake.respondWith(200, { status: "blocked", blocked_reason: "opted_out", suggestion: "do not resend" })
   try {
     const transport = new AgentpushTransport({ baseUrl: fake.url, apiKey: "apk_test" })
-    await assert.doesNotReject(transport.send(whatsappMember(), { text: "hi", artifactUrl: undefined }))
+    await assert.rejects(
+      transport.send(whatsappMember(), { text: "hi", artifactUrl: undefined }),
+      (error: unknown) => error instanceof SendBlockedError && error.blockedReason === "opted_out",
+    )
     assert.equal(fake.requests.length, 1)
   } finally {
     await fake.close()
   }
 })
 
-test("a 500 from agentpush does not throw", async () => {
+test("a 500 from agentpush throws so the delivery engine retries", async () => {
   const fake = await startFakeAgentpush()
   fake.respondWith(500, { error: "internal" })
   try {
     const transport = new AgentpushTransport({ baseUrl: fake.url, apiKey: "apk_test" })
-    await assert.doesNotReject(transport.send(whatsappMember(), { text: "hi", artifactUrl: undefined }))
+    await assert.rejects(transport.send(whatsappMember(), { text: "hi", artifactUrl: undefined }))
     assert.equal(fake.requests.length, 1)
   } finally {
     await fake.close()
   }
 })
 
-test("a connection failure does not throw", async () => {
+test("a connection failure throws so the delivery engine retries", async () => {
   const transport = new AgentpushTransport({ baseUrl: "http://127.0.0.1:1", apiKey: "apk_test" })
-  await assert.doesNotReject(transport.send(whatsappMember(), { text: "hi", artifactUrl: undefined }))
+  await assert.rejects(transport.send(whatsappMember(), { text: "hi", artifactUrl: undefined }))
 })
 
 test("sendMedia uploads the png then sends it as media for a whatsapp member", async () => {
