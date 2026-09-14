@@ -8,18 +8,22 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import {
   isHostResponse,
+  isStandaloneBridge,
   mergeRoomCodes,
   planRosterRows,
   presenceViewOf,
   renderRosterRow,
   roomIdentityLabel,
   rosterPanelHtml,
+  standaloneCallTool,
+  toolPayload,
   unreadLabelOf,
   type PanelDocument,
   type PanelElement,
   type RosterListPayload,
   type RosterListRoom,
   type RosterRowView,
+  type StandaloneConnection,
 } from "../../src/service/roster-panel.html.ts"
 
 /** A DOM stand-in that records everything the row renderer does to it —
@@ -270,4 +274,59 @@ test("an echoed request is never read as its answer: the pending call stays pend
   assert.equal(isHostResponse(null), false)
   const wrongVersion = { jsonrpc: "1.0", id: 7 }
   assert.equal(isHostResponse(wrongVersion), false, "not JSON-RPC 2.0")
+})
+
+// --- FIX 2: the standalone REST bridge (`window.McpApp`, injected by
+// `app serve`) is detected on BOTH conditions, and its two-positional
+// `callTool(name, args)` is fed this panel's single `{name, arguments}`. ---
+
+test("standalone detection needs BOTH a hostless window AND McpApp.connect", () => {
+  const connection: StandaloneConnection = { callTool: async () => ({ content: [] }) }
+  const connect = () => Promise.resolve(connection)
+
+  assert.equal(isStandaloneBridge(false, { connect }), false, "an iframe with a real parent host is never standalone")
+  assert.equal(isStandaloneBridge(true, undefined), false, "a hostless window with no McpApp is nobody to talk to")
+  assert.equal(isStandaloneBridge(true, null), false)
+  assert.equal(isStandaloneBridge(true, {}), false, "McpApp without connect is not the bridge this panel needs")
+  assert.equal(isStandaloneBridge(true, { connect }), true, "both conditions met IS the standalone bridge")
+  assert.equal(isStandaloneBridge(false, undefined), false)
+})
+
+test("standalone callTool translates {name, arguments} into (name, args) and keeps _meta for the room codes", async () => {
+  const calls: { readonly name: string; readonly args: Readonly<Record<string, string>> }[] = []
+  const connection: StandaloneConnection = {
+    callTool: async (name, args) => {
+      calls.push({ name, args })
+      return {
+        content: [
+          {
+            text: JSON.stringify({
+              rooms: [
+                { slug: "harbor-lantern-ember", presenceBasis: "acked", memberCount: 2 },
+                { slug: "copper-meadow-signal", presenceBasis: "acked", memberCount: 1 },
+              ],
+            }),
+          },
+        ],
+        _meta: {
+          rooms: [
+            { slug: "harbor-lantern-ember", code: "RDV-AAAA" },
+            { slug: "copper-meadow-signal", code: "RDV-BBBB" },
+          ],
+        },
+      }
+    },
+  }
+
+  const body = await standaloneCallTool(connection, { name: "rendezvous_list", arguments: {} })
+  assert.deepEqual(
+    calls,
+    [{ name: "rendezvous_list", args: {} }],
+    "window.McpApp.callTool takes (name, args), not this panel's one params object",
+  )
+
+  const plan = planRosterRows(toolPayload(body))
+  assert.equal(plan.rows.length, 2, "both rooms must render once _meta re-attaches the codes")
+  assert.deepEqual(plan.rows.map((r) => r.identity), ["harbor-lantern-ember", "copper-meadow-signal"])
+  assert.deepEqual(plan.rows.map((r) => r.code), ["RDV-AAAA", "RDV-BBBB"], "the _meta codes must survive the standalone path")
 })

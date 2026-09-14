@@ -288,6 +288,82 @@ export const isHostResponse = (message: HostMessage | null): boolean => {
   return message.method === undefined || message.method === null
 }
 
+/** One content block of a `CallToolResult`, as far as this panel reads it. */
+export interface ToolContentBlock {
+  readonly text?: string
+}
+
+/** The slice of a `CallToolResult` the panel unwraps: the first text block is
+ *  the tools' JSON, and `_meta` is the host-only channel that carries each
+ *  room's join code (BRIEF-24). The whole envelope — including `_meta` — is
+ *  what the standalone REST bridge resolves with, verbatim. */
+export interface ToolCallResult {
+  readonly isError?: boolean
+  readonly content?: readonly ToolContentBlock[]
+  readonly _meta?: { readonly rooms?: readonly RosterListRoom[] }
+}
+
+/** FIX 2 — the object the standalone REST bridge resolves
+ *  (`app-ui-apps.ts`'s STANDALONE_REST_BRIDGE_SCRIPT). Its `callTool` takes
+ *  TWO POSITIONALS, `(name, args)` — unlike this panel's own single
+ *  `{name, arguments}` object. Getting that translation wrong is how the
+ *  standalone path stays broken while looking wired. */
+export interface StandaloneConnection {
+  readonly callTool: (name: string, args: Readonly<Record<string, string>>) => Promise<ToolCallResult>
+}
+
+/** `window.McpApp` itself: only `connect` is read here, and it may be absent
+ *  (the VS Code webview relay answers postMessage directly and defines no
+ *  `McpApp`). */
+export interface StandaloneApp {
+  readonly connect?: () => Promise<StandaloneConnection>
+}
+
+/** Unwrap a `CallToolResult` into the JSON its tools returned, re-attaching
+ *  the host-only `_meta` codes by slug (BRIEF-24). Extracted as a pure
+ *  function so the shipped script and the tests run the SAME unwrap: a
+ *  `_meta`-carrying body must survive the standalone `callTool` path for
+ *  `mergeRoomCodes` to see it. */
+export const toolPayload = (result: ToolCallResult | null | undefined): RosterListPayload => {
+  // A CallToolResult's first text block is the JSON these tools return
+  // (ids, counts and slugs only — mcp-personal.ts's file-top HARD RULE).
+  if (result === null || result === undefined || typeof result !== "object") return {}
+  const content = result.content
+  if (!Array.isArray(content) || content.length === 0) return {}
+  const first = content[0]
+  if (first === undefined || first === null || typeof first !== "object" || typeof first.text !== "string") return {}
+  let payload: RosterListPayload
+  try {
+    payload = JSON.parse(first.text)
+  } catch {
+    return {}
+  }
+  return mergeRoomCodes(payload, result._meta)
+}
+
+/** FIX 2 — standalone detection, exactly agentproto's two conditions
+ *  (`panel-bridge.ts:92-94`): there is no host to `postMessage` (`parent` IS
+ *  this window) AND the standalone REST bridge is present with the `connect`
+ *  function this panel needs. `window.McpApp` alone is NOT sufficient — the
+ *  direct postMessage path is real, and `parent` is the load-bearing signal.
+ *  Passed the two facts rather than the window so the shipped script and the
+ *  tests evaluate the identical predicate. */
+export const isStandaloneBridge = (parentIsSelf: boolean, mcpApp: StandaloneApp | null | undefined): boolean => {
+  if (parentIsSelf !== true) return false
+  if (mcpApp === null || mcpApp === undefined) return false
+  return typeof mcpApp.connect === "function"
+}
+
+/** FIX 2 — translate this panel's one `{name, arguments}` object into the
+ *  standalone connection's two positionals `(name, args)`, and hand back the
+ *  body whole so `_meta` survives to `toolPayload`. */
+export const standaloneCallTool = (
+  connection: StandaloneConnection,
+  params: { readonly name: string; readonly arguments?: Readonly<Record<string, string>> },
+): Promise<ToolCallResult> => {
+  return connection.callTool(params.name, params.arguments === undefined ? {} : params.arguments)
+}
+
 /** One row's PRESENTATION, shared by the shipped panel and the tests.
  *  Everything here is `textContent` on an element whose only other property
  *  is a `className` — no attribute is ever set, so the room identity cannot
@@ -412,6 +488,9 @@ function script(principalLabel: string, publicUrl: string): string {
     const planRosterRows = ${planRosterRows.toString()};
     const mergeRoomCodes = ${mergeRoomCodes.toString()};
     const isHostResponse = ${isHostResponse.toString()};
+    const toolPayload = ${toolPayload.toString()};
+    const isStandaloneBridge = ${isStandaloneBridge.toString()};
+    const standaloneCallTool = ${standaloneCallTool.toString()};
     const renderRosterRow = ${renderRosterRow.toString()};
 
     const roomsEl = document.getElementById("rooms");
@@ -465,8 +544,18 @@ function script(principalLabel: string, publicUrl: string): string {
       });
     }
 
+    let standaloneConnection = null;
+
     const app = {
       connect: async function () {
+        // FIX 2: in standalone mode there is no host to handshake with.
+        // window.McpApp IS the bridge; take its connect() and send NOTHING —
+        // no ui/initialize, no ui/notifications/initialized, nobody to
+        // receive either.
+        if (isStandaloneBridge(window.parent === window, window.McpApp)) {
+          standaloneConnection = await window.McpApp.connect();
+          return;
+        }
         await hostRequest("ui/initialize", {
           appInfo: { name: "rendezvous-roster", version: "1.0.0" },
           appCapabilities: {},
@@ -476,31 +565,16 @@ function script(principalLabel: string, publicUrl: string): string {
       },
       // The server call the host makes on our behalf, with the credential it
       // already holds: no token in this iframe, no CORS to open, no second
-      // write path. This is CallToolRequest-in-AppRequest.
+      // write path. This is CallToolRequest-in-AppRequest. In standalone mode
+      // the same call routes through window.McpApp, whose callTool takes two
+      // positionals (name, args) — standaloneCallTool does that translation.
       callTool: function (params) {
+        if (standaloneConnection !== null) {
+          return standaloneCallTool(standaloneConnection, params);
+        }
         return hostRequest("tools/call", params);
       },
     };
-
-    function toolPayload(result) {
-      // A CallToolResult's first text block is the JSON these tools return
-      // (ids, counts and slugs only — mcp-personal.ts's file-top HARD RULE).
-      if (result === null || typeof result !== "object") return {};
-      const content = result.content;
-      if (!Array.isArray(content) || content.length === 0) return {};
-      const first = content[0];
-      if (first === null || typeof first !== "object" || typeof first.text !== "string") return {};
-      let payload;
-      try {
-        payload = JSON.parse(first.text);
-      } catch (e) {
-        return {};
-      }
-      // BRIEF-24: the room CODE left the model-visible text and moved to the
-      // result's _meta, the host's channel. mergeRoomCodes re-attaches it per
-      // room by slug so this panel can still fetch /r/:code/state.
-      return mergeRoomCodes(payload, result._meta);
-    }
 
     // --- Per-room roster: the SECOND fetch, auth-free, straight at the
     // spectator projection. It uses the room CODE because the code IS the
