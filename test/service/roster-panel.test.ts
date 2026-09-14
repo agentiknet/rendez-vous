@@ -9,6 +9,7 @@ import { test } from "node:test"
 import {
   FAILURES_BEFORE_WARNING,
   bannerVisibilityClass,
+  diffRosterRows,
   isHostResponse,
   isStandaloneBridge,
   lostContactVisible,
@@ -17,6 +18,7 @@ import {
   planRosterRows,
   presenceViewOf,
   renderRosterRow,
+  rosterRowDataChanged,
   roomIdentityLabel,
   rosterPanelHtml,
   standaloneCallTool,
@@ -36,6 +38,7 @@ class FakeElement implements PanelElement {
   readonly tag: string
   className = ""
   textContent = ""
+  value = ""
   readonly children: FakeElement[] = []
   readonly attributes: { name: string; value: string }[] = []
 
@@ -378,4 +381,66 @@ test("after FAILURES_BEFORE_WARNING consecutive failures the connection banner e
     banner.className = bannerVisibilityClass(lostContactVisible(failures))
   }
   assert.ok(banner.className.split(" ").includes("visible"), "three failed polls in a row must draw the banner")
+})
+
+// --- The poll UPDATES the list; it must not rebuild it. A rebuild destroyed
+// the input a person was typing in, collapsed an expanded roster and wiped
+// send-notes on every 3s tick. The diff is pure so it can be tested with no
+// DOM; the script applies it to a slug-keyed store of live rows. ---
+
+test("a poll that changes one room's data reuses that row and leaves its typed input untouched", () => {
+  const before = [row({ slug: "harbor-lantern-ember", memberCount: 2 }), row({ slug: "copper-meadow-signal", memberCount: 1 })]
+  const after = [row({ slug: "harbor-lantern-ember", memberCount: 9 }), row({ slug: "copper-meadow-signal", memberCount: 1 })]
+
+  const diff = diffRosterRows(before, after)
+  assert.equal(diff.removed.length, 0, "nobody left")
+  assert.equal(diff.added.length, 0, "nobody arrived")
+  assert.deepEqual(diff.kept.map((entry) => entry.row.slug), ["harbor-lantern-ember", "copper-meadow-signal"])
+  assert.deepEqual(diff.kept.map((entry) => entry.dataChanged), [true, false], "only the changed row repaints")
+
+  // The preservation contract, modelled on the script's slug-keyed store: a
+  // kept row is the SAME element across the pass, so its live input survives.
+  const input = new FakeElement("input")
+  input.value = "a half-typed message"
+  const record = { el: new FakeElement("div"), input }
+  const store = new Map([["harbor-lantern-ember", record]])
+
+  for (const slug of diff.removed) store.delete(slug)
+  for (const entry of diff.kept) {
+    const existing = store.get(entry.row.slug)
+    if (existing !== undefined && entry.dataChanged) existing.el.className = "room" // data-only repaint
+  }
+  for (const added of diff.added) store.set(added.slug, { el: new FakeElement("div"), input: new FakeElement("input") })
+
+  assert.equal(store.get("harbor-lantern-ember"), record, "a kept row is never removed and re-added")
+  assert.equal(input.value, "a half-typed message", "the update pass must not touch the live input")
+})
+
+test("a room that disappears from the plan has its row (and any stale draft) dropped", () => {
+  const diff = diffRosterRows(
+    [row({ slug: "harbor-lantern-ember" }), row({ slug: "copper-meadow-signal" })],
+    [row({ slug: "copper-meadow-signal" })],
+  )
+  assert.deepEqual(diff.removed, ["harbor-lantern-ember"])
+  assert.deepEqual(diff.added, [])
+  assert.deepEqual(diff.kept.map((entry) => entry.row.slug), ["copper-meadow-signal"])
+})
+
+test("a room that appears for the first time adds exactly one row", () => {
+  const diff = diffRosterRows(
+    [row({ slug: "harbor-lantern-ember" })],
+    [row({ slug: "harbor-lantern-ember" }), row({ slug: "copper-meadow-signal" })],
+  )
+  assert.deepEqual(diff.added.map((added) => added.slug), ["copper-meadow-signal"])
+  assert.deepEqual(diff.removed, [])
+  assert.deepEqual(diff.kept.map((entry) => entry.row.slug), ["harbor-lantern-ember"])
+})
+
+test("a row repaints only when a RENDERED field actually changed", () => {
+  const base = row({ slug: "harbor-lantern-ember" })
+  assert.equal(rosterRowDataChanged(base, { ...base }), false, "an identical row needs no repaint")
+  assert.equal(rosterRowDataChanged(base, { ...base, memberCount: base.memberCount + 1 }), true)
+  assert.equal(rosterRowDataChanged(base, { ...base, unreadLabel: "3" }), true)
+  assert.equal(rosterRowDataChanged(base, { ...base, presence: { kind: "away", label: "away" } }), true)
+  assert.equal(rosterRowDataChanged(base, { ...base, code: "RDV-ZZZZ" }), false, "the code is a capability, never rendered")
 })

@@ -380,20 +380,15 @@ export const standaloneCallTool = (
   return connection.callTool(params.name, params.arguments === undefined ? {} : params.arguments)
 }
 
-/** One row's PRESENTATION, shared by the shipped panel and the tests.
- *  Everything here is `textContent` on an element whose only other property
- *  is a `className` — no attribute is ever set, so the room identity cannot
- *  end up in an `href`, a `data-*`, or a copy target (amendment 1). The
- *  interactive controls (expand, send) are appended by the script AFTER
- *  this, and they close over `row.code` rather than reading it back out of
- *  the DOM. */
-export const renderRosterRow = (doc: PanelDocument, row: RosterRowView): PanelElement => {
-  const el = doc.createElement("div")
-  el.className = row.active ? "room active" : "room"
-
-  const head = doc.createElement("div")
-  head.className = "room-head"
-
+/** Append one row's data-bearing HEAD — presence marker, identity, and the
+ *  active/unread badges — to an existing container. Split out of
+ *  `renderRosterRow` so a poll can REFRESH these parts in place without
+ *  touching the row's live controls (the message input, the expanded roster,
+ *  the send-note) — see `diffRosterRows`. Everything here is `textContent` on
+ *  an element whose only other property is a `className`: no attribute is
+ *  ever set, so the room identity cannot end up in an `href`, a `data-*`, or
+ *  a copy target (amendment 1). */
+export const appendRosterRowHead = (doc: PanelDocument, head: PanelElement, row: RosterRowView): void => {
   const dot = doc.createElement("span")
   dot.className = "dot dot-" + row.presence.kind
   head.appendChild(dot)
@@ -416,12 +411,11 @@ export const renderRosterRow = (doc: PanelDocument, row: RosterRowView): PanelEl
     unread.textContent = row.unreadLabel
     head.appendChild(unread)
   }
+}
 
-  el.appendChild(head)
-
-  const meta = doc.createElement("div")
-  meta.className = "room-meta"
-
+/** Append one row's data-bearing META — the presence word, the member count,
+ *  and your own display name in that room. See `appendRosterRowHead`. */
+export const appendRosterRowMeta = (doc: PanelDocument, meta: PanelElement, row: RosterRowView): void => {
   const presence = doc.createElement("span")
   presence.className = "presence presence-" + row.presence.kind
   presence.textContent = "you: " + row.presence.label
@@ -438,9 +432,83 @@ export const renderRosterRow = (doc: PanelDocument, row: RosterRowView): PanelEl
     name.textContent = "as " + row.displayName
     meta.appendChild(name)
   }
+}
 
+/** One row's PRESENTATION, shared by the shipped panel and the tests. The
+ *  interactive controls (expand, send) are appended by the script AFTER this,
+ *  and they close over `row.code`/`row.slug` rather than reading them back out
+ *  of the DOM. */
+export const renderRosterRow = (doc: PanelDocument, row: RosterRowView): PanelElement => {
+  const el = doc.createElement("div")
+  el.className = row.active ? "room active" : "room"
+
+  const head = doc.createElement("div")
+  head.className = "room-head"
+  appendRosterRowHead(doc, head, row)
+  el.appendChild(head)
+
+  const meta = doc.createElement("div")
+  meta.className = "room-meta"
+  appendRosterRowMeta(doc, meta, row)
   el.appendChild(meta)
   return el
+}
+
+/** Whether a kept room's RENDERED fields moved between two polls. `code` is
+ *  not rendered and `slug` IS the identity, so neither repaint; everything
+ *  `appendRosterRowHead`/`appendRosterRowMeta` draw does. */
+export const rosterRowDataChanged = (previous: RosterRowView, next: RosterRowView): boolean => {
+  return (
+    previous.identity !== next.identity ||
+    previous.presence.kind !== next.presence.kind ||
+    previous.presence.label !== next.presence.label ||
+    previous.memberCount !== next.memberCount ||
+    previous.unreadLabel !== next.unreadLabel ||
+    previous.active !== next.active ||
+    previous.displayName !== next.displayName
+  )
+}
+
+/** A kept room: its row element is REUSED, its data parts repainted only when
+ *  `dataChanged`. */
+export interface KeptRosterRow {
+  readonly row: RosterRowView
+  readonly dataChanged: boolean
+}
+
+/** The pure diff between the previous and next plans, keyed by room SLUG
+ *  (BRIEF-20: the slug identifies the room; the code admits). The script uses
+ *  this to update the list rather than rebuild it, so a poll cannot destroy
+ *  the input a person is typing in, collapse an expanded roster, or wipe a
+ *  send-note. A gone room is removed — its draft is lost, which is correct:
+ *  keeping a stale row to preserve a draft would let an unsent message LOOK
+ *  sent. */
+export interface RosterRowDiff {
+  readonly removed: readonly string[]
+  readonly added: readonly RosterRowView[]
+  readonly kept: readonly KeptRosterRow[]
+}
+
+export const diffRosterRows = (previous: readonly RosterRowView[], next: readonly RosterRowView[]): RosterRowDiff => {
+  const previousBySlug = new Map<string, RosterRowView>()
+  for (const row of previous) previousBySlug.set(row.slug, row)
+
+  const nextSlugs = new Set<string>()
+  for (const row of next) nextSlugs.add(row.slug)
+
+  const removed: string[] = []
+  for (const row of previous) {
+    if (!nextSlugs.has(row.slug)) removed.push(row.slug)
+  }
+
+  const added: RosterRowView[] = []
+  const kept: KeptRosterRow[] = []
+  for (const row of next) {
+    const before = previousBySlug.get(row.slug)
+    if (before === undefined) added.push(row)
+    else kept.push({ row, dataChanged: rosterRowDataChanged(before, row) })
+  }
+  return { removed, added, kept }
 }
 
 const STYLE = `
@@ -514,6 +582,10 @@ function script(principalLabel: string, publicUrl: string): string {
     const toolPayload = ${toolPayload.toString()};
     const isStandaloneBridge = ${isStandaloneBridge.toString()};
     const standaloneCallTool = ${standaloneCallTool.toString()};
+    const appendRosterRowHead = ${appendRosterRowHead.toString()};
+    const appendRosterRowMeta = ${appendRosterRowMeta.toString()};
+    const rosterRowDataChanged = ${rosterRowDataChanged.toString()};
+    const diffRosterRows = ${diffRosterRows.toString()};
     const renderRosterRow = ${renderRosterRow.toString()};
 
     const roomsEl = document.getElementById("rooms");
@@ -712,15 +784,77 @@ function script(principalLabel: string, publicUrl: string): string {
       el.appendChild(roster);
     }
 
+    // FIX: the poll UPDATES the list instead of rebuilding it. Rebuilding
+    // destroyed the input a person was typing in, collapsed the "who is there"
+    // roster, and wiped any send-note — every 3 seconds. Each row keeps its
+    // live DOM in a record keyed by room SLUG (BRIEF-20: the slug identifies
+    // the room); only the data-bearing head and meta are repainted, and only
+    // when the data actually changed. A gone room's row is removed outright —
+    // an unsent draft must never be kept alive to look sent.
+    const rowRecords = new Map();
+
+    function createRowRecord(row) {
+      const el = renderRosterRow(document, row);
+      // renderRosterRow appends head then meta; keep them so a later poll can
+      // refresh those two parts without touching the interactive children.
+      const head = el.children[0];
+      const meta = el.children[1];
+      addActions(el, row);
+      const record = { el: el, head: head, meta: meta, row: row };
+      rowRecords.set(row.slug, record);
+      return record;
+    }
+
+    function refreshRowRecord(record, row) {
+      record.el.className = row.active ? "room active" : "room";
+      record.head.textContent = "";
+      appendRosterRowHead(document, record.head, row);
+      record.meta.textContent = "";
+      appendRosterRowMeta(document, record.meta, row);
+      record.row = row;
+    }
+
+    function applyPlan(plan) {
+      const previousRows = [];
+      rowRecords.forEach(function (record) {
+        previousRows.push(record.row);
+      });
+      const diff = diffRosterRows(previousRows, plan.rows);
+
+      diff.removed.forEach(function (slug) {
+        const record = rowRecords.get(slug);
+        if (record === undefined) return;
+        if (record.el.parentNode) record.el.parentNode.removeChild(record.el);
+        rowRecords.delete(slug);
+      });
+
+      diff.kept.forEach(function (kept) {
+        const record = rowRecords.get(kept.row.slug);
+        if (record === undefined) return;
+        if (kept.dataChanged) refreshRowRecord(record, kept.row);
+        else record.row = kept.row;
+      });
+
+      diff.added.forEach(function (row) {
+        createRowRecord(row);
+      });
+
+      // Order the rows to the plan WITHOUT moving one that is already in
+      // place: re-inserting the element that holds the focused input would
+      // blur it and drop the caret. Only an actual order change moves a node.
+      let anchor = roomsEl.firstChild;
+      plan.rows.forEach(function (row) {
+        const record = rowRecords.get(row.slug);
+        if (record === undefined) return;
+        if (record.el !== anchor) roomsEl.insertBefore(record.el, anchor);
+        anchor = record.el.nextSibling;
+      });
+    }
+
     function renderPlan(plan) {
       ambiguousEl.className = planBannerClass(plan);
-      roomsEl.textContent = "";
       emptyEl.textContent = plan.rows.length === 0 ? NO_ROOMS_TEXT : "";
-      plan.rows.forEach(function (row) {
-        const el = renderRosterRow(document, row);
-        addActions(el, row);
-        roomsEl.appendChild(el);
-      });
+      applyPlan(plan);
     }
 
     let consecutiveFailures = 0;
