@@ -107,15 +107,23 @@ HTML (`text/html;profile=mcp-app`) with a CSP that allows the panel to fetch
 `/r/<code>/state` from the public origin. A host that implements MCP Apps
 renders it as the roster; a host that does not ignores the resource.
 
-Tested 2026-09-14 (see below): **neither CLI host renders the panel.** Claude
-Code enumerated the resource and could fetch its raw HTML as text, but never
-presented it as an app; Codex did not request the resource at all. This is a
-finding about the hosts, not about the panel — the resource is served
-correctly.
+Tested 2026-09-14: the split is **CLI vs desktop**, not client vs client. Both
+desktop hosts render it — **Claude Desktop** and **Codex Desktop** both fetch
+the resource and present the roster as an app, live against
+`https://rdv.clipgen.co/mcp`. Neither CLI does: Claude Code 2.1.259 enumerates
+the resource and can print its raw HTML as text but has no app surface to
+render into, and **Codex CLI 0.153.4 never sends `resources/list` at all**, so
+the panel is not even a candidate there.
 
-## Verified against
+Read the CLI findings below as findings about *those two CLI builds*. The
+earlier form of this section said "neither host renders the panel" and named
+"Codex" unqualified; that was measured on the CLIs only, and Codex Desktop
+falsifies the general claim. The resource itself was served correctly
+throughout — the variable was always the host.
 
-Both clients were run against the **live** service at
+## Verified against (the two CLIs)
+
+Both CLI clients were run against the **live** service at
 `https://rdv.clipgen.co/mcp` on 2026-09-14, with a read-only principal token
 for an address that is a member of two rooms. (`main` was at `2c7022e` when
 the brief was written and advanced to `12086b9` shortly after; neither commit
