@@ -825,6 +825,31 @@ test("an ack on the read capability moves ackedSeq and refreshes ackedAt", async
   assert.equal(backwards.ackedSeq, 1, "the effective cursor does not rewind")
 })
 
+// --- BRIEF-13 step 2's bugfix, end to end: a principal whose OWN address is
+// already a room-web screen must not duplicate itself on drain. -----------
+
+test("a room-web principal draining a room where that exact address is already a member creates NO new member and returns the existing id, stably", async () => {
+  const { store, handler } = await buildSendHarness()
+  const room = await store.create()
+  const claimedScreen: Address = { provider: "room-web", source: "room-web", contactRef: "camille" }
+  await store.addMember(room.code, { displayName: "Camille", tier: "room-web", address: claimedScreen })
+
+  const roomWebCount = (): number =>
+    (store.get(room.code)?.members ?? []).filter((member) => member.address.provider === "room-web").length
+  assert.equal(roomWebCount(), 1, "the fixture starts with exactly one screen")
+
+  const first = drainPayload(await callDrain(handler, bearerFor(claimedScreen), { roomSlug: room.slug }))
+  assert.equal(roomWebCount(), 1, "draining the screen's own address must not mint a twin")
+
+  const second = drainPayload(await callDrain(handler, bearerFor(claimedScreen), { roomSlug: room.slug }))
+  assert.equal(second.memberId, first.memberId, "the member id is stable across repeated drains")
+  assert.equal(roomWebCount(), 1, "still exactly one screen after a second drain")
+
+  const member = store.get(room.code)?.members.find((candidate) => candidate.id === first.memberId)
+  assert.ok(member !== undefined)
+  assert.equal(member.displayName, "Camille", "the drain must not rename the claimed screen")
+})
+
 // --- BRIEF-13 step 2: rendezvous_invite. -------------------------------
 
 function callInvite(

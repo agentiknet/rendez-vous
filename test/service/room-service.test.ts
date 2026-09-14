@@ -1281,3 +1281,69 @@ test("an unroutable member is answered as an undeliverable outcome, not an uncau
   if (outcome.kind !== "undeliverable") return
   assert.match(outcome.reason, /unrouted delivery/)
 })
+
+// --- BRIEF-13 step 2's bugfix: ensureRoomWebMember must be idempotent on an
+// address that is ALREADY a room-web screen. ------------------------------
+
+function roomWebMembersOf(store: RoomStore, code: string): readonly Member[] {
+  return (store.get(code)?.members ?? []).filter((member) => member.address.provider === "room-web")
+}
+
+test("ensureRoomWebMember on an address that is already a room-web screen finds the SAME member every time — it must not mint a twin", async () => {
+  const { service, store } = await buildHarness()
+  const room = await store.create()
+  const screenAddress: Address = { provider: "room-web", source: "room-web", contactRef: "camille" }
+  await store.addMember(room.code, { displayName: "Camille", tier: "room-web", address: screenAddress })
+  assert.equal(roomWebMembersOf(store, room.code).length, 1, "the fixture starts with exactly one screen")
+
+  const first = await service.ensureRoomWebMember(room.code, screenAddress, "Camille")
+  assert.equal(roomWebMembersOf(store, room.code).length, 1, "resolving the screen must not create a second member")
+  assert.equal(first.address.contactRef, "camille", "an already-room-web address passes through unchanged, not double-namespaced")
+
+  const second = await service.ensureRoomWebMember(room.code, screenAddress, "Camille")
+  assert.equal(second.id, first.id, "a second resolution of the same screen must return the SAME member id")
+  assert.equal(roomWebMembersOf(store, room.code).length, 1, "still exactly one screen after a second drain")
+})
+
+test("ensureRoomWebMember does not rename an existing room-web screen's displayName", async () => {
+  const { service, store } = await buildHarness()
+  const room = await store.create()
+  const screenAddress: Address = { provider: "room-web", source: "room-web", contactRef: "camille" }
+  await store.addMember(room.code, { displayName: "Camille (claimed)", tier: "room-web", address: screenAddress })
+
+  // The real call path (mcp-personal.ts's callDrainTool) always passes the
+  // membership's OWN current displayName, so this is what a real drain does
+  // — never a caller-supplied name that could overwrite a claimed screen's.
+  const member = await service.ensureRoomWebMember(room.code, screenAddress, "Camille (claimed)")
+  assert.equal(member.displayName, "Camille (claimed)", "the claimed screen's displayName must survive a drain untouched")
+})
+
+test("a telegram principal's room-web screen still carries the namespaced contactRef — the fix must not weaken this for every other provider", async () => {
+  const { service, store } = await buildHarness()
+  const room = await store.create()
+  const telegramAddress: Address = { provider: "telegram", source: "telegram", contactRef: "6371794295" }
+
+  const screen = await service.ensureRoomWebMember(room.code, telegramAddress, "Telegram Screen")
+  assert.equal(screen.address.provider, "room-web")
+  assert.equal(screen.address.contactRef, "telegram:6371794295", "still namespaced by the principal's own provider")
+})
+
+test("a telegram principal whose contactRef equals a browser's OWN claimed room-web name still cannot collide with it", async () => {
+  const { service, store } = await buildHarness()
+  const room = await store.create()
+  // A browser-claimed screen whose contactRef is exactly the raw string the
+  // OLD (unfixed) derivation would have produced for the telegram principal
+  // below — the exact collision this namespacing exists to prevent.
+  await store.addMember(room.code, {
+    displayName: "Human In The Browser",
+    tier: "room-web",
+    address: { provider: "room-web", source: "room-web", contactRef: "6371794295" },
+  })
+
+  const telegramAddress: Address = { provider: "telegram", source: "telegram", contactRef: "6371794295" }
+  const screen = await service.ensureRoomWebMember(room.code, telegramAddress, "Telegram Screen")
+
+  assert.equal(roomWebMembersOf(store, room.code).length, 2, "the telegram principal's screen must be a DIFFERENT member")
+  assert.notEqual(screen.displayName, "Human In The Browser")
+  assert.equal(screen.address.contactRef, "telegram:6371794295")
+})

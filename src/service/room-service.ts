@@ -49,8 +49,18 @@ function memberFacingArtifactUrl(room: Room): string | undefined {
  *  caller. Keying the membership directly by the principal (provider +
  *  contactRef) is possible precisely because the service resolves
  *  principal → membership server-side; that is the forced, and sufficient,
- *  second mechanism. */
+ *  second mechanism.
+ *
+ *  IDEMPOTENT on an address that is ALREADY a `room-web` screen: namespacing
+ *  it again would turn `room-web:camille` into `room-web:"room-web:camille"`,
+ *  which never matches the existing member's address under `addMember`'s
+ *  `sameAddress` and mints a second member for the same screen on every
+ *  drain. An address whose `provider` is already `"room-web"` IS its own
+ *  screen, so it passes through unchanged; every other provider still gets
+ *  namespaced, so `telegram:6371794295` still cannot collide with a room-web
+ *  member literally named `"6371794295"`. */
 function principalRoomWebAddress(address: Address): Address {
+  if (address.provider === "room-web") return address
   return { provider: "room-web", source: "room-web", contactRef: `${address.provider}:${address.contactRef}` }
 }
 
