@@ -49,6 +49,8 @@ import type { McpResponse, McpServerMount } from "./mcp-canvakit.ts"
 import type { TtsProvider } from "../media/openai.ts"
 import type { SpeechMediaStore } from "../markers.ts"
 import { parseSpeech, renderSpeech } from "../markers.ts"
+import { attachmentUrl, parseAttachments } from "../fanout/attach.ts"
+import { publicArtifactUrl } from "./artifact-proxy.ts"
 import type { OutboundAttachment } from "./transports.ts"
 
 /** The delivery half of the audience tools (PLAN §3.2): the `say`/`whisper`
@@ -556,7 +558,13 @@ export function createMcpRoomHandler(
         // BRIEF-31: parse markers from the text so `[[say …]]` is stripped
         // from delivery and rendered as a voice note (or its text fallback).
         // One extractor shared with RoomFanout — never a second parser.
-        const { text: cleanText, spoken } = parseSpeech(parsed.input.text)
+        // BRIEF-41: same for `[[attach …]]` — the fanout reader parses it
+        // (src/fanout/reader.ts), so the tool path must too, or the marker
+        // reaches members as literal text. Attachments go out to exactly the
+        // members this send reached, via the same `deliverAttachment` sink
+        // the voice notes use.
+        const withoutAttachments = parseAttachments(parsed.input.text)
+        const { text: cleanText, spoken } = parseSpeech(withoutAttachments.text)
         let textToDeliver = cleanText
         if (spoken.length > 0) {
           if (deps.deliverAttachment === undefined) {
@@ -567,6 +575,21 @@ export function createMcpRoomHandler(
         }
         const outcome = await sendAudience(room, deliveries, { ...parsed.input, text: textToDeliver })
         if (!outcome.ok) return fail(id, INVALID_REQUEST, `unroutable delivery: ${outcome.message}`)
+        if (withoutAttachments.attachments.length > 0 && outcome.accepted.length > 0 && deps.deliverAttachment !== undefined) {
+          const artifactBase = publicArtifactUrl(room.code)
+          for (const memberId of outcome.accepted) {
+            for (const parsedAttachment of withoutAttachments.attachments) {
+              const attachment: OutboundAttachment = {
+                url: attachmentUrl(artifactBase, parsedAttachment.name),
+                filename: parsedAttachment.name,
+                mimeType: parsedAttachment.mimeType,
+                kind: parsedAttachment.kind,
+                caption: parsedAttachment.caption,
+              }
+              await deps.deliverAttachment(room.code, memberId, attachment)
+            }
+          }
+        }
         if (spoken.length > 0 && outcome.accepted.length > 0 && deps.deliverAttachment !== undefined) {
           const notes = await renderSpeech(room.code, spoken, deps.tts, deps.mediaStore)
           for (const memberId of outcome.accepted) {

@@ -7,6 +7,7 @@ import { env } from "../../src/env.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import type { Member, Room } from "../../src/rooms/types.ts"
 import { DeliveryEngine } from "../../src/service/delivery.ts"
+import { publicArtifactUrl } from "../../src/service/artifact-proxy.ts"
 import { roomRenderToken, type McpResponse } from "../../src/service/mcp-canvakit.ts"
 import {
   createMcpRoomHandler,
@@ -16,6 +17,7 @@ import {
   type McpRoomDeps,
 } from "../../src/service/mcp-room.ts"
 import { FakeTransport } from "../fanout/support.ts"
+import { attachmentUrl } from "../../src/fanout/attach.ts"
 
 async function freshDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "rdv-mcp-room-"))
@@ -799,4 +801,76 @@ test("BRIEF-35: a say with only [[say...]] and deliverAttachment wired never car
     assert.ok(send.text.length > 0, "delivery text must not be empty when a [[say…]] marker is the only content")
     assert.ok(send.text.includes("hello there"), "delivery text must carry the spoken words")
   }
+})
+
+test("BRIEF-41: a say with [[attach ...]] strips the marker and delivers the file, not literal text", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const room = h.store.get(h.code)
+  assert.ok(room !== undefined)
+
+  const delivered: Array<{ memberId: string; filename: string; url: string; mimeType: string; caption: string | undefined }> = []
+  const deps: McpRoomDeps = {
+    rooms: () => [room],
+    deliveries: h.engine,
+    deliverAttachment: async (_code, memberId, attachment) => {
+      delivered.push({
+        memberId,
+        filename: attachment.filename,
+        url: attachment.url,
+        mimeType: attachment.mimeType,
+        caption: attachment.caption,
+      })
+    },
+  }
+  const handler = createMcpRoomHandler(deps)
+
+  const res = asRpc(
+    await callTool(handler, "say", { text: "here is the file\n[[attach report.pdf the Q3 numbers]]" }, h.code),
+  )
+  assert.equal(res.status, 200)
+  await h.engine.drain(h.code)
+
+  for (const send of h.transport.sends) {
+    assert.ok(!send.text.includes("[[attach"), "member must not receive the literal marker")
+    assert.ok(send.text.includes("here is the file"), "surrounding text still reaches the member")
+  }
+  for (const memberId of h.memberIds) {
+    const file = delivered.find((d) => d.memberId === memberId)
+    assert.ok(file !== undefined, `member ${memberId} got the attachment`)
+    assert.equal(file.filename, "report.pdf")
+    assert.equal(file.url, attachmentUrl(publicArtifactUrl(h.code), "report.pdf"))
+    assert.equal(file.mimeType, "application/pdf")
+    assert.equal(file.caption, "the Q3 numbers")
+  }
+})
+
+test("BRIEF-41: a whisper with [[attach ...]] delivers the file only to the target, no marker leak", async () => {
+  const h = await deliveryHarness(DELIVERY_MEMBERS)
+  const room = h.store.get(h.code)
+  assert.ok(room !== undefined)
+
+  const delivered: string[] = []
+  const deps: McpRoomDeps = {
+    rooms: () => [room],
+    deliveries: h.engine,
+    deliverAttachment: async (_code, memberId, attachment) => {
+      delivered.push(`${memberId}:${attachment.filename}`)
+    },
+  }
+  const handler = createMcpRoomHandler(deps)
+
+  const target = h.memberIds[0]!
+  const other = h.memberIds[1]!
+  const res = asRpc(await callTool(handler, "whisper", { text: "[[attach secret.txt]]", to: target }, h.code))
+  assert.equal(res.status, 200)
+  await h.engine.drain(h.code)
+
+  const sends = h.transport.sends
+  const targetSend = sends.find((s) => s.memberId === target)
+  assert.ok(targetSend !== undefined, "target received the whisper")
+  for (const send of sends) {
+    assert.ok(!send.text.includes("[[attach"), "no literal marker reaches any member")
+  }
+  assert.ok(delivered.includes(`${target}:secret.txt`), "target got the file")
+  assert.ok(!delivered.some((d) => d.startsWith(`${other}:`)), "non-target got nothing")
 })
