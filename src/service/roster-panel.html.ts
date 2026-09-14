@@ -117,10 +117,15 @@ export interface PresenceView {
 }
 
 export interface RosterRowView {
-  /** The room CODE: the capability. Used to fetch the room's roster and to
-   *  address a send — NEVER rendered, never written into the DOM. It stays
-   *  in a JS value, which is why amendment 1 survives a screenshot. */
+  /** The room CODE: the capability. Used to fetch the room's roster from
+   *  `/r/:code/state` — NEVER rendered, never written into the DOM. It stays
+   *  in a JS value, which is why amendment 1 survives a screenshot. It is
+   *  supplied by the host-only `_meta` (BRIEF-24), never by the model-visible
+   *  text payload, and is NO LONGER what addresses a send. */
   readonly code: string
+  /** The room SLUG: the name. This is what `rendezvous_send` takes (BRIEF-24)
+   *  — a send addresses the room by name, never by the join capability. */
+  readonly slug: string
   /** What the row SHOWS for this room — see `roomIdentityLabel`. */
   readonly identity: string
   readonly presence: PresenceView
@@ -210,6 +215,8 @@ export const planRosterRows = (payload: RosterListPayload): RosterPlan => {
     if (typeof room.code !== "string" || room.code.length === 0) continue
     rows.push({
       code: room.code,
+      // BRIEF-24: the slug addresses a send; it arrives in the text payload.
+      slug: typeof room.slug === "string" ? room.slug : "",
       // AMENDMENT 1: the one and only call site per render.
       identity: roomIdentityLabel(room),
       presence: presenceViewOf(room),
@@ -220,6 +227,32 @@ export const planRosterRows = (payload: RosterListPayload): RosterPlan => {
     })
   }
   return { ambiguous: payload.ambiguous === true, rows }
+}
+
+/** BRIEF-24: the room join CODE is the capability, so it left the
+ *  model-visible `content[0].text` and moved to the tool result's `_meta`,
+ *  which reaches the HOST's app and not the model's context. This re-attaches
+ *  each code to its room by slug, so the panel can still fetch
+ *  `/r/:code/state`. A caller that forwards no `_meta` (or an older server's
+ *  result) gets the payload back unchanged — rooms with no code, which
+ *  `planRosterRows` renders as no row: an honest "cannot expand this", never a
+ *  guessed code. */
+export const mergeRoomCodes = (
+  payload: RosterListPayload,
+  meta: { readonly rooms?: readonly RosterListRoom[] } | undefined,
+): RosterListPayload => {
+  const rooms = payload.rooms
+  if (rooms === undefined || rooms === null) return payload
+  const metaRooms = meta === undefined || meta.rooms === undefined || meta.rooms === null ? [] : meta.rooms
+  return {
+    ...payload,
+    rooms: rooms.map((room) => {
+      if (room === undefined || room === null) return room
+      const source = metaRooms.find((candidate) => candidate !== undefined && candidate !== null && candidate.slug === room.slug)
+      if (source === undefined || typeof source.code !== "string") return room
+      return { ...room, code: source.code }
+    }),
+  }
 }
 
 /** One row's PRESENTATION, shared by the shipped panel and the tests.
@@ -344,6 +377,7 @@ function script(principalLabel: string, publicUrl: string): string {
     const presenceViewOf = ${presenceViewOf.toString()};
     const unreadLabelOf = ${unreadLabelOf.toString()};
     const planRosterRows = ${planRosterRows.toString()};
+    const mergeRoomCodes = ${mergeRoomCodes.toString()};
     const renderRosterRow = ${renderRosterRow.toString()};
 
     const roomsEl = document.getElementById("rooms");
@@ -413,17 +447,22 @@ function script(principalLabel: string, publicUrl: string): string {
 
     function toolPayload(result) {
       // A CallToolResult's first text block is the JSON these tools return
-      // (ids and counts only — mcp-personal.ts's file-top HARD RULE).
+      // (ids, counts and slugs only — mcp-personal.ts's file-top HARD RULE).
       if (result === null || typeof result !== "object") return {};
       const content = result.content;
       if (!Array.isArray(content) || content.length === 0) return {};
       const first = content[0];
       if (first === null || typeof first !== "object" || typeof first.text !== "string") return {};
+      let payload;
       try {
-        return JSON.parse(first.text);
+        payload = JSON.parse(first.text);
       } catch (e) {
         return {};
       }
+      // BRIEF-24: the room CODE left the model-visible text and moved to the
+      // result's _meta, the host's channel. mergeRoomCodes re-attaches it per
+      // room by slug so this panel can still fetch /r/:code/state.
+      return mergeRoomCodes(payload, result._meta);
     }
 
     // --- Per-room roster: the SECOND fetch, auth-free, straight at the
@@ -509,7 +548,9 @@ function script(principalLabel: string, publicUrl: string): string {
         try {
           const result = await app.callTool({
             name: "rendezvous_send",
-            arguments: { roomCode: row.code, text: text },
+            // BRIEF-24: the send addresses the room by SLUG, never by the
+            // join code — the code is read-only here, for the state fetch.
+            arguments: { roomSlug: row.slug, text: text },
           });
           const payload = toolPayload(result);
           if (result && result.isError === true) throw new Error("the room refused that message");

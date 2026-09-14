@@ -103,7 +103,7 @@ function inboundFromAlice(text: string): { address: Address; displayName: string
 function callSend(
   handler: ReturnType<typeof createMcpPersonalHandler>,
   authorization: string | undefined,
-  args: { roomCode: string; text: string },
+  args: { roomSlug: string; text: string },
 ): Promise<McpResponse> {
   return handler(
     { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "rendezvous_send", arguments: args } },
@@ -191,7 +191,7 @@ function asRpc(res: McpResponse): { readonly status: number; readonly result?: R
 interface ListPayload {
   principal: { provider: string; contactRef: string; displayName: string }
   rooms: {
-    code: string
+    slug: string
     memberId: string
     displayName: string
     tier: string
@@ -203,6 +203,27 @@ interface ListPayload {
     lastActivityAt: string
   }[]
   ambiguous: boolean
+}
+
+/** The room codes `rendezvous_list` now carries out-of-band: they are the
+ *  join capability, so they travel in the result's host-only `_meta`
+ *  (BRIEF-24), never in the text payload a model reads. Read guard by guard,
+ *  no cast, so a missing `_meta` fails an assertion rather than throwing. */
+function metaRoomCodes(res: McpResponse): readonly { slug: string; code: string }[] {
+  const rpc = asRpc(res)
+  const result = rpc.result
+  if (result === undefined) return []
+  const meta = result._meta
+  if (!isRecord(meta)) return []
+  const rooms = meta.rooms
+  if (!Array.isArray(rooms)) return []
+  const out: { slug: string; code: string }[] = []
+  for (const room of rooms) {
+    if (!isRecord(room)) continue
+    if (typeof room.slug !== "string" || typeof room.code !== "string") continue
+    out.push({ slug: room.slug, code: room.code })
+  }
+  return out
 }
 
 function listResult(res: McpResponse): ListPayload {
@@ -233,8 +254,8 @@ test("an address that is a member of two rooms gets both back from rendezvous_li
   const payload = listResult(await callList(handler, bearerFor(address)))
 
   assert.equal(payload.ambiguous, true)
-  const codes = payload.rooms.map((r) => r.code).sort()
-  assert.deepEqual(codes, [roomA.code, roomB.code].sort())
+  const slugs = payload.rooms.map((r) => r.slug).sort()
+  assert.deepEqual(slugs, [roomA.slug, roomB.slug].sort())
   assert.ok(payload.rooms.every((r) => r.active === false), "a broken invariant crowns no room active")
 })
 
@@ -344,6 +365,42 @@ test("rendezvous_list's payload carries no message text anywhere in its serializ
   assert.ok(!serialized.includes("noon"))
 })
 
+// --- BRIEF-24: the code stops being narrated; the slug addresses the room. ----
+
+test("rendezvous_list's model-visible text names each room by SLUG and never by its join CODE", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const address: Address = { provider: "telegram", source: "telegram", contactRef: "+1" }
+  const room = await store.create()
+  await store.addMember(room.code, { displayName: "Alice", tier: "messenger", address })
+
+  const handler = createMcpPersonalHandler(deps(store))
+  const res = await callList(handler, bearerFor(address))
+  const text = contentTextOf(asRpc(res))
+
+  // BOTH arms, deliberately: an absence-only assertion passes against an
+  // empty payload, and a presence-only one passes on the un-fixed server.
+  assert.ok(text.includes(room.slug), `the text payload must carry the slug, got: ${text}`)
+  assert.ok(!text.includes(room.code), `the text payload must not carry the join code, got: ${text}`)
+})
+
+test("rendezvous_list carries the join code in the result's host-only _meta, so the panel can still fetch /r/:code/state", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const address: Address = { provider: "telegram", source: "telegram", contactRef: "+1" }
+  const room = await store.create()
+  await store.addMember(room.code, { displayName: "Alice", tier: "messenger", address })
+
+  const handler = createMcpPersonalHandler(deps(store))
+  const res = await callList(handler, bearerFor(address))
+
+  assert.deepEqual(
+    metaRoomCodes(res),
+    [{ slug: room.slug, code: room.code }],
+    "the panel's fetch target must survive the move out of the model-visible text",
+  )
+})
+
 // --- BRIEF-19: the roster panel, and the one write this surface gains. ----
 
 test("resources/read serves the roster panel with the resolved principal baked in, and no token anywhere in the bytes", async () => {
@@ -418,8 +475,9 @@ test("rendezvous_send into a room the principal is in produces the byte-identica
   const afterInbound = daemon.requestsReceived.filter((r) => r.path === promptPath)
   assert.equal(afterInbound.length, 1, "the inbound path must have fanned one prompt in")
 
-  // 2. The panel: Alice types the same words into the roster.
-  const res = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomCode: created.room.code, text: TEXT }))
+  // 2. The panel: Alice types the same words into the roster, addressing the
+  // room by its SLUG — the only identifier this tool takes (BRIEF-24).
+  const res = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomSlug: created.room.slug, text: TEXT }))
   assert.equal(res.error, undefined, `rendezvous_send must be accepted: ${res.error?.message ?? ""}`)
 
   const afterSend = daemon.requestsReceived.filter((r) => r.path === promptPath)
@@ -438,14 +496,16 @@ test("rendezvous_send into a room the principal is in produces the byte-identica
   assert.equal(body.prompt, "[Alice · whatsapp] what is the plan?", "attributed to Alice, in her own voice")
   assert.equal(body.queue, true)
 
-  // And the result says nothing about the content (the file-top HARD RULE).
-  const payload: { roomCode: string; memberId: string; outcome: string; accepted: boolean } = JSON.parse(contentTextOf(res))
-  assert.equal(payload.roomCode, created.room.code)
+  // And the result says nothing about the content (the file-top HARD RULE),
+  // and names the room by SLUG, never by its join code (BRIEF-24).
+  const payload: { roomSlug: string; memberId: string; outcome: string; accepted: boolean } = JSON.parse(contentTextOf(res))
+  assert.equal(payload.roomSlug, created.room.slug, "the result must address the room by slug")
   assert.equal(payload.accepted, true)
+  assert.ok(!JSON.stringify(res).includes(created.room.code), "the send result must never narrate the join code")
   assert.ok(!JSON.stringify(res).includes("what is the plan"), "the send result must never echo the text")
 })
 
-test("rendezvous_send into a room the principal is NOT in is refused, and the refusal is about membership, not authentication", async () => {
+test("rendezvous_send into a room the principal is NOT in is refused, identically whether or not that room exists", async () => {
   const { service, store, handler } = await buildSendHarness()
 
   const created = await service.handleInbound(inboundFromAlice("new"))
@@ -459,15 +519,56 @@ test("rendezvous_send into a room the principal is NOT in is refused, and the re
     address: { provider: "telegram", source: "telegram", contactRef: "+15550002222" },
   })
 
-  const res = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomCode: stranger.code, text: "hello?" }))
+  // A slug no room carries at all.
+  const missingSlug = "nowhere-at-all-here"
+
+  const existing = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomSlug: stranger.slug, text: "hello?" }))
+  const missing = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomSlug: missingSlug, text: "hello?" }))
+  const existingMessage = existing.error?.message ?? ""
+  const missingMessage = missing.error?.message ?? ""
+
+  assert.notEqual(existing.status, 401, "a good credential naming the wrong room is not an authentication failure")
+  assert.ok(existing.error !== undefined, "never a silent no-op")
+  assert.ok(/member/i.test(existingMessage), `the refusal must name membership, got: ${existingMessage}`)
+  assert.ok(
+    !/unauthori|authenticat|credential|token|forbidden|permission/i.test(existingMessage),
+    `the refusal must not read as an auth error, got: ${existingMessage}`,
+  )
+
+  // The no-information property: the two arms differ ONLY in the identifier
+  // the caller itself supplied, never in what they reveal about the room's
+  // existence. Both must name the slug the caller passed (which is how we
+  // know this is the membership refusal and not the generic argument error).
+  assert.ok(existingMessage.includes(stranger.slug), `the refusal must name the slug it refused, got: ${existingMessage}`)
+  assert.ok(missingMessage.includes(missingSlug), `the refusal must name the slug it refused, got: ${missingMessage}`)
+  assert.equal(existing.status, missing.status, "existence must not change the status")
+  assert.equal(existing.error?.code, missing.error?.code, "existence must not change the error code")
+  assert.equal(
+    existingMessage.split(stranger.slug).join("<slug>"),
+    missingMessage.split(missingSlug).join("<slug>"),
+    "a slug the principal is not in must answer identically whether or not the room exists",
+  )
+})
+
+test("rendezvous_send refuses a room CODE with its own message: a slug is expected, and that is not the membership refusal", async () => {
+  const { service, handler } = await buildSendHarness()
+
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+
+  const res = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomSlug: created.room.code, text: "hello" }))
   const message = res.error?.message ?? ""
 
-  assert.notEqual(res.status, 401, "a good credential naming the wrong room is not an authentication failure")
+  assert.notEqual(res.status, 401, "the token is good; the ARGUMENT is the wrong shape")
   assert.ok(res.error !== undefined, "never a silent no-op")
-  assert.ok(/member/i.test(message), `the refusal must name membership, got: ${message}`)
+  // Assert the MESSAGE, not merely that it was refused: the membership
+  // refusal also refuses, and the whole point is that these are different.
+  assert.ok(/slug/i.test(message), `the refusal must say a slug is expected, got: ${message}`)
+  assert.ok(/code/i.test(message), `the refusal must name the code shape it refused, got: ${message}`)
   assert.ok(
-    !/unauthori|authenticat|credential|token|forbidden|permission/i.test(message),
-    `the refusal must not read as an auth error, got: ${message}`,
+    !/not a member/i.test(message),
+    `a code-shaped argument is not a membership question, got: ${message}`,
   )
 })
 
@@ -478,7 +579,7 @@ test("a read-only principal token is refused by rendezvous_send, naming the reas
   assert.equal(created.kind, "created")
   if (created.kind !== "created") return
 
-  const res = asRpc(await callSend(handler, bearerFor(ALICE), { roomCode: created.room.code, text: "hello" }))
+  const res = asRpc(await callSend(handler, bearerFor(ALICE), { roomSlug: created.room.slug, text: "hello" }))
   const message = res.error?.message ?? ""
 
   assert.notEqual(res.status, 401, "the token is valid — it simply does not carry this capability")
@@ -503,16 +604,16 @@ test("a read-only principal token still works on rendezvous_list, and the send-c
 
   const read = listResult(await callList(handler, bearerFor(ALICE)))
   assert.deepEqual(
-    read.rooms.map((room) => room.code),
-    [created.room.code],
+    read.rooms.map((room) => room.slug),
+    [created.room.slug],
     "BRIEF-18's read-only token must keep doing exactly what it was minted for",
   )
 
   // And send is a SUPERSET, not a separate account: the same rooms come back.
   const write = listResult(await callList(handler, sendBearerFor(ALICE)))
   assert.deepEqual(
-    write.rooms.map((room) => room.code),
-    read.rooms.map((room) => room.code),
+    write.rooms.map((room) => room.slug),
+    read.rooms.map((room) => room.slug),
     "a send-capable token must see exactly what a read-only one sees",
   )
 })

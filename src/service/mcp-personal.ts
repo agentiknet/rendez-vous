@@ -32,13 +32,15 @@
  * on this server carries ids, counts and booleans — NEVER message text.
  * `rendezvous_list` has nothing else to leak; `rendezvous_send` is HANDED
  * text and must never echo a word of it back, not in a result and not in an
- * error — its own result is a room code, a member id and an outcome name.
+ * error — its own result is a room slug, a member id and an outcome name.
  */
 
 import { createHmac } from "node:crypto"
 import { env } from "../env.ts"
+import { normalizeCode } from "../rooms/code.ts"
 import type { AddressLookup, AddressMatch } from "../rooms/store.ts"
 import { deliverySeqOf, pullMemberStale, type Address, type Member, type Room, type Tier } from "../rooms/types.ts"
+import { normalizeSlug } from "../rooms/words.ts"
 import { bearerOf, tokensMatch } from "./mcp-room.ts"
 import { rosterPanelHtml } from "./roster-panel.html.ts"
 import type { McpResponse } from "./mcp-canvakit.ts"
@@ -171,17 +173,20 @@ const ROSTER_RESOURCE_URI = "ui://rendezvous/roster"
 const RENDEZVOUS_LIST_TOOL = {
   name: "rendezvous_list",
   description:
-    "List every room YOUR principal (fixed by your bearer credential — no argument) is currently a member of. Each entry: code, member_id and display_name (your identity in that room), tier, presence (your OWN presence there), presence_basis (\"acked\" if it is backed by a real acknowledgement, \"never-acked\" if it is only dated from when you joined — treat \"never-acked\" as NOT evidence of absence), member_count, unread (records addressed to you above your acked position), active (whether this is your one canonical room), and last_activity_at. `ambiguous: true` means this address holds a membership in more than one room at once — a broken invariant surfaced, not hidden or resolved to a guess; when it is true, no room in the list is `active`, because there is no honest way to pick one. Ids, counts and codes only — never message content.",
+    "List every room YOUR principal (fixed by your bearer credential — no argument) is currently a member of. Each entry: slug, member_id and display_name (your identity in that room), tier, presence (your OWN presence there), presence_basis (\"acked\" if it is backed by a real acknowledgement, \"never-acked\" if it is only dated from when you joined — treat \"never-acked\" as NOT evidence of absence), member_count, unread (records addressed to you above your acked position), active (whether this is your one canonical room), and last_activity_at. The slug is the room's NAME and is safe to say, print and screenshot; the room's join CODE is never in this payload. `ambiguous: true` means this address holds a membership in more than one room at once — a broken invariant surfaced, not hidden or resolved to a guess; when it is true, no room in the list is `active`, because there is no honest way to pick one. Ids, counts and slugs only — never message content.",
   inputSchema: { type: "object", properties: {} },
   _meta: { ui: { resourceUri: ROSTER_RESOURCE_URI } },
 } as const
 
-/** `rendezvous_send` (BRIEF-19). `roomCode` IS an argument here, unlike every
+/** `rendezvous_send` (BRIEF-19). `roomSlug` IS an argument here, unlike every
  *  other tool on the person-scoped surface: a principal can be in more than
  *  one room, so "which room" is a real question with no credential to answer
  *  it. It is not a capability the argument grants — the handler refuses any
- *  code the principal is not a member of, by name — it only picks among the
- *  rooms they are already in.
+ *  slug the principal is not a member of, by name — it only picks among the
+ *  rooms they are already in. BRIEF-24: the argument is the slug (the room's
+ *  NAME), never the code (the capability to join it): a code-shaped argument
+ *  is refused with its own message rather than used, so this tool cannot be
+ *  turned back into a way to exercise a leaked code. See `codeShapedRefusal`.
  *
  *  This is an INBOUND message, not an agent utterance: it is fanned in as
  *  that person, on the same path a WhatsApp message takes. Commands (`new`,
@@ -191,14 +196,14 @@ const RENDEZVOUS_LIST_TOOL = {
 const RENDEZVOUS_SEND_TOOL = {
   name: "rendezvous_send",
   description:
-    "Send a message AS YOU into one of the rooms you are already in — exactly as if you had typed it on your phone. It is attributed to you, not to the agent. `room_code` must name a room YOUR principal is a member of (see rendezvous_list); any other room is refused. Requires a send-capable credential; a read-only one is refused. Returns {room_code, member_id, outcome, accepted} — ids and an outcome name only, never the text back.",
+    "Send a message AS YOU into one of the rooms you are already in — exactly as if you had typed it on your phone. It is attributed to you, not to the agent. `roomSlug` must name a room YOUR principal is a member of (see rendezvous_list); any other room is refused, and a room CODE passed here is refused because a slug is expected. Requires a send-capable credential; a read-only one is refused. Returns {room_slug, member_id, outcome, accepted} — ids and an outcome name only, never the text back.",
   inputSchema: {
     type: "object",
     properties: {
-      roomCode: { type: "string", description: "A room code from rendezvous_list — one you are a member of." },
+      roomSlug: { type: "string", description: "A room slug from rendezvous_list — one you are a member of." },
       text: { type: "string", description: "The message, in your own voice." },
     },
-    required: ["roomCode", "text"],
+    required: ["roomSlug", "text"],
   },
 } as const
 
@@ -310,11 +315,9 @@ function rendezvousListResult(address: Address, lookup: AddressLookup, nowMs: nu
   const matches = matchesOf(lookup)
   const active = lookup.kind === "one"
   const rooms = matches.map(({ room, member }) => ({
-    code: room.code,
     // BRIEF-20: the slug is the room's NAME and is not secret — it is what a
-    // surface may display. `code` above is the capability to JOIN and travels
-    // in this payload only so the panel can fetch `/r/:code/state` and address
-    // a send; it must never be rendered. See `roomIdentityLabel`.
+    // surface may display and what `rendezvous_send` addresses. See
+    // `roomIdentityLabel`.
     slug: room.slug,
     memberId: member.id,
     displayName: member.displayName,
@@ -342,9 +345,19 @@ function rendezvousListResult(address: Address, lookup: AddressLookup, nowMs: nu
       },
     ],
     isError: false,
-    // Redundant with the `tools/list` definition's `_meta` — see
-    // `RENDEZVOUS_LIST_TOOL`'s doc comment for why both are written.
-    _meta: { ui: { resourceUri: ROSTER_RESOURCE_URI } },
+    _meta: {
+      // Redundant with the `tools/list` definition's `_meta` — see
+      // `RENDEZVOUS_LIST_TOOL`'s doc comment for why both are written.
+      ui: { resourceUri: ROSTER_RESOURCE_URI },
+      // BRIEF-24: the join code is the CAPABILITY, so it leaves the payload a
+      // model reads and a transcript keeps. The panel still needs it to fetch
+      // `/r/:code/state`, and the panel is the HOST's app, not the model — so
+      // it travels here, in `_meta`. This reduces the exposure; it does not
+      // eliminate it: a host that echoes `_meta` back into the model's context
+      // has re-created the leak, and that is a finding, not something to
+      // paper over here.
+      rooms: matches.map(({ room }) => ({ slug: room.slug, code: room.code })),
+    },
   }
 }
 
@@ -354,13 +367,29 @@ function rendezvousListResult(address: Address, lookup: AddressLookup, nowMs: nu
  *  named a room they are not in needs to be told about MEMBERSHIP, not sent
  *  down a "check your permissions" dead end — the same distinction
  *  `callRenderTool` draws in mcp-canvakit.ts. It names no room that was not
- *  already named by the caller, so it reveals nothing: a code the principal
+ *  already named by the caller, so it reveals nothing: a slug the principal
  *  is not in produces this answer whether or not the room exists. */
-function membershipRefusal(id: string | number | null, roomCode: string): McpResponse {
+function membershipRefusal(id: string | number | null, roomSlug: string): McpResponse {
   return fail(
     id,
     INVALID_PARAMS,
-    `rendezvous_send: you are not a member of ${roomCode}. This is a membership question — you can only send into rooms you have already joined, and rendezvous_list shows which those are.`,
+    `rendezvous_send: you are not a member of ${roomSlug}. This is a membership question — you can only send into rooms you have already joined, and rendezvous_list shows which those are.`,
+  )
+}
+
+/** A `rendezvous_send` refusal for a room CODE passed where a slug belongs
+ *  (BRIEF-24). Kept deliberately separate from `membershipRefusal`: "you
+ *  named a code in a tool that takes a slug" and "you are not a member of
+ *  that room" are two different situations, and collapsing them is the
+ *  defect family this whole series is about. It is also the whole point of
+ *  the change — accepting a code "for compatibility" would leave a leaked
+ *  code working as a send capability and make the swap cosmetic. The
+ *  message names the shape, never the value. */
+function codeShapedRefusal(id: string | number | null): McpResponse {
+  return fail(
+    id,
+    INVALID_PARAMS,
+    "rendezvous_send: arguments.roomSlug looks like a room code. This tool takes the room's SLUG — its name from rendezvous_list — not its join code.",
   )
 }
 
@@ -387,17 +416,18 @@ const UNROUTED_OUTCOMES: readonly string[] = [
   "undeliverable",
 ]
 
-/** The `rendezvous_send` result: a room code, a member id and the NAME of
+/** The `rendezvous_send` result: a room slug, a member id and the NAME of
  *  what the inbound path did. Never the text, never a fragment of it — the
  *  file-top HARD RULE applies with full force here, because this is the one
- *  tool on this server that is handed message content at all. */
-function sendResult(roomCode: string, memberId: string, outcome: PersonalInboundOutcome): Record<string, unknown> {
+ *  tool on this server that is handed message content at all. BRIEF-24: the
+ *  slug, never the code — the result must not narrate the join capability. */
+function sendResult(roomSlug: string, memberId: string, outcome: PersonalInboundOutcome): Record<string, unknown> {
   const accepted = !UNROUTED_OUTCOMES.includes(outcome.kind)
   return {
     content: [
       {
         type: "text",
-        text: JSON.stringify({ roomCode, memberId, outcome: outcome.kind, accepted }),
+        text: JSON.stringify({ roomSlug, memberId, outcome: outcome.kind, accepted }),
       },
     ],
     isError: !accepted,
@@ -408,7 +438,15 @@ function sendResult(roomCode: string, memberId: string, outcome: PersonalInbound
  *  `findByAddress` lookup `rendezvous_list` reports from — one scan, one
  *  truth — and the send itself is `deps.sendInbound`, which is
  *  `RoomService.handleInbound` verbatim. Nothing here reimplements routing,
- *  attribution, fan-out or the R6 suffix; that is the point. */
+ *  attribution, fan-out or the R6 suffix; that is the point.
+ *
+ *  BRIEF-24: the room is addressed by SLUG. The room's own `slug` is unique
+ *  and carried on every `Room` (`RoomStore`'s slug index enforces it), so the
+ *  match below compares normalized slugs rather than reaching for a second
+ *  lookup. A code-shaped argument never reaches the membership check at all —
+ *  see `codeShapedRefusal` — and a slug the principal is not in gets the
+ *  unchanged `membershipRefusal`, which is the same answer for an existing
+ *  room and a nonexistent one. */
 async function callSendTool(
   deps: McpPersonalDeps,
   principal: ResolvedPrincipal,
@@ -425,10 +463,16 @@ async function callSendTool(
   if (principal.capability !== "send") return readOnlyRefusal(id)
 
   const args = isRecord(params.arguments) ? params.arguments : {}
-  const roomCode = typeof args.roomCode === "string" ? args.roomCode.trim() : ""
+  const roomSlug = typeof args.roomSlug === "string" ? args.roomSlug.trim() : ""
   const text = typeof args.text === "string" ? args.text : ""
-  if (roomCode.length === 0) {
-    return fail(id, INVALID_PARAMS, "rendezvous_send: arguments.roomCode must be a room code you are a member of")
+  if (roomSlug.length === 0) {
+    return fail(id, INVALID_PARAMS, "rendezvous_send: arguments.roomSlug must be a room slug you are a member of")
+  }
+  if (normalizeCode(roomSlug) !== undefined) {
+    // A code-shaped argument is refused by SHAPE, before membership: it is a
+    // different mistake from "not a member", and accepting it would leave the
+    // capability this brief removes still working.
+    return codeShapedRefusal(id)
   }
   if (text.trim().length === 0) {
     // The error names the FIELD, never the value — an empty message has
@@ -437,9 +481,10 @@ async function callSendTool(
     return fail(id, INVALID_PARAMS, "rendezvous_send: arguments.text must be a non-empty message")
   }
 
+  const normalized = normalizeSlug(roomSlug)
   const matches = matchesOf(deps.findByAddress(principal.address))
-  const match = matches.find((candidate) => candidate.room.code === roomCode)
-  if (match === undefined) return membershipRefusal(id, roomCode)
+  const match = matches.find((candidate) => normalizeSlug(candidate.room.slug) === normalized)
+  if (match === undefined) return membershipRefusal(id, roomSlug)
 
   const outcome = await sendInbound({
     address: principal.address,
@@ -450,7 +495,7 @@ async function callSendTool(
     tier: match.member.tier,
     text,
   })
-  return ok(id, sendResult(match.room.code, match.member.id, outcome))
+  return ok(id, sendResult(match.room.slug, match.member.id, outcome))
 }
 
 /**

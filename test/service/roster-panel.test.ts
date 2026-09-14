@@ -7,6 +7,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import {
+  mergeRoomCodes,
   planRosterRows,
   presenceViewOf,
   renderRosterRow,
@@ -15,6 +16,7 @@ import {
   unreadLabelOf,
   type PanelDocument,
   type PanelElement,
+  type RosterListPayload,
   type RosterListRoom,
   type RosterRowView,
 } from "../../src/service/roster-panel.html.ts"
@@ -52,6 +54,7 @@ function flatten(el: FakeElement): FakeElement[] {
 function row(overrides: Partial<RosterRowView> = {}): RosterRowView {
   return {
     code: "RDV-AAAA",
+    slug: "harbor-lantern-ember",
     identity: "RDV-AAAA",
     presence: { kind: "present", label: "present" },
     memberCount: 3,
@@ -189,6 +192,35 @@ test("planRosterRows keeps the ambiguity flag and marks exactly the active room"
 
   const broken = planRosterRows({ ambiguous: true, rooms: [{ code: "RDV-AAAA", active: false }] })
   assert.equal(broken.ambiguous, true, "a broken invariant is carried through, never sorted away")
+})
+
+test("BRIEF-24: the panel gets each room's join code from the host-only _meta, merged by slug, never from the model-visible text", () => {
+  const payload: RosterListPayload = {
+    ambiguous: false,
+    rooms: [
+      { slug: "harbor-lantern-ember", presenceBasis: "acked", memberCount: 2 },
+      { slug: "copper-meadow-signal", presenceBasis: "acked", memberCount: 1 },
+    ],
+  }
+  const merged = mergeRoomCodes(payload, {
+    rooms: [
+      { slug: "harbor-lantern-ember", code: "RDV-AAAA" },
+      { slug: "copper-meadow-signal", code: "RDV-BBBB" },
+    ],
+  })
+  assert.deepEqual(merged.rooms?.map((room) => room.code), ["RDV-AAAA", "RDV-BBBB"])
+  assert.deepEqual(
+    merged.rooms?.map((room) => room.slug),
+    ["harbor-lantern-ember", "copper-meadow-signal"],
+    "the merge must neither reorder nor drop rows",
+  )
+
+  const noMeta = mergeRoomCodes(payload, undefined)
+  assert.deepEqual(
+    noMeta.rooms?.map((room) => room.code),
+    [undefined, undefined],
+    "a host that forwards no _meta leaves rows code-less — an honest degrade, never an invented code",
+  )
 })
 
 test("the panel says the ambiguity out loud, in words, at the top", () => {

@@ -108,6 +108,13 @@ function principalTokenCommand(provider: string | undefined, contactRef: string 
     process.exit(1)
   }
   const canSend = flags.includes("--can-send")
+  // BRIEF-24: printed for EVERY principal token, read-only included. A token
+  // that cannot send still enumerates every room this address is in, and the
+  // join code of each is still a capability — it is now delivered to the HOST
+  // side of the MCP session (the tool result's `_meta`), not to the model's
+  // text payload, but the quiet path is the one that needs a word. No token
+  // and no room code is ever printed here.
+  console.error("Note: this token lists every room this address is in; the host — not the model — receives those rooms' join codes.")
   if (canSend) {
     console.error("WARNING: this token can SEND AS this person, in every room they are in.")
     console.error("WARNING: it cannot be revoked — a principal token is a pure function of (address, secret),")
