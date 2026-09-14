@@ -37,6 +37,7 @@
 
 import { createHmac } from "node:crypto"
 import { env } from "../env.ts"
+import { joinLinks, type JoinLinks } from "../links/index.ts"
 import { normalizeCode } from "../rooms/code.ts"
 import type { AddressLookup, AddressMatch } from "../rooms/store.ts"
 import { deliverySeqOf, pullMemberStale, type Address, type Member, type Room, type Tier } from "../rooms/types.ts"
@@ -269,6 +270,30 @@ const RENDEZVOUS_ACK_TOOL = {
       seq: { type: "number", description: "The highest delivery seq you have actually rendered." },
     },
     required: ["roomSlug", "seq"],
+  },
+} as const
+
+/** `rendezvous_invite` (BRIEF-13 step 2). Read-capable (`principal:`) is
+ *  enough — an invite hands out a way IN, it does not speak as the person, so
+ *  it needs no more than `rendezvous_list` needs.
+ *
+ *  ⚠️ THE SAME TRAP `a5b211b` closed for `rendezvous_list`, closed again here:
+ *  every join link CONTAINS the room's join code, so none of them may reach
+ *  `content[0].text` — that would hand the model (and the transcript that
+ *  keeps its output) the capability to join, not merely a fact that an invite
+ *  exists. The text names the room by SLUG and nothing else; the links ride
+ *  in `_meta.invite`, which only the HOST's panel reads (see
+ *  `RENDEZVOUS_LIST_TOOL`'s `_meta.rooms` for the precedent this follows). */
+const RENDEZVOUS_INVITE_TOOL = {
+  name: "rendezvous_invite",
+  description:
+    "Get the links that bring someone else into a room YOUR principal is already a member of, addressed by `roomSlug`. The links themselves are never returned in this result's text — they all contain the room's join code, which this server never puts in front of a model. They ride in the result's `_meta.invite` instead, for the HOST's app to build a share control from. `roomSlug` must name a room you are a member of; any other room is refused.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      roomSlug: { type: "string", description: "A room slug from rendezvous_list — one you are a member of." },
+    },
+    required: ["roomSlug"],
   },
 } as const
 
@@ -575,6 +600,64 @@ function matchPrincipalRoom(
   return matches.find((candidate) => normalizeSlug(candidate.room.slug) === normalizedSlug)
 }
 
+/** The `rendezvous_invite` result. `content[0].text` names only the room, by
+ *  SLUG — never a link, never the code (see `RENDEZVOUS_INVITE_TOOL`'s
+ *  warning). `_meta.invite` carries every link `joinLinks` built for THIS
+ *  room's code; a channel `joinLinks` left `undefined` (no number/bot
+ *  configured) is OMITTED here entirely, never written as an empty string —
+ *  the panel must be able to tell "not configured" from "configured, empty"
+ *  without inspecting the string. */
+function inviteResult(roomSlug: string, links: JoinLinks): Record<string, unknown> {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify({ roomSlug }),
+      },
+    ],
+    isError: false,
+    _meta: {
+      invite: {
+        slug: roomSlug,
+        web: links.web,
+        ...(links.whatsapp !== undefined ? { whatsapp: links.whatsapp } : {}),
+        ...(links.telegram !== undefined ? { telegram: links.telegram } : {}),
+        ...(links.sms !== undefined ? { sms: links.sms } : {}),
+      },
+    },
+  }
+}
+
+/** `rendezvous_invite`'s whole body. Membership is resolved through the same
+ *  `matchPrincipalRoom` send/drain/ack already share — one truth about
+ *  "which room does this slug name for this principal" — and the refusal for
+ *  a slug the principal is not in is `membershipRefusal`, VERBATIM: the drain
+ *  tool below already reuses it byte-for-byte, and there must never be a
+ *  second wording of the same refusal. */
+function callInviteTool(
+  deps: McpPersonalDeps,
+  principal: ResolvedPrincipal,
+  params: Record<string, unknown>,
+  id: string | number | null,
+): McpResponse {
+  const args = isRecord(params.arguments) ? params.arguments : {}
+  const roomSlug = typeof args.roomSlug === "string" ? args.roomSlug.trim() : ""
+  if (roomSlug.length === 0) {
+    return fail(id, INVALID_PARAMS, "rendezvous_invite: arguments.roomSlug must be a room slug you are a member of")
+  }
+
+  const match = matchPrincipalRoom(deps, principal, normalizeSlug(roomSlug))
+  if (match === undefined) return membershipRefusal(id, roomSlug)
+
+  const links = joinLinks(match.room.code, {
+    publicUrl: env.publicUrl,
+    whatsappNumber: env.whatsappNumber,
+    telegramBot: env.telegramBot,
+    smsNumber: env.smsNumber,
+  })
+  return ok(id, inviteResult(match.room.slug, links))
+}
+
 /** `rendezvous_drain`'s whole body. Resolves membership exactly as send does,
  *  materialises the principal's stable `room-web` member (lazily — this is
  *  the ONLY creator), then returns that member's own outbox through the one
@@ -697,6 +780,7 @@ export function createMcpPersonalHandler(
       // names why for the one it cannot.
       const tools = [
         RENDEZVOUS_LIST_TOOL,
+        RENDEZVOUS_INVITE_TOOL,
         ...(deps.sendInbound !== undefined ? [RENDEZVOUS_SEND_TOOL] : []),
         ...(deps.roomRead !== undefined ? [RENDEZVOUS_DRAIN_TOOL, RENDEZVOUS_ACK_TOOL] : []),
       ]
@@ -777,6 +861,10 @@ export function createMcpPersonalHandler(
         // doing exactly what BRIEF-18 minted it for.
         const lookup = deps.findByAddress(principal.address)
         return ok(id, rendezvousListResult(principal.address, lookup, Date.now()))
+      }
+
+      if (params.name === RENDEZVOUS_INVITE_TOOL.name) {
+        return callInviteTool(deps, principal, params, id)
       }
 
       if (params.name === RENDEZVOUS_SEND_TOOL.name) {

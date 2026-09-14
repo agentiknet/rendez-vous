@@ -703,9 +703,11 @@ test("rendezvous_drain/rendezvous_ack are advertised only when the mount can per
   const room = await store.create()
   await store.addMember(room.code, { displayName: "Alice", tier: "messenger", address: ALICE })
 
-  // The BRIEF-18 surface with no listener wired: neither tool exists.
+  // The BRIEF-18 surface with no listener wired: neither drain/ack tool
+  // exists, but rendezvous_invite (BRIEF-13 step 2) needs no listener — it
+  // is advertised alongside rendezvous_list on read alone.
   const plain = createMcpPersonalHandler(deps(store))
-  assert.deepEqual(toolNames(await callToolsList(plain, bearerFor(ALICE))), ["rendezvous_list"])
+  assert.deepEqual(toolNames(await callToolsList(plain, bearerFor(ALICE))), ["rendezvous_list", "rendezvous_invite"])
 
   const { handler } = await buildSendHarness()
   const names = toolNames(await callToolsList(handler, bearerFor(ALICE)))
@@ -821,4 +823,109 @@ test("an ack on the read capability moves ackedSeq and refreshes ackedAt", async
   const backwards = ackPayload(await callAck(handler, bearerFor(ALICE), { roomSlug: created.room.slug, seq: 0 }))
   assert.equal(backwards.applied, false)
   assert.equal(backwards.ackedSeq, 1, "the effective cursor does not rewind")
+})
+
+// --- BRIEF-13 step 2: rendezvous_invite. -------------------------------
+
+function callInvite(
+  handler: ReturnType<typeof createMcpPersonalHandler>,
+  authorization: string | undefined,
+  args: { roomSlug: string },
+): Promise<McpResponse> {
+  return handler(
+    { jsonrpc: "2.0", id: 14, method: "tools/call", params: { name: "rendezvous_invite", arguments: args } },
+    authorization,
+  )
+}
+
+/** `_meta.invite`, read guard by guard — no cast, so a missing or malformed
+ *  `_meta` fails the assertion rather than throwing. */
+function inviteMetaOf(res: McpResponse): Record<string, unknown> | undefined {
+  const rpc = asRpc(res)
+  const meta = rpc.result?._meta
+  if (!isRecord(meta)) return undefined
+  const invite = meta.invite
+  return isRecord(invite) ? invite : undefined
+}
+
+test("rendezvous_invite is advertised with no other capability wired — it needs only read", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  await store.addMember((await store.create()).code, { displayName: "Alice", tier: "messenger", address: ALICE })
+  const handler = createMcpPersonalHandler(deps(store))
+  assert.ok(toolNames(await callToolsList(handler, bearerFor(ALICE))).includes("rendezvous_invite"))
+})
+
+test("rendezvous_invite's content text names only the room's slug — never the join code, never a link", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  await store.addMember(room.code, { displayName: "Alice", tier: "messenger", address: ALICE })
+  const handler = createMcpPersonalHandler(deps(store))
+
+  const res = await callInvite(handler, bearerFor(ALICE), { roomSlug: room.slug })
+  const text = contentTextOf(asRpc(res))
+  assert.ok(text.includes(room.slug), `content text may still name the room by its slug, got: ${text}`)
+  assert.ok(!text.includes(room.code), `content text must never carry the join code, got: ${text}`)
+  assert.ok(!text.toLowerCase().includes("http"), `content text must never carry a link, got: ${text}`)
+})
+
+test("rendezvous_invite's _meta.invite carries the join links, keyed by the room's own code", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  await store.addMember(room.code, { displayName: "Alice", tier: "messenger", address: ALICE })
+  const handler = createMcpPersonalHandler(deps(store))
+
+  const res = await callInvite(handler, bearerFor(ALICE), { roomSlug: room.slug })
+  const invite = inviteMetaOf(res)
+  assert.ok(invite !== undefined, "the invite links must ride in _meta.invite")
+  assert.equal(invite?.slug, room.slug)
+  assert.ok(
+    typeof invite?.web === "string" && invite.web.includes(room.code),
+    `web link must carry the join code, got: ${String(invite?.web)}`,
+  )
+})
+
+test("an unconfigured invite channel is OMITTED from _meta.invite, never sent as an empty string", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  await store.addMember(room.code, { displayName: "Alice", tier: "messenger", address: ALICE })
+  const handler = createMcpPersonalHandler(deps(store))
+
+  assert.equal(env.whatsappNumber, undefined, "this test assumes no whatsapp number is configured in this env")
+  assert.equal(env.telegramBot, undefined, "this test assumes no telegram bot is configured in this env")
+  assert.equal(env.smsNumber, undefined, "this test assumes no sms number is configured in this env")
+
+  const res = await callInvite(handler, bearerFor(ALICE), { roomSlug: room.slug })
+  const invite = inviteMetaOf(res)
+  assert.ok(invite !== undefined)
+  assert.ok(!("whatsapp" in (invite ?? {})), "an unconfigured whatsapp channel must be absent, not an empty string")
+  assert.ok(!("telegram" in (invite ?? {})), "an unconfigured telegram channel must be absent, not an empty string")
+  assert.ok(!("sms" in (invite ?? {})), "an unconfigured sms channel must be absent, not an empty string")
+})
+
+test("rendezvous_invite for a room the principal is not a member of gets the SAME refusal rendezvous_send gives", async () => {
+  const { service, store, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+
+  const stranger = await store.create()
+  await store.addMember(stranger.code, {
+    displayName: "Bob",
+    tier: "messenger",
+    address: { provider: "telegram", source: "telegram", contactRef: "+15550002222" },
+  })
+
+  const invite = asRpc(await callInvite(handler, bearerFor(ALICE), { roomSlug: stranger.slug }))
+  const send = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomSlug: stranger.slug, text: "hello?" }))
+
+  assert.notEqual(invite.status, 401, "a good credential naming the wrong room is not an authentication failure")
+  assert.ok(invite.error !== undefined, "never a silent no-op")
+  assert.equal(
+    invite.error?.message,
+    send.error?.message,
+    "one wording, shared — never a second version of the same refusal",
+  )
 })

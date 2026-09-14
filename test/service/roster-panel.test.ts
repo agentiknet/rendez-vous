@@ -17,6 +17,7 @@ import {
   bannerVisibilityClass,
   diffRosterRows,
   highestRenderedSeq,
+  inviteWebLink,
   isHostResponse,
   isStandaloneBridge,
   lostContactVisible,
@@ -161,16 +162,28 @@ test("the room identity is rendered as plain text and never as a link, a data at
   assert.ok(!nodes.some((node) => node.tag === "a"), "no anchor may be rendered for the identity")
 })
 
-test("the shipped panel has no join affordance: no clipboard, no QR, and the only anchors are the artifact links beside the frame", () => {
+test("the shipped panel still has no QR, and its one clipboard write copies the invite link — not the room identity", () => {
   const html = rosterPanelHtml({ provider: "whatsapp", contactRef: "+1", displayName: "Alice" }, "https://example.test")
-  assert.ok(!/clipboard/i.test(html), "a copy button is the affordance amendment 1 forbids")
-  assert.ok(!/\bqr\b/i.test(html), "a QR of a room code is a join capability in image form")
+  // BRIEF-13 step 2 deliberately defers the QR: the panel's CSP declares only
+  // connectDomains/resourceDomains/frameDomains, so an undeclared directive a
+  // `data:` QR would need resolves to 'none' on a spec-compliant host — that
+  // risk is not worth taking for the one feature whose job is bringing people
+  // in. Links only; this stays true after step 2.
+  assert.ok(!/\bqr\b/i.test(html), "a QR of a room code is a join capability in image form — deferred, not built")
 
-  // BRIEF-13 step 1 introduced exactly one anchor: the link BESIDE the
-  // artifact frame, built from the state payload's member-facing URL — the
-  // URL `memberFacingArtifactUrl` already governs, not a room code and not a
-  // join. Pin the anchor count, and pin the embedded renderer to building its
-  // hrefs from the view (never from `row.code`, which is the capability).
+  // The clipboard write IS new, and IS legitimate: BRIEF-13 step 2 copies the
+  // invite LINK the host returned in `_meta.invite`, never `row.code` (the
+  // room identity amendment 1 still forbids turning into an affordance —
+  // see the identity test above, unaffected by this).
+  assert.ok(/clipboard/i.test(html), "BRIEF-13 step 2's invite control writes to the clipboard")
+  assert.ok(html.includes("inviteWebLink"), "the copied link must come from the one accessor, not be re-derived")
+
+  // BRIEF-13 step 1 introduced exactly one PAIR of anchors: the link BESIDE
+  // the artifact frame, built from the state payload's member-facing URL —
+  // the URL `memberFacingArtifactUrl` already governs, not a room code and
+  // not a join. The invite control is a BUTTON, not a link, so it must not
+  // grow this count. Pin the anchor count, and pin the embedded renderer to
+  // building its hrefs from the view (never from `row.code`, the capability).
   assert.deepEqual(
     html.match(/createElement\("a"\)/g),
     ['createElement("a")', 'createElement("a")'],
@@ -264,6 +277,17 @@ test("BRIEF-24: the panel gets each room's join code from the host-only _meta, m
     [undefined, undefined],
     "a host that forwards no _meta leaves rows code-less — an honest degrade, never an invented code",
   )
+})
+
+test("inviteWebLink reads _meta.invite.web only — never content, never a guess for a missing/malformed _meta", () => {
+  assert.equal(
+    inviteWebLink({ content: [{ text: "{}" }], _meta: { invite: { slug: "harbor-lantern-ember", web: "https://example.test/r/RDV-AAAA" } } }),
+    "https://example.test/r/RDV-AAAA",
+  )
+  assert.equal(inviteWebLink({ content: [{ text: "{}" }] }), undefined, "no _meta at all degrades to no link, not a crash")
+  assert.equal(inviteWebLink({ _meta: { invite: {} } }), undefined, "an invite object with no web field is still no link")
+  assert.equal(inviteWebLink(null), undefined)
+  assert.equal(inviteWebLink(undefined), undefined)
 })
 
 test("the panel says the ambiguity out loud, in words, at the top", () => {

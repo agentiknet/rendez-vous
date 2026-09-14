@@ -419,14 +419,42 @@ export interface ToolContentBlock {
   readonly text?: string
 }
 
+/** BRIEF-13 step 2: the invite links `rendezvous_invite` builds for one room,
+ *  as they arrive in the tool result's `_meta.invite` — never in
+ *  `content[0].text`, because every one of them contains the room's join
+ *  code (see `RENDEZVOUS_INVITE_TOOL`'s warning, mcp-personal.ts). Every
+ *  channel field is optional: `joinLinks` OMITS a channel it has no
+ *  number/bot configured for, and this panel must render that as "no such
+ *  control", never as an empty link. */
+export interface InviteResult {
+  readonly slug?: string
+  readonly web?: string
+  readonly whatsapp?: string
+  readonly telegram?: string
+  readonly sms?: string
+}
+
 /** The slice of a `CallToolResult` the panel unwraps: the first text block is
  *  the tools' JSON, and `_meta` is the host-only channel that carries each
- *  room's join code (BRIEF-24). The whole envelope — including `_meta` — is
- *  what the standalone REST bridge resolves with, verbatim. */
+ *  room's join code (BRIEF-24) and, since BRIEF-13 step 2, each room's invite
+ *  links. The whole envelope — including `_meta` — is what the standalone
+ *  REST bridge resolves with, verbatim. */
 export interface ToolCallResult {
   readonly isError?: boolean
   readonly content?: readonly ToolContentBlock[]
-  readonly _meta?: { readonly rooms?: readonly RosterListRoom[] }
+  readonly _meta?: { readonly rooms?: readonly RosterListRoom[]; readonly invite?: InviteResult }
+}
+
+/** The one link the row's invite control copies: `_meta.invite.web`,
+ *  straight through, never re-derived from anything in `content[0].text`
+ *  (which never carries it — see `RENDEZVOUS_INVITE_TOOL`'s warning). A
+ *  malformed or missing `_meta.invite` degrades to "no link to copy", never
+ *  to a guessed one. */
+export const inviteWebLink = (result: ToolCallResult | null | undefined): string | undefined => {
+  if (result === null || result === undefined || typeof result !== "object") return undefined
+  const invite = result._meta === null || result._meta === undefined ? undefined : result._meta.invite
+  if (invite === null || invite === undefined || typeof invite !== "object") return undefined
+  return typeof invite.web === "string" ? invite.web : undefined
 }
 
 /** FIX 2 — the object the standalone REST bridge resolves
@@ -785,6 +813,7 @@ function script(principalLabel: string, publicUrl: string): string {
     const lostContactVisible = ${lostContactVisible.toString()};
     const isHostResponse = ${isHostResponse.toString()};
     const toolPayload = ${toolPayload.toString()};
+    const inviteWebLink = ${inviteWebLink.toString()};
     const isStandaloneBridge = ${isStandaloneBridge.toString()};
     const standaloneCallTool = ${standaloneCallTool.toString()};
     const appendRosterRowHead = ${appendRosterRowHead.toString()};
@@ -944,6 +973,34 @@ function script(principalLabel: string, publicUrl: string): string {
       }
     }
 
+    // BRIEF-13 step 2: copy one invite link to the clipboard. The async
+    // Clipboard API is preferred; a host that denies it (or a browser that
+    // never shipped it) falls back to the classic hidden-textarea +
+    // execCommand("copy") trick, which needs no permission prompt.
+    function copyInviteLink(text) {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        return navigator.clipboard.writeText(text);
+      }
+      return new Promise(function (resolve, reject) {
+        var area = document.createElement("textarea");
+        area.value = text;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.focus();
+        area.select();
+        try {
+          var copied = document.execCommand("copy");
+          document.body.removeChild(area);
+          if (copied) resolve();
+          else reject(new Error("copy command failed"));
+        } catch (e) {
+          document.body.removeChild(area);
+          reject(e);
+        }
+      });
+    }
+
     function addActions(el, row) {
       const actions = document.createElement("div");
       actions.className = "room-actions";
@@ -1037,6 +1094,37 @@ function script(principalLabel: string, publicUrl: string): string {
         if (event.key === "Enter") doSend();
       });
       actions.appendChild(send);
+
+      // BRIEF-13 step 2: one invite control per row. The link never touches
+      // this script's own text — it arrives in the tool result's _meta,
+      // copied straight to the clipboard; the room's join code never sits in
+      // this row's DOM (amendment 1's rule, extended to invites).
+      const invite = document.createElement("button");
+      invite.type = "button";
+      invite.textContent = "invite";
+      invite.addEventListener("click", async function () {
+        invite.disabled = true;
+        note.className = "send-note";
+        note.textContent = "getting invite link…";
+        try {
+          const result = await app.callTool({
+            name: "rendezvous_invite",
+            arguments: { roomSlug: row.slug },
+          });
+          if (result && result.isError === true) throw new Error("could not get an invite link");
+          const link = inviteWebLink(result);
+          if (link === undefined) throw new Error("no invite link available");
+          await copyInviteLink(link);
+          note.className = "send-note good";
+          note.textContent = "invite link copied";
+        } catch (e) {
+          note.className = "send-note bad";
+          note.textContent = e && e.message ? e.message : "could not get an invite link";
+        } finally {
+          invite.disabled = false;
+        }
+      });
+      actions.appendChild(invite);
 
       el.appendChild(actions);
       el.appendChild(note);
