@@ -204,6 +204,20 @@ function asRpc(res: McpResponse): { readonly status: number; readonly result?: R
   return { status: res.status, error: res.body.error }
 }
 
+/** `membershipRefusal`/`codeShapedRefusal` carry the calling tool's OWN name
+ *  as a `"<toolName>: <body>"` prefix — the REASON (the body) is one shared
+ *  wording across every `roomSlug`-taking tool, but the prefix must name the
+ *  tool the caller actually called. Split on the first `": "` so a test can
+ *  assert both facts separately, rather than either a same-string equality
+ *  (which the prefix now breaks) or a substring match (which could pass on
+ *  one shared word instead of the whole reason). */
+function refusalPrefixAndBody(message: string | undefined): { readonly prefix: string; readonly body: string } {
+  const text = message ?? ""
+  const separatorIndex = text.indexOf(": ")
+  if (separatorIndex === -1) return { prefix: "", body: text }
+  return { prefix: text.slice(0, separatorIndex), body: text.slice(separatorIndex + 2) }
+}
+
 interface ListPayload {
   principal: { provider: string; contactRef: string; displayName: string }
   rooms: {
@@ -715,7 +729,7 @@ test("rendezvous_drain/rendezvous_ack are advertised only when the mount can per
   assert.ok(names.includes("rendezvous_send"), "the send tool remains advertised alongside them")
 })
 
-test("a drain for a principal with no membership in that room refuses with the SAME message rendezvous_send gives", async () => {
+test("a drain for a principal with no membership in that room refuses with the SAME reason rendezvous_send gives, prefixed with its OWN tool name", async () => {
   const { service, store, handler } = await buildSendHarness()
   const created = await service.handleInbound(inboundFromAlice("new"))
   assert.equal(created.kind, "created")
@@ -733,10 +747,15 @@ test("a drain for a principal with no membership in that room refuses with the S
   assert.notEqual(drain.status, 401, "a good credential naming the wrong room is not an authentication failure")
   assert.ok(drain.error !== undefined, "never a silent no-op")
   assert.ok(/member/i.test(drain.error?.message ?? ""), "the refusal must name membership")
+
+  const drainParts = refusalPrefixAndBody(drain.error?.message)
+  const sendParts = refusalPrefixAndBody(send.error?.message)
+  assert.equal(drainParts.prefix, "rendezvous_drain", "the refusal must name the tool actually called, not rendezvous_send")
+  assert.equal(sendParts.prefix, "rendezvous_send")
   assert.equal(
-    drain.error?.message,
-    send.error?.message,
-    "one wording, shared — never a second version of the same refusal",
+    drainParts.body,
+    sendParts.body,
+    "the REASON is one shared wording, even though the prefix now differs per tool",
   )
 })
 
@@ -931,7 +950,7 @@ test("an unconfigured invite channel is OMITTED from _meta.invite, never sent as
   assert.ok(!("sms" in (invite ?? {})), "an unconfigured sms channel must be absent, not an empty string")
 })
 
-test("rendezvous_invite for a room the principal is not a member of gets the SAME refusal rendezvous_send gives", async () => {
+test("rendezvous_invite for a room the principal is not a member of gets the SAME reason rendezvous_send gives, prefixed with its OWN tool name", async () => {
   const { service, store, handler } = await buildSendHarness()
   const created = await service.handleInbound(inboundFromAlice("new"))
   assert.equal(created.kind, "created")
@@ -948,10 +967,15 @@ test("rendezvous_invite for a room the principal is not a member of gets the SAM
 
   assert.notEqual(invite.status, 401, "a good credential naming the wrong room is not an authentication failure")
   assert.ok(invite.error !== undefined, "never a silent no-op")
+
+  const inviteParts = refusalPrefixAndBody(invite.error?.message)
+  const sendParts = refusalPrefixAndBody(send.error?.message)
+  assert.equal(inviteParts.prefix, "rendezvous_invite", "the refusal must name the tool actually called, not rendezvous_send")
+  assert.equal(sendParts.prefix, "rendezvous_send")
   assert.equal(
-    invite.error?.message,
-    send.error?.message,
-    "one wording, shared — never a second version of the same refusal",
+    inviteParts.body,
+    sendParts.body,
+    "the REASON is one shared wording, even though the prefix now differs per tool",
   )
 })
 
@@ -959,7 +983,7 @@ test("rendezvous_invite for a room the principal is not a member of gets the SAM
 // payload IS the join capability, so it must not rely on the accident that a
 // code never matches a slug — and neither should drain/ack. --------------
 
-test("rendezvous_invite refuses a room CODE with the SAME code-shaped message rendezvous_send gives, never the membership one", async () => {
+test("rendezvous_invite refuses a room CODE with the SAME code-shaped reason rendezvous_send gives, correctly prefixed, never the membership one", async () => {
   const { service, handler } = await buildSendHarness()
   const created = await service.handleInbound(inboundFromAlice("new"))
   assert.equal(created.kind, "created")
@@ -970,11 +994,16 @@ test("rendezvous_invite refuses a room CODE with the SAME code-shaped message re
 
   assert.notEqual(invite.status, 401, "the token is good; the ARGUMENT is the wrong shape")
   assert.ok(invite.error !== undefined, "never a silent no-op")
-  assert.equal(invite.error?.message, send.error?.message, "one wording, shared — never a second version")
+
+  const inviteParts = refusalPrefixAndBody(invite.error?.message)
+  const sendParts = refusalPrefixAndBody(send.error?.message)
+  assert.equal(inviteParts.prefix, "rendezvous_invite", "the refusal must name the tool actually called, not rendezvous_send")
+  assert.equal(sendParts.prefix, "rendezvous_send")
+  assert.equal(inviteParts.body, sendParts.body, "the REASON is one shared wording across tools")
   assert.ok(!/not a member/i.test(invite.error?.message ?? ""), "a code-shaped argument is not a membership question")
 })
 
-test("rendezvous_drain refuses a room CODE with the SAME code-shaped message rendezvous_send gives, never the membership one", async () => {
+test("rendezvous_drain refuses a room CODE with the SAME code-shaped reason rendezvous_send gives, correctly prefixed, never the membership one", async () => {
   const { service, handler } = await buildSendHarness()
   const created = await service.handleInbound(inboundFromAlice("new"))
   assert.equal(created.kind, "created")
@@ -985,11 +1014,16 @@ test("rendezvous_drain refuses a room CODE with the SAME code-shaped message ren
 
   assert.notEqual(drain.status, 401, "the token is good; the ARGUMENT is the wrong shape")
   assert.ok(drain.error !== undefined, "never a silent no-op")
-  assert.equal(drain.error?.message, send.error?.message, "one wording, shared — never a second version")
+
+  const drainParts = refusalPrefixAndBody(drain.error?.message)
+  const sendParts = refusalPrefixAndBody(send.error?.message)
+  assert.equal(drainParts.prefix, "rendezvous_drain", "the refusal must name the tool actually called, not rendezvous_send")
+  assert.equal(sendParts.prefix, "rendezvous_send")
+  assert.equal(drainParts.body, sendParts.body, "the REASON is one shared wording across tools")
   assert.ok(!/not a member/i.test(drain.error?.message ?? ""), "a code-shaped argument is not a membership question")
 })
 
-test("rendezvous_ack refuses a room CODE with the SAME code-shaped message rendezvous_send gives, never the membership one", async () => {
+test("rendezvous_ack refuses a room CODE with the SAME code-shaped reason rendezvous_send gives, correctly prefixed, never the membership one", async () => {
   const { service, handler } = await buildSendHarness()
   const created = await service.handleInbound(inboundFromAlice("new"))
   assert.equal(created.kind, "created")
@@ -1000,6 +1034,11 @@ test("rendezvous_ack refuses a room CODE with the SAME code-shaped message rende
 
   assert.notEqual(ack.status, 401, "the token is good; the ARGUMENT is the wrong shape")
   assert.ok(ack.error !== undefined, "never a silent no-op")
-  assert.equal(ack.error?.message, send.error?.message, "one wording, shared — never a second version")
+
+  const ackParts = refusalPrefixAndBody(ack.error?.message)
+  const sendParts = refusalPrefixAndBody(send.error?.message)
+  assert.equal(ackParts.prefix, "rendezvous_ack", "the refusal must name the tool actually called, not rendezvous_send")
+  assert.equal(sendParts.prefix, "rendezvous_send")
+  assert.equal(ackParts.body, sendParts.body, "the REASON is one shared wording across tools")
   assert.ok(!/not a member/i.test(ack.error?.message ?? ""), "a code-shaped argument is not a membership question")
 })

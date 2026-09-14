@@ -451,35 +451,45 @@ function rendezvousListResult(address: Address, lookup: AddressLookup, nowMs: nu
   }
 }
 
-/** A `rendezvous_send` refusal that is NOT a credential problem. It is
- *  returned as a tool-level JSON-RPC error (200 + `error`), deliberately not
- *  the 401 `unauthorized` above: a caller with a perfectly good token who
- *  named a room they are not in needs to be told about MEMBERSHIP, not sent
- *  down a "check your permissions" dead end — the same distinction
- *  `callRenderTool` draws in mcp-canvakit.ts. It names no room that was not
- *  already named by the caller, so it reveals nothing: a slug the principal
- *  is not in produces this answer whether or not the room exists. */
-function membershipRefusal(id: string | number | null, roomSlug: string): McpResponse {
+/** A refusal that is NOT a credential problem, shared by every tool on this
+ *  mount that takes a `roomSlug` (`rendezvous_send`, `rendezvous_invite`,
+ *  `rendezvous_drain`, `rendezvous_ack`). It is returned as a tool-level
+ *  JSON-RPC error (200 + `error`), deliberately not the 401 `unauthorized`
+ *  above: a caller with a perfectly good token who named a room they are not
+ *  in needs to be told about MEMBERSHIP, not sent down a "check your
+ *  permissions" dead end — the same distinction `callRenderTool` draws in
+ *  mcp-canvakit.ts. It names no room that was not already named by the
+ *  caller, so it reveals nothing: a slug the principal is not in produces
+ *  this answer whether or not the room exists.
+ *
+ *  `toolName` is the ONE thing that may vary: the body — the reason, the
+ *  shape of the situation — is shared verbatim across every caller, so a
+ *  person who called `rendezvous_invite` is told THAT, never told they
+ *  called `rendezvous_send`. Parameterising the prefix is not a second
+ *  wording of the refusal; the wording is still written once, here. */
+function membershipRefusal(id: string | number | null, toolName: string, roomSlug: string): McpResponse {
   return fail(
     id,
     INVALID_PARAMS,
-    `rendezvous_send: you are not a member of ${roomSlug}. This is a membership question — you can only send into rooms you have already joined, and rendezvous_list shows which those are.`,
+    `${toolName}: you are not a member of ${roomSlug}. This is a membership question — you can only send into rooms you have already joined, and rendezvous_list shows which those are.`,
   )
 }
 
-/** A `rendezvous_send` refusal for a room CODE passed where a slug belongs
- *  (BRIEF-24). Kept deliberately separate from `membershipRefusal`: "you
- *  named a code in a tool that takes a slug" and "you are not a member of
- *  that room" are two different situations, and collapsing them is the
- *  defect family this whole series is about. It is also the whole point of
- *  the change — accepting a code "for compatibility" would leave a leaked
- *  code working as a send capability and make the swap cosmetic. The
- *  message names the shape, never the value. */
-function codeShapedRefusal(id: string | number | null): McpResponse {
+/** A refusal for a room CODE passed where a slug belongs (BRIEF-24), shared
+ *  by every `roomSlug`-taking tool on this mount. Kept deliberately separate
+ *  from `membershipRefusal`: "you named a code in a tool that takes a slug"
+ *  and "you are not a member of that room" are two different situations, and
+ *  collapsing them is the defect family this whole series is about. It is
+ *  also the whole point of the change — accepting a code "for compatibility"
+ *  would leave a leaked code working as a capability and make the swap
+ *  cosmetic. The message names the shape, never the value — and now names the
+ *  TOOL the caller actually called, for the same reason `membershipRefusal`
+ *  does. */
+function codeShapedRefusal(id: string | number | null, toolName: string): McpResponse {
   return fail(
     id,
     INVALID_PARAMS,
-    "rendezvous_send: arguments.roomSlug looks like a room code. This tool takes the room's SLUG — its name from rendezvous_list — not its join code.",
+    `${toolName}: arguments.roomSlug looks like a room code. This tool takes the room's SLUG — its name from rendezvous_list — not its join code.`,
   )
 }
 
@@ -562,7 +572,7 @@ async function callSendTool(
     // A code-shaped argument is refused by SHAPE, before membership: it is a
     // different mistake from "not a member", and accepting it would leave the
     // capability this brief removes still working.
-    return codeShapedRefusal(id)
+    return codeShapedRefusal(id, RENDEZVOUS_SEND_TOOL.name)
   }
   if (text.trim().length === 0) {
     // The error names the FIELD, never the value — an empty message has
@@ -573,7 +583,7 @@ async function callSendTool(
 
   const normalized = normalizeSlug(roomSlug)
   const match = matchPrincipalRoom(deps, principal, normalized)
-  if (match === undefined) return membershipRefusal(id, roomSlug)
+  if (match === undefined) return membershipRefusal(id, RENDEZVOUS_SEND_TOOL.name, roomSlug)
 
   const outcome = await sendInbound({
     address: principal.address,
@@ -631,9 +641,9 @@ function inviteResult(roomSlug: string, links: JoinLinks): Record<string, unknow
 /** `rendezvous_invite`'s whole body. Membership is resolved through the same
  *  `matchPrincipalRoom` send/drain/ack already share — one truth about
  *  "which room does this slug name for this principal" — and the refusal for
- *  a slug the principal is not in is `membershipRefusal`, VERBATIM: the drain
- *  tool below already reuses it byte-for-byte, and there must never be a
- *  second wording of the same refusal. */
+ *  a slug the principal is not in is `membershipRefusal`, the ONE shared
+ *  wording, parameterised by `RENDEZVOUS_INVITE_TOOL.name` so the message
+ *  names the tool this principal actually called, never `rendezvous_send`. */
 function callInviteTool(
   deps: McpPersonalDeps,
   principal: ResolvedPrincipal,
@@ -650,11 +660,11 @@ function callInviteTool(
     // as callSendTool positions the same guard: this is the ONE tool whose
     // whole payload IS the join capability, so it is the last place to rely
     // on the accident that a code never matches a three-word slug.
-    return codeShapedRefusal(id)
+    return codeShapedRefusal(id, RENDEZVOUS_INVITE_TOOL.name)
   }
 
   const match = matchPrincipalRoom(deps, principal, normalizeSlug(roomSlug))
-  if (match === undefined) return membershipRefusal(id, roomSlug)
+  if (match === undefined) return membershipRefusal(id, RENDEZVOUS_INVITE_TOOL.name, roomSlug)
 
   const links = joinLinks(match.room.code, {
     publicUrl: env.publicUrl,
@@ -690,7 +700,7 @@ async function callDrainTool(
     // Same guard, same position as callSendTool/callInviteTool: refused by
     // SHAPE, before membership — a code-shaped argument is a different
     // mistake from "not a member" and must not be accepted as a slug.
-    return codeShapedRefusal(id)
+    return codeShapedRefusal(id, RENDEZVOUS_DRAIN_TOOL.name)
   }
   const sinceGiven = args.since !== undefined
   if (sinceGiven && (typeof args.since !== "number" || !Number.isInteger(args.since) || args.since < 0)) {
@@ -699,7 +709,7 @@ async function callDrainTool(
   const since = sinceGiven && typeof args.since === "number" ? args.since : 0
 
   const match = matchPrincipalRoom(deps, principal, normalizeSlug(roomSlug))
-  if (match === undefined) return membershipRefusal(id, roomSlug)
+  if (match === undefined) return membershipRefusal(id, RENDEZVOUS_DRAIN_TOOL.name, roomSlug)
 
   const member = await roomRead.ensureRoomWebMember(match.room.code, principal.address, match.member.displayName)
   const payload = roomRead.drain(match.room.code, member.id, since, sinceGiven)
@@ -729,7 +739,7 @@ async function callAckTool(
   if (normalizeCode(roomSlug) !== undefined) {
     // Same guard, same position as callSendTool/callInviteTool/callDrainTool:
     // refused by SHAPE, before membership.
-    return codeShapedRefusal(id)
+    return codeShapedRefusal(id, RENDEZVOUS_ACK_TOOL.name)
   }
   const seq = args.seq
   if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) {
@@ -737,7 +747,7 @@ async function callAckTool(
   }
 
   const match = matchPrincipalRoom(deps, principal, normalizeSlug(roomSlug))
-  if (match === undefined) return membershipRefusal(id, roomSlug)
+  if (match === undefined) return membershipRefusal(id, RENDEZVOUS_ACK_TOOL.name, roomSlug)
 
   const member = await roomRead.ensureRoomWebMember(match.room.code, principal.address, match.member.displayName)
   const outcome = await roomRead.ackCursor(match.room.code, member.id, seq)
