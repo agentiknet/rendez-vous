@@ -1065,6 +1065,11 @@ export class RoomService {
     sender: Omit<Member, "id" | "joinedAt">,
     input: InboundInput,
   ): Promise<InboundOutcome> {
+    // BRIEF-37: `addMember` dedupes on exact address, so a second join from
+    // the same address returns the member already here — that rejoin must
+    // not fan a second join line. Read the roster BEFORE the join so the
+    // rejoin is a fact the service saw itself, not one it inferred after.
+    const membersBefore = new Set(this.store.get(code)?.members.map((member) => member.id) ?? [])
     const result = await handleCommand(this.store, { kind: "join", code }, sender)
     if (!result.ok) {
       await this.replyGuidance(input, "That room code isn't known. Send `new` to start one.")
@@ -1082,6 +1087,13 @@ export class RoomService {
       // several (the address was in multiple rooms). Name every room left.
       const fromSlugs = (Array.isArray(result.movedFrom) ? result.movedFrom : [result.movedFrom])
         .map((code) => this.store.get(code)?.slug ?? code)
+      // BRIEF-37: the move arm is a join too — the mover is genuinely new to
+      // THIS room, so the same line fans (same-human check included: the
+      // mover may already be here on another device), unless the address was
+      // also already on this roster, in which case nothing joined.
+      if (!membersBefore.has(result.member.id)) {
+        await this.announceJoin(result.room, result.member)
+      }
       await this.sender.send(result.room.code, result.member, {
         text: `Moved from ${fromSlugs.join(", ")} to ${result.room.slug}.`,
         artifactUrl: memberFacingArtifactUrl(result.room),
@@ -1089,11 +1101,53 @@ export class RoomService {
       return { kind: "moved", room: result.room, member: result.member, from: result.movedFrom }
     }
 
+    if (membersBefore.has(result.member.id)) {
+      // Same address, already on this roster: nothing joined, so nothing is
+      // announced — one join produces one line, and a rejoin produces none.
+      await this.sender.send(result.room.code, result.member, {
+        text: joinRoomReplyText(result.room),
+        artifactUrl: memberFacingArtifactUrl(result.room),
+      })
+      return { kind: "joined", room: result.room, member: result.member }
+    }
+
+    await this.announceJoin(result.room, result.member)
     await this.sender.send(result.room.code, result.member, {
       text: joinRoomReplyText(result.room),
       artifactUrl: memberFacingArtifactUrl(result.room),
     })
     return { kind: "joined", room: result.room, member: result.member }
+  }
+
+  /** BRIEF-37: the join fact, pushed into the agent's session at the moment
+   *  it happens — the thing `booter.ts`'s arrival instruction always assumed
+   *  existed and nothing ever supplied. The room speaks, not a member, so it
+   *  is a bare `rdv:system` prompt with NO `[Name · surface]` attribution:
+   *  nobody said this sentence. Queued (`queue: true`, the same fan-in
+   *  posture as every inbound) rather than forced, so a mid-turn join lands
+   *  after the current turn instead of tearing into it. A paused room has no
+   *  session to queue into and must not be woken for a join — the line is
+   *  skipped there, and the caller's own reply still reaches them. The
+   *  service knows what the agent cannot infer from a roster poll: whether
+   *  the joining address carries a `displayName` already in the room, i.e.
+   *  the same human on another device (`booter.ts`'s same-person rule is the
+   *  advisory half; this line is the data it was missing). */
+  private async announceJoin(room: Room, member: Member): Promise<void> {
+    if (room.sessionId === undefined) return
+    const sameHuman = room.members.some(
+      (candidate) => candidate.id !== member.id && candidate.displayName.toLowerCase() === member.displayName.toLowerCase(),
+    )
+    const line = sameHuman
+      ? `${member.displayName} just joined from another device (${member.address.provider}) — the same human already in this room. Nobody new has arrived, and the room has nothing to tell anyone: do not announce this.`
+      : `${member.displayName} (${member.address.provider}) just joined this room — a new person, not greeted yet. Say one line that they have arrived.`
+    const result = await this.client.prompt(room.sessionId, {
+      prompt: line,
+      queue: true,
+      origin: "rdv:system",
+    })
+    if (!result.ok) {
+      console.error(`[fanout] failed to report the join in room ${room.code}'s transcript: ${result.message}`)
+    }
   }
 
   /** BRIEF-20 §3: `join <slug>` — identifies, never admits. Refused plainly

@@ -105,7 +105,7 @@ function invitationLines(code: string): string[] {
 
   return [
     `ANYONE CAN BE INVITED INTO THIS ROOM, and you are the one who knows how. When a member asks how to add someone — a colleague, a friend, a client — give them the ways in: ${ways.join("; ")}. Each link is preconfigured for this room, so the person who taps it joins THIS conversation.`,
-    `The room code is ${code}. Someone already talking to the bot on any channel joins by sending "join ${code}" — that is also how a member moves themselves from one room to another, and moving means leaving the room they were in. Anyone who joins sees everything said from then on, so say in one line that a new person has arrived rather than letting the room wonder.`,
+    `The room code is ${code}. Someone already talking to the bot on any channel joins by sending "join ${code}" — that is also how a member moves themselves from one room to another, and moving means leaving the room they were in. Anyone who joins sees everything said from then on, and the room reports each join to you as it happens, saying whether it is a new person or another device of someone already here — announce a new person in one line rather than letting the room wonder, and stay silent about a device of someone already here.`,
   ]
 }
 
