@@ -614,6 +614,17 @@ export class RoomService {
     return this.resolveRoomWebMember(code, displayName, presented)
   }
 
+  /** The send-once key behind `POST /rooms/:code/agui` (D6): record that one
+   *  member has sent this AG-UI message id into the room, answering whether
+   *  it was new. Delegates to the store where the member's own field lives
+   *  (`Member.aguiSentMessageIds`), the same home `ackedSeq` has — the
+   *  endpoint resolves the member from the bearer and passes its id, so the
+   *  key can never be set for a member the caller does not hold a token
+   *  for. */
+  async recordAguiMessage(code: string, memberId: string, messageId: string): Promise<"new" | "seen"> {
+    return this.store.recordAguiMessage(code, memberId, messageId)
+  }
+
   /** A plain message from the room-web tier: no `new`/`join`/`resume`
    *  commands accepted here, the caller already knows the room. The caller
    *  presents the name's `claim` when it holds one (PLAN-02 §3-D3 amended):

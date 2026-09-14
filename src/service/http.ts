@@ -19,7 +19,7 @@ import type { Room, Tier, Delivery, Member } from "../rooms/types.ts"
 import { ROUTED_PROVIDERS, deliverySeqOf, pullMemberStale } from "../rooms/types.ts"
 import { renderRoomNotFoundPage, renderRoomPage } from "../web/page.ts"
 import {
-  newUserMessageText,
+  newUserMessage,
   outboxToAguiEventBody,
   parseRunAgentInput,
   runErrorEvent,
@@ -971,9 +971,17 @@ async function handleRoomAgui(
     // `/rooms/:code/send` already calls — never reimplemented, never
     // bypassing the fan-in. A run whose last message is not a fresh user
     // turn (a pure reconnect) sends nothing, which is normal.
-    const text = newUserMessageText(input)
-    if (text !== undefined) {
-      const outcome = await service.sendFromRoomWeb(code, member.displayName, text, member.claim)
+    //
+    // The send-once key (this endpoint's "not a chat-history replay", made
+    // structural): AG-UI clients replay the whole thread on every run and
+    // poll to stay alive, so the same trailing user message would otherwise
+    // be sent once per poll. `recordAguiMessage` is the atomic check-and-
+    // reserve against the member's own `aguiSentMessageIds`, so an id seen
+    // before is a no-op — the run still opens, still snapshots, still
+    // finishes below. A new id is sent exactly once.
+    const message = newUserMessage(input)
+    if (message !== undefined && (await service.recordAguiMessage(code, member.id, message.id)) === "new") {
+      const outcome = await service.sendFromRoomWeb(code, member.displayName, message.text, member.claim)
       const failure = sendFailureMessage(outcome)
       if (failure !== undefined) {
         writeEvent(runErrorEvent(failure))

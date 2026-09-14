@@ -87,13 +87,15 @@ function isMember(value: unknown): value is Member {
   ) {
     return false
   }
-  // `delivery`, `claim`, `ackedSeq` and `ackedAt` are optional: members
-  // persisted before any of these fields existed round-trip without the key
-  // (same rule as lastError/deliveredAt on a Delivery).
+  // `delivery`, `claim`, `ackedSeq`, `ackedAt` and `aguiSentMessageIds` are
+  // optional: members persisted before any of these fields existed
+  // round-trip without the key (same rule as lastError/deliveredAt on a
+  // Delivery).
   const delivery = "delivery" in value ? value.delivery : undefined
   const claim = "claim" in value ? value.claim : undefined
   const ackedSeq = "ackedSeq" in value ? value.ackedSeq : undefined
   const ackedAt = "ackedAt" in value ? value.ackedAt : undefined
+  const aguiSentMessageIds = "aguiSentMessageIds" in value ? value.aguiSentMessageIds : undefined
   return (
     isString(value.id) &&
     isString(value.displayName) &&
@@ -103,6 +105,7 @@ function isMember(value: unknown): value is Member {
     (claim === undefined || isString(value.claim)) &&
     (ackedSeq === undefined || (typeof ackedSeq === "number" && Number.isInteger(ackedSeq) && ackedSeq >= 0)) &&
     isStringOrUndefined(ackedAt) &&
+    (aguiSentMessageIds === undefined || (Array.isArray(aguiSentMessageIds) && aguiSentMessageIds.every(isString))) &&
     isString(value.joinedAt)
   )
 }
@@ -622,6 +625,47 @@ export class RoomStore {
     room.updatedAt = at
     await this.enqueueWrite()
     return applied ? "applied" : "ignored"
+  }
+
+  /** Persist the fact that one member has sent this `AguiMessage.id` into
+   *  the room, and answer whether it was NEW (`"new"`) or already recorded
+   *  (`"seen"`). This is the send-once key behind `POST /rooms/:code/agui`
+   *  (D6): AG-UI clients replay the whole thread on every run and poll the
+   *  endpoint to stay alive, so the trailing user message is otherwise sent
+   *  once per poll. Scoped per member, like every other member field — the
+   *  same text from two members is two messages, and the same id from two
+   *  members is not one.
+   *
+   *  Recorded BEFORE the caller sends: the check and the append are one
+   *  synchronous step here, so two overlapping POSTs carrying the same id
+   *  cannot both pass the guard while the first awaits the room's send. The
+   *  trade is deliberately at-most-once (the endpoint's contract): an id
+   *  consumed by a send that then fails is not re-sendable by replay, which
+   *  is the safe direction for a room — a lost retry beats a duplicated
+   *  message. The append is not capped: each id is a handful of bytes and a
+   *  member's real human messages are bounded, while evicting an old id
+   *  would let it be sent again.
+   *
+   *  A member removed between the caller's auth and this write is a no-op
+   *  answered `"seen"` — nothing to record, and the caller's guard treats it
+   *  as already handled rather than sending into a member that is gone. */
+  async recordAguiMessage(code: string, memberId: string, messageId: string): Promise<"new" | "seen"> {
+    const normalized = normalizeCode(code)
+    if (normalized === undefined) {
+      throw new Error(`invalid room code: ${code}`)
+    }
+    const room = this.rooms.get(normalized)
+    if (room === undefined) {
+      throw new Error(`unknown room: ${normalized}`)
+    }
+    const member = room.members.find((candidate) => candidate.id === memberId)
+    if (member === undefined) return "seen"
+    const seen = member.aguiSentMessageIds ?? []
+    if (seen.includes(messageId)) return "seen"
+    member.aguiSentMessageIds = [...seen, messageId]
+    room.updatedAt = new Date().toISOString()
+    await this.enqueueWrite()
+    return "new"
   }
 
   async update(

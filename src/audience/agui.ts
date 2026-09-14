@@ -99,16 +99,37 @@ export function sinceFromInput(input: RunAgentInput): { since: number; sinceGive
   return { since: raw, sinceGiven: true }
 }
 
+/** The client's new turn, id and text together. The id is REQUIRED by
+ *  `AguiMessage` and is already on the wire, so it is the only key a
+ *  send-once guard can use: AG-UI clients replay the whole thread on every
+ *  run (`newUserMessageText`'s doc), and the endpoint must be able to tell
+ *  "the same sentence again" from "a new sentence" without trusting text —
+ *  a human may legitimately repeat themselves. */
+export interface NewUserMessage {
+  readonly id: string
+  readonly text: string
+}
+
 /** D6: the client's new message, if this run carries one. A run whose last
  *  message is not a fresh `"user"` turn — including an empty `messages`
  *  array — is a pure reconnect: normal, and nothing is sent. Only the LAST
  *  message is ever inspected; this endpoint is not a chat-history replay,
- *  it is "did the client just say something new". */
-export function newUserMessageText(input: RunAgentInput): string | undefined {
+ *  it is "did the client just say something new". The `id` is carried out
+ *  so the caller can enforce exactly that: the endpoint keys a per-member
+ *  send-once map on it, making the doc comment above structurally true
+ *  instead of aspirational. */
+export function newUserMessage(input: RunAgentInput): NewUserMessage | undefined {
   const last = input.messages[input.messages.length - 1]
   if (last === undefined || last.role !== "user") return undefined
   const text = last.content?.trim()
-  return text !== undefined && text.length > 0 ? text : undefined
+  return text !== undefined && text.length > 0 ? { id: last.id, text } : undefined
+}
+
+/** The text alone, for the readers that do not need the send-once key —
+ *  kept as its own name so `newUserMessage`'s id does not become a second
+ *  thing every caller must destructure around. */
+export function newUserMessageText(input: RunAgentInput): string | undefined {
+  return newUserMessage(input)?.text
 }
 
 // --- BaseEvent, hand-rolled (16 tagged objects in the full vocabulary; --

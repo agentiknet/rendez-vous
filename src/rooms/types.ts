@@ -98,6 +98,20 @@ export interface Member {
    *  evidence the client is there). */
   ackedSeq?: number
   ackedAt?: string
+  /** The `AguiMessage.id`s this member has already pushed into the room
+   *  through `POST /rooms/:code/agui` (D6). AG-UI clients replay the entire
+   *  message thread on every run and poll the endpoint to stay alive, so
+   *  without a key the same trailing user sentence is sent once per poll —
+   *  a 2 s poll against a 30 s agent turn puts fifteen copies in the room.
+   *  The key is the id AG-UI already puts on the wire, scoped to the member
+   *  the bearer resolves to (`resolveOutboxMember`), and written only by the
+   *  endpoint's send-once guard (`RoomStore.recordAguiMessage`): a replay of
+   *  an id in this list is a no-op, a new id is sent.
+   *
+   *  Optional key, absent on members persisted before the field existed —
+   *  same JSON round-trip rule as `ackedSeq` and `claim`. A member that has
+   *  never sent through the AG-UI endpoint has no list. */
+  aguiSentMessageIds?: string[]
 }
 
 /** Push or pull, per member — the one question the fan-out's artifact-notice

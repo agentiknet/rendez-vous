@@ -1385,6 +1385,89 @@ test("POST /rooms/:code/agui: a send FAILURE still gets exactly one RUN_STARTED,
   )
 })
 
+test("POST /rooms/:code/agui: replaying the same AguiMessage.id as the same member sends into the room exactly once, and the replay still completes the run (D6's \"not a chat-history replay\" made true)", async () => {
+  const { baseUrl, daemon, sessionId, code } = await newRoomHarness()
+
+  const claimRes = await fetch(`${baseUrl}/rooms/${code}/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ displayName: "Chloe" }),
+  })
+  const claimBody = await readJson(claimRes)
+  const token = typeof claimBody.memberToken === "string" ? claimBody.memberToken : undefined
+  assert.ok(typeof token === "string")
+
+  const messages = [{ id: "m1", role: "user", content: "one sentence, polled" }]
+  const post = (): Promise<Response> =>
+    fetch(`${baseUrl}/rooms/${code}/agui`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: aguiRunBody({ messages }),
+    })
+
+  const first = await post()
+  assert.equal(first.status, 200)
+  await readSseRecords(first, 20)
+
+  const replay = await post()
+  assert.equal(replay.status, 200)
+  const replayFrames = await readSseRecords(replay, 20)
+  assert.equal(replayFrames[0]?.type, "RUN_STARTED", "the replay still opens a run (BRIEF-07)")
+  assert.equal(
+    replayFrames[replayFrames.length - 1]?.type,
+    "RUN_FINISHED",
+    "the replay still closes normally — a no-op send, not an error",
+  )
+  assert.equal(replayFrames.filter((f) => f.type === "RUN_ERROR").length, 0)
+
+  const prompts = daemon.requestsReceived.filter((r) => r.path === `/sessions/${sessionId}/prompt`)
+  assert.equal(prompts.length, 1, "the room must hold exactly one inbound record for the one sentence")
+  const body = prompts[0]?.body
+  assert.ok(isRecord(body))
+  if (isRecord(body)) assert.equal(body.prompt, "[Chloe · room-web] one sentence, polled")
+})
+
+test("POST /rooms/:code/agui: a genuinely NEW user message with a NEW id, posted after a replayed one, IS sent — the send-once key is per message, not 'never send twice'", async () => {
+  const { baseUrl, daemon, sessionId, code } = await newRoomHarness()
+
+  const claimRes = await fetch(`${baseUrl}/rooms/${code}/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ displayName: "Chloe" }),
+  })
+  const claimBody = await readJson(claimRes)
+  const token = typeof claimBody.memberToken === "string" ? claimBody.memberToken : undefined
+  assert.ok(typeof token === "string")
+
+  const post = (messages: unknown[]): Promise<Response> =>
+    fetch(`${baseUrl}/rooms/${code}/agui`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: aguiRunBody({ messages }),
+    })
+
+  const first = await post([{ id: "m1", role: "user", content: "the first one" }])
+  assert.equal(first.status, 200)
+  await readSseRecords(first, 20)
+
+  const replay = await post([{ id: "m1", role: "user", content: "the first one" }])
+  assert.equal(replay.status, 200)
+  await readSseRecords(replay, 20)
+
+  const second = await post([
+    { id: "m1", role: "user", content: "the first one" },
+    { id: "m2", role: "user", content: "the second one" },
+  ])
+  assert.equal(second.status, 200)
+  await readSseRecords(second, 20)
+
+  const prompts = daemon.requestsReceived.filter((r) => r.path === `/sessions/${sessionId}/prompt`)
+  assert.equal(prompts.length, 2, "a new id must be sent even though the thread it rides replays an old one")
+  const lastBody = prompts[1]?.body
+  assert.ok(isRecord(lastBody))
+  if (isRecord(lastBody)) assert.equal(lastBody.prompt, "[Chloe · room-web] the second one")
+})
+
 // --- POST /rooms/:code/outbox/cursor (PLAN-02 step 4: the ack) --------------
 
 test("GET /rooms/:code/outbox fires the gap marker from the room-wide oldest, but ONLY for a legacy room with no low-water mark (brief E; scope narrowed by brief 12)", async () => {
