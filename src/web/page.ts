@@ -443,7 +443,15 @@ function script(code: string, room: Room, agentBusy: boolean): string {
 
     const claimDeps = {
       roomCode: ROOM_CODE,
-      fetchImpl: fetch,
+      // fetch MUST be wrapped, never stored bare: every reader below calls it
+      // as deps.fetchImpl(...), which sets the receiver to the deps object,
+      // and a browser answers that with "TypeError: Failed to execute 'fetch'
+      // on 'Window': Illegal invocation". claimMember catches its own fetch
+      // and returns null, so the whole send path died in silence — no
+      // request, no console error, nothing. Node's fetch does not check its
+      // receiver and every test injects its own fetchImpl, so only a real
+      // browser ever saw it. Measured live 2026-09-14.
+      fetchImpl: function (input, init) { return fetch(input, init); },
       getName: function () { return nameInput.value; },
       getStoredClaim: function (key) { return localStorage.getItem(key); },
       setStoredClaim: function (key, value) { localStorage.setItem(key, value); },
@@ -463,7 +471,7 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     // read() calls the same way the browser's own SSE parser would. ---
     let since = 0;
     async function connectStream() {
-      const outcome = await connectStreamOnce(since, { roomCode: ROOM_CODE, fetchImpl: fetch }, outboxState);
+      const outcome = await connectStreamOnce(since, { roomCode: ROOM_CODE, fetchImpl: function (input, init) { return fetch(input, init); } }, outboxState);
       outboxFailureEl.style.display = outboxFailureVisible(outboxState) ? "" : "none";
       if (outcome.status === "failed" || !outcome.body) {
         const text = outcome.status === "failed" ? outcome.text : undefined;
