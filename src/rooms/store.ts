@@ -13,6 +13,7 @@ import {
   type Member,
   type MemberDelivery,
   type PendingDelivery,
+  type RecoveryLink,
   type Room,
   type RoomState,
   type Tier,
@@ -146,6 +147,30 @@ function isPendingDelivery(value: unknown): value is PendingDelivery {
 
 function isAskStatus(value: unknown): value is AskStatus {
   return value === "open" || value === "answered" || value === "nudged" || value === "expired" || value === "proceeded"
+}
+
+/** BRIEF-23: one persisted `RecoveryLink`. `usedAt` is optional: a live link
+ *  round-trips with the key absent (same rule as `isAsk`'s optional fields). */
+function isRecoveryLink(value: unknown): value is RecoveryLink {
+  if (!isObject(value)) return false
+  if (
+    !("token" in value) ||
+    !("displayName" in value) ||
+    !("requestedBy" in value) ||
+    !("createdAt" in value) ||
+    !("expiresAt" in value)
+  ) {
+    return false
+  }
+  const usedAt = "usedAt" in value ? value.usedAt : undefined
+  return (
+    isString(value.token) &&
+    isString(value.displayName) &&
+    isString(value.requestedBy) &&
+    isNumberOrUndefined(usedAt) &&
+    typeof value.createdAt === "number" &&
+    typeof value.expiresAt === "number"
+  )
 }
 
 function isAsk(value: unknown): value is Ask {
@@ -329,6 +354,7 @@ function isRoom(value: unknown): value is Room {
   const artifactReady = "artifactReady" in value ? value.artifactReady : undefined
   const pendingDeliveries = "pendingDeliveries" in value ? value.pendingDeliveries : undefined
   const asks = "asks" in value ? value.asks : undefined
+  const recoveries = "recoveries" in value ? value.recoveries : undefined
   const deliveries = "deliveries" in value ? value.deliveries : undefined
   const deliverySeq = "deliverySeq" in value ? value.deliverySeq : undefined
   const spokenSeq = "spokenSeq" in value ? value.spokenSeq : undefined
@@ -344,6 +370,7 @@ function isRoom(value: unknown): value is Room {
     isBooleanOrUndefined(artifactReady) &&
     (pendingDeliveries === undefined || (Array.isArray(pendingDeliveries) && pendingDeliveries.every(isPendingDelivery))) &&
     (asks === undefined || (Array.isArray(asks) && asks.every(isAsk))) &&
+    (recoveries === undefined || (Array.isArray(recoveries) && recoveries.every(isRecoveryLink))) &&
     (deliveries === undefined || (Array.isArray(deliveries) && deliveries.every(isDelivery))) &&
     isNumberOrUndefined(deliverySeq) &&
     isNumberOrUndefined(spokenSeq) &&
@@ -683,6 +710,7 @@ export class RoomStore {
         | "state"
         | "pendingDeliveries"
         | "asks"
+        | "recoveries"
         | "deliveries"
         | "deliverySeq"
         | "spokenSeq"

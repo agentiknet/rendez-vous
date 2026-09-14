@@ -9,7 +9,7 @@ import type { Transport } from "../fanout/types.ts"
 import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
 import { ensureMembership, handleCommand, parseCommand, type CommandResult } from "../rooms/commands.ts"
 import type { AddressLookup, RoomStore } from "../rooms/store.ts"
-import { UnroutedDeliveryError, deliveryModeOf, type Address, type Member, type Room, type Tier } from "../rooms/types.ts"
+import { UnroutedDeliveryError, deliveryModeOf, type Address, type Member, type RecoveryLink, type Room, type Tier } from "../rooms/types.ts"
 import { memberToken, tokensMatch } from "./mcp-room.ts"
 import { publicArtifactUrl, publicMediaUrl } from "./artifact-proxy.ts"
 import type { SessionBooter } from "./booter.ts"
@@ -87,6 +87,67 @@ export type RoomWebSendOutcome =
  *  whether it matched), so it names which one rather than handing both the
  *  same pessimistic answer. */
 export type NameClaimedReason = "taken" | "stale"
+
+/** BRIEF-21: the refusal message for a name someone else holds, shared by the
+ *  claim exchange, the send path and (BRIEF-23) an identity-recovery request
+ *  aimed at a name that is not the requester's own — the page renders it from
+ *  any of them. */
+const NAME_TAKEN_MESSAGE = "ce nom est déjà pris dans cette room — choisis-en un autre"
+
+/** BRIEF-21: the OTHER `name-claimed` situation — this browser once held the
+ *  name, but the secret it presented did not match. Rendered as a different
+ *  sentence from `NAME_TAKEN_MESSAGE`, because "pick another name" is the
+ *  wrong instruction for someone who already owns this one; a wrong-secret
+ *  refusal names the state without building the recovery path (brief 23). */
+const NAME_STALE_MESSAGE =
+  "ce nom est le tien, mais ce navigateur ne peut plus le prouver — choisis un autre nom pour l'instant"
+
+export function nameClaimedMessage(reason: NameClaimedReason): string {
+  return reason === "stale" ? NAME_STALE_MESSAGE : NAME_TAKEN_MESSAGE
+}
+
+/** How long an identity-recovery pointer stays redeemable (BRIEF-23). Short
+ *  enough that a forwarded link is worthless within the hour; long enough
+ *  that the member can act on a phone notification without rushing. The
+ *  deliverable token (src/service/deliverable.ts) chose 30 minutes for a
+ *  comparable capability; recovery is strictly more sensitive, so 15. */
+export const RECOVERY_LINK_TTL_MS = 15 * 60_000
+
+/** The honest line a room-web-only member gets: they have no second surface
+ *  to prove against, and inventing one would be inventing an account system
+ *  (BRIEF-23, deliberately out of scope). Never silence, never a link. */
+const RECOVERY_NO_PROOF_TEXT =
+  "I can't verify this is you: the only surface you are on in this room is the web page itself, and there is no way to prove this is you against it. Ask someone already in the room to help."
+
+function recoveryLinkText(url: string): string {
+  return (
+    "Open this one-time link on the browser where you want your name back. " +
+    "It restores your web identity once, and expires shortly:\n" +
+    url
+  )
+}
+
+/** BRIEF-23: the outcome of asking for an identity-recovery pointer. `sent`
+ *  carries the URL only for tests/audit — the member receives it on their own
+ *  proven surface, never here. `conflict` is a name held by someone else;
+ *  `no-surface` is the room-web-only member there is genuinely nothing to
+ *  prove against. */
+export type IdentityRecoveryOutcome =
+  | { kind: "sent"; member: Member; url: string }
+  | { kind: "unknown-code" }
+  | { kind: "unknown-member" }
+  | { kind: "conflict"; message: string }
+  | { kind: "no-surface" }
+
+/** BRIEF-23: the outcome of redeeming a recovery link. `invalid` covers an
+ *  unknown or already-burned token; `wrong-member` is the link being used to
+ *  restore a name it was not issued for. */
+export type IdentityRedeemOutcome =
+  | { kind: "restored"; member: Member; claim: string }
+  | { kind: "unknown-code" }
+  | { kind: "invalid" }
+  | { kind: "expired" }
+  | { kind: "wrong-member" }
 
 /** `POST /rooms/:code/claim`'s outcome (PLAN-02 §3-D3 amended): the browser
  *  exchanges the name it typed (plus the join secret it holds, if any) for
@@ -229,6 +290,21 @@ function mintClaim(): string {
   return randomBytes(24).toString("hex")
 }
 
+/** BRIEF-23: an opaque, URL-safe capability. 18 bytes of entropy is far more
+ *  than a room code's four-character alphabet and is the only thing standing
+ *  between a forwarded link and an identity, so it is deliberately long. */
+function mintRecoveryToken(): string {
+  return randomBytes(18).toString("hex")
+}
+
+/** Drop burned and expired recovery pointers (BRIEF-23) — called on mint, so
+ *  the persisted list stays a small set of live capabilities rather than a
+ *  log. Redemption deliberately does NOT prune: it needs the very entry it is
+ *  about to mark used. */
+function pruneRecoveryLinks(links: readonly RecoveryLink[], nowMs: number): RecoveryLink[] {
+  return links.filter((link) => link.usedAt === undefined && nowMs < link.expiresAt)
+}
+
 export class RoomService {
   private readonly store: RoomStore
   private readonly client: DaemonClient
@@ -271,6 +347,10 @@ export class RoomService {
    *  rather than waiting out the interval a second time. */
   private readonly lastBoxProbeAt = new Map<string, number>()
   private readonly checkBoxLiveness: BoxLivenessCheck
+  /** Injectable clock (BRIEF-23): recovery links expire, and a test that has
+   *  to wait fifteen real minutes to prove it does not exist. Defaults to the
+   *  wall clock, so every production path is unchanged. */
+  private readonly now: () => number
   /** Per-room-code serialization for `doResume` (see `withRoomLock`'s doc) —
    *  in-process only, and empty entries are never cleaned up eagerly; each
    *  slot holds only the tail of that room's own chain, so this stays one
@@ -322,6 +402,8 @@ export class RoomService {
      *  delivering an `[[attach …]]` — inject a stub in tests so they never
      *  depend on whether something answers at `env.publicUrl`. */
     probeUrl?: ArtifactProbe
+    /** Injectable clock (BRIEF-23) for recovery-link expiry — see the field. */
+    now?: () => number
   }) {
     this.store = opts.store
     this.client = opts.client
@@ -333,6 +415,7 @@ export class RoomService {
     this.boxProbeMs = (opts.boxProbeMinutes ?? env.boxProbeMinutes) * 60_000
     this.reviveTimeoutMs = opts.reviveTimeoutMs ?? DEFAULT_REVIVE_TIMEOUT_MS
     this.checkBoxLiveness = opts.checkBoxLiveness ?? ((sandboxId) => isSandboxAlive(sandboxId))
+    this.now = opts.now ?? Date.now
     // env.mediaDir is the live runtime store the running service serves
     // media from; a test must inject its own MediaStore, never rely on this.
     this.mediaStore = opts.mediaStore ?? new MediaStore(env.mediaDir)
@@ -656,6 +739,105 @@ export class RoomService {
    *  for. */
   async recordAguiMessage(code: string, memberId: string, messageId: string): Promise<"new" | "seen"> {
     return this.store.recordAguiMessage(code, memberId, messageId)
+  }
+
+  /** BRIEF-23: issue a one-time pointer that lets a member who can prove
+   *  themselves on a push surface re-claim their own web name after losing
+   *  the browser's secret.
+   *
+   *  `requesterId` is the member the agent resolved from the conversation —
+   *  the link is sent to that member's OWN proven surface, never to an
+   *  address supplied in the request (PLAN-03 §4's consent gate applied to
+   *  recovery: the agent composes, it does not choose the recipient).
+   *
+   *  `targetName` lets the agent say which name is being recovered, but it is
+   *  NOT an authorization: a name other than the requester's own is someone
+   *  else's, and the genuine conflict is unchanged — refused with brief 21's
+   *  message, no link issued. Without `Principal` (PLAN-03 §7, out of scope)
+   *  the requester's own display name is the only identity the push surface
+   *  can be tied to, and the matching room-web member is the one the link
+   *  restores (or creates, if the web identity was never made).
+   *
+   *  A room-web-only requester has no push surface at all: there is
+   *  genuinely nothing to prove against, so the honest line is said rather
+   *  than a link minted (BRIEF-23's explicit out-of-scope). */
+  async requestIdentityRecovery(
+    code: string,
+    requesterId: string,
+    targetName?: string,
+  ): Promise<IdentityRecoveryOutcome> {
+    const room = this.store.get(code)
+    if (room === undefined) return { kind: "unknown-code" }
+    const requester = room.members.find((member) => member.id === requesterId)
+    if (requester === undefined) return { kind: "unknown-member" }
+
+    const displayName = (targetName ?? requester.displayName).trim()
+    if (slugify(displayName) !== slugify(requester.displayName)) {
+      const message = nameClaimedMessage("taken")
+      await this.sender.send(code, requester, { text: message, artifactUrl: undefined })
+      return { kind: "conflict", message }
+    }
+
+    if (deliveryModeOf(requester) !== "push") {
+      await this.sender.send(code, requester, { text: RECOVERY_NO_PROOF_TEXT, artifactUrl: undefined })
+      return { kind: "no-surface" }
+    }
+
+    const now = this.now()
+    const link: RecoveryLink = {
+      token: mintRecoveryToken(),
+      displayName,
+      requestedBy: requester.id,
+      createdAt: now,
+      expiresAt: now + RECOVERY_LINK_TTL_MS,
+    }
+    await this.store.update(code, { recoveries: [...pruneRecoveryLinks(room.recoveries ?? [], now), link] })
+
+    const url = `${env.publicUrl}/r/${room.code}?recover=${encodeURIComponent(link.token)}&name=${encodeURIComponent(displayName)}`
+    await this.sender.send(code, requester, { text: recoveryLinkText(url), artifactUrl: undefined })
+    return { kind: "sent", member: requester, url }
+  }
+
+  /** BRIEF-23: burn a recovery link and hand back the web identity's claim.
+   *
+   *  The link is the capability, and it restores exactly ONE name: a
+   *  redemption presenting any other `displayName` is refused, so it is not
+   *  a room code with a nicer name. Single-use (the burn and the claim land
+   *  in one store write, so a second redemption can never race the first)
+   *  and short-lived. The claim returned is the member's EXISTING secret when
+   *  one exists — recovery restores an identity, it does not rotate it — and
+   *  a fresh one only when the web identity never had a claim. */
+  async redeemIdentityRecovery(code: string, token: string, displayName: string): Promise<IdentityRedeemOutcome> {
+    const room = this.store.get(code)
+    if (room === undefined) return { kind: "unknown-code" }
+    const link = (room.recoveries ?? []).find((candidate) => candidate.token === token)
+    if (link === undefined || link.usedAt !== undefined) return { kind: "invalid" }
+
+    const now = this.now()
+    if (now >= link.expiresAt) return { kind: "expired" }
+    if (slugify(displayName) !== slugify(link.displayName)) return { kind: "wrong-member" }
+
+    // Burn first, in the same write that records it: a second redemption
+    // reads `usedAt` and stops. Nothing is removed or recreated — the member
+    // record and its id survive, which is what keeps the backlog attached
+    // (docs/OUTBOX.md §7.1).
+    const burned = (room.recoveries ?? []).map((candidate) =>
+      candidate.token === token ? { ...candidate, usedAt: now } : candidate,
+    )
+    await this.store.update(code, { recoveries: burned })
+
+    const contactRef = slugify(link.displayName)
+    const existing = (this.store.get(code)?.members ?? []).find(
+      (member) => member.address.provider === "room-web" && member.address.contactRef === contactRef,
+    )
+    const claim = existing?.claim ?? mintClaim()
+    const { member } = await ensureMembership(this.store, code, {
+      displayName: link.displayName,
+      tier: "room-web",
+      address: { provider: "room-web", source: "room-web", contactRef },
+      claim,
+    })
+    return { kind: "restored", member, claim: member.claim ?? claim }
   }
 
   /** A plain message from the room-web tier: no `new`/`join`/`resume`

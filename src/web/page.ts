@@ -423,6 +423,10 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     const aguiPayloadOf = ${aguiPayloadOf.toString()};
     const claimStorageKey = ${claimStorageKey.toString()};
     const claimMember = ${claimMember.toString()};
+    // BRIEF-23: the recovery-link redemption and its per-situation failure
+    // sentence — embedded from the tested source, same trick as the rest.
+    const recoveryFailureText = ${recoveryFailureText.toString()};
+    const redeemRecovery = ${redeemRecovery.toString()};
     const freshOutboxTickState = ${freshOutboxTickState.toString()};
     const runOutboxTick = ${runOutboxTick.toString()};
     const outboxFailureVisible = ${outboxFailureVisible.toString()};
@@ -618,11 +622,42 @@ function script(code: string, room: Room, agentBusy: boolean): string {
     renderState(INITIAL_STATE);
     connectStream();
     pollState();
+    // BRIEF-23: a recovery link arrives as ?recover=<token>&name=<name>.
+    // Redeem it FIRST — before the ordinary claim tick — so the restored
+    // claim is in localStorage by the time the first /claim POST runs, and
+    // the tab comes back as the member it always was. Clearing the query
+    // from the URL after redeeming keeps the one-time capability out of
+    // browser history.
+    async function applyRecoveryFromUrl() {
+      const params = new URLSearchParams(location.search);
+      const token = params.get("recover");
+      if (!token) return;
+      const displayName = params.get("name") || "";
+      nameInput.value = displayName;
+      const result = await redeemRecovery({
+        roomCode: ROOM_CODE,
+        token: token,
+        displayName: displayName,
+        // Wrapped, never bare: redeemRecovery calls this as deps.fetchImpl(...),
+        // which sets the receiver to the deps object, and a browser refuses that
+        // with "Illegal invocation". See the claim and stream sites above.
+        fetchImpl: function (input, init) { return fetch(input, init); },
+        setStoredClaim: function (key, value) { localStorage.setItem(key, value); },
+      });
+      if (result.status === "restored") {
+        nameErrorEl.style.display = "none";
+        history.replaceState(null, "", location.pathname);
+      } else {
+        nameErrorEl.textContent = recoveryFailureText(result.error);
+        nameErrorEl.style.display = "";
+      }
+    }
     // Claim on load, not on first send (brief 14, defect 1): a visitor with
     // a name becomes a member and starts draining without having to speak.
     // Runs unconditionally — with no name yet, the first tick reports
     // "unclaimed" and the page says so visibly instead of looking live.
-    drainOutbox();
+    // The recovery redemption, when the URL carries one, runs first (above).
+    applyRecoveryFromUrl().then(function () { return drainOutbox(); });
   `
 }
 
@@ -1026,6 +1061,61 @@ export async function claimMember(deps: ClaimDeps): Promise<string | null> {
   if (body === undefined) return null
   if (typeof body.claim === "string") deps.setStoredClaim(key, body.claim)
   return typeof body.memberToken === "string" ? body.memberToken : null
+}
+
+/** What redeeming a recovery link needs from its environment (BRIEF-23),
+ *  the same dependency-object shape as `ClaimDeps` so it survives
+ *  `toString()` and can be driven against a real server with no DOM. */
+export interface RedeemDeps {
+  roomCode: string
+  token: string
+  displayName: string
+  fetchImpl: typeof fetch
+  setStoredClaim: (key: string, value: string) => void
+}
+
+/** The failure sentence a recovery link's own error field earns (BRIEF-23):
+ *  named per situation, never one generic apology — an expired link and a
+ *  link aimed at another name are different problems with different fixes. */
+export function recoveryFailureText(errorCode: string | undefined): string {
+  if (errorCode === "expired_token") return "This recovery link has expired — ask the room for a new one."
+  if (errorCode === "wrong_member") return "This recovery link restores a different name, not the one entered."
+  return "This recovery link is no longer valid — ask the room for a new one."
+}
+
+/** `POST /rooms/:code/recover` (BRIEF-23) — redeem the one-time link and
+ *  install the restored claim under the SAME `rdv-claim` key a first claim
+ *  would use, so every later step is the ordinary claim path. Returns the
+ *  name the link restored on success, or an error code for the page to render
+ *  (`undefined` for a network/unparseable failure). */
+export async function redeemRecovery(deps: RedeemDeps): Promise<
+  { status: "restored"; displayName: string } | { status: "failed"; error: string | undefined }
+> {
+  let res: Response
+  try {
+    res = await deps.fetchImpl("/rooms/" + deps.roomCode + "/recover", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: deps.token, displayName: deps.displayName }),
+    })
+  } catch (e) {
+    return { status: "failed", error: undefined }
+  }
+  let rawBody: unknown
+  try {
+    rawBody = await res.json()
+  } catch (e) {
+    rawBody = undefined
+  }
+  const body = isRecord(rawBody) ? rawBody : undefined
+  if (!res.ok) {
+    return { status: "failed", error: body !== undefined && typeof body.error === "string" ? body.error : undefined }
+  }
+  if (body === undefined || typeof body.claim !== "string" || typeof body.displayName !== "string") {
+    return { status: "failed", error: undefined }
+  }
+  deps.setStoredClaim(claimStorageKey(deps.roomCode, body.displayName), body.claim)
+  return { status: "restored", displayName: body.displayName }
 }
 
 /** One tab's outbox drain state (brief 14). `claimBackoffMs` /

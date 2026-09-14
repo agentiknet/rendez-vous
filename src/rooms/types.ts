@@ -156,6 +156,41 @@ export interface PendingDelivery {
   readonly expiresAt: number
 }
 
+/** One issued, not-yet-burned identity-recovery pointer (BRIEF-23).
+ *
+ *  A member whose only proof of a name is a `claim` in one origin's
+ *  localStorage loses it to a cleared browser, a second device, or a second
+ *  hostname — and then their own name refuses them (`name_claimed`). The way
+ *  back is not a second account system: a member who can prove themselves on
+ *  a push surface (PLAN-03 §2's pointer primitive — a `system` delivery to a
+ *  proven surface) is re-issued the claim for their own web identity.
+ *
+ *  This is the capability the pointer carries. It is deliberately narrower
+ *  than a room code: it is single-use (a redemption sets `usedAt`), it is
+ *  short-lived (`expiresAt`), it is bound to exactly ONE display name, and it
+ *  is only ever minted for the surface the requesting member already
+ *  holds — never for an address supplied in the request. It is persisted on
+ *  the room (same optional-key JSON round-trip rule as `pendingDeliveries`
+ *  and `asks`) so a link that reached a phone survives a service restart
+ *  instead of becoming a dead URL. */
+export interface RecoveryLink {
+  readonly token: string
+  /** The one display name this link restores. A redemption presenting any
+   *  other name is refused — that binding is what keeps the link from being
+   *  a room code with a nicer name. */
+  readonly displayName: string
+  /** The push member whose surface the link was delivered to (audit only:
+   *  the recipient was resolved server-side from this member, never from the
+   *  request). */
+  readonly requestedBy: string
+  /** Epoch millis. The link is refused at or after `expiresAt`. */
+  readonly createdAt: number
+  readonly expiresAt: number
+  /** Epoch millis of the one redemption; a second one is refused. Absent
+   *  until burned, so a persisted link round-trips without the key. */
+  readonly usedAt?: number
+}
+
 /** Lifecycle of one solicitation (docs/MIDDLEMAN.md §3): `"open"` when the
  *  agent asks a member for something, `"answered"` when their next message
  *  closes it, `"nudged"`/`"proceeded"`/`"expired"` by the no-stall timers and
@@ -385,6 +420,11 @@ export interface Room {
    *  fresh rooms, absent on rooms that predate the field — same JSON
    *  round-trip rule as `pendingDeliveries` below. */
   asks?: Ask[]
+  /** Issued one-time identity-recovery pointers (BRIEF-23). Optional key,
+   *  absent on rooms that predate the field — same JSON round-trip rule as
+   *  `pendingDeliveries` below. Burned and expired entries are pruned on the
+   *  next mint or redemption, so this stays a small set of live pointers. */
+  recoveries?: RecoveryLink[]
   /** Outbound `say`/`whisper` messages accepted for delivery (PLAN §3.3),
    *  one record per target member. Persisted so a process that dies between
    *  acceptance and delivery re-attempts on boot. Optional key, absent on

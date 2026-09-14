@@ -32,7 +32,7 @@ import { createMcpCanvakitHandler, defaultMcpCanvakitDeps, type McpResponse } fr
 import { bearerOf, createMcpRoomHandler, memberToken, tokensMatch } from "./mcp-room.ts"
 import { createMcpPersonalHandler } from "./mcp-personal.ts"
 import { getSessionBusy, type DaemonExtraOptions } from "./daemon-extra.ts"
-import type { NameClaimedReason, RoomService, RoomWebSendOutcome } from "./room-service.ts"
+import { nameClaimedMessage, type RoomService, type RoomWebSendOutcome } from "./room-service.ts"
 import { MediaStore, type IngressMediaRecord } from "./media-store.ts"
 
 /** The `Room` shape handed to any client-facing surface — the JSON API and
@@ -44,9 +44,14 @@ function toPublicRoom(room: Room, hasStoredRender: boolean): Room {
   // `deliveries` carries the text of tool-addressed say/whisper messages,
   // whispers included — this projection is handed to any GET /rooms/:code
   // caller and server-side page embed, so it is stripped unconditionally
-  // here (PLAN §3.3: the leak the adversarial review caught).
-  const { deliveries: _stripped, ...publicRoom } = room
+  // here (PLAN §3.3: the leak the adversarial review caught). `recoveries`
+  // (BRIEF-23) is stripped for a sharper reason still: each entry IS a
+  // one-time capability, and this projection is embedded verbatim in every
+  // room page's INITIAL_ROOM — an unspent token on the wire hands the room's
+  // own members the identity the link exists to protect.
+  const { deliveries: _stripped, recoveries: _recoveries, ...publicRoom } = room
   void _stripped
+  void _recoveries
   // A box last confirmed dead (`artifactReady === false`, the idle sweep's
   // probe) advertises no URL at all — the page shows its paused/self-heal
   // state instead of a clickable dead link (the dead-artifact finding).
@@ -591,20 +596,9 @@ async function handleRoomSend(
 
 /** The refusal message for a name someone else holds, shared by the claim
  *  exchange and the send path so the page renders it from either (brief A:
- *  a distinct outcome the UI can render, not a generic 500). */
-const NAME_TAKEN_MESSAGE = "ce nom est déjà pris dans cette room — choisis-en un autre"
-
-/** BRIEF-21: the OTHER `name-claimed` situation — this browser once held the
- *  name, but the secret it presented did not match. Rendered as a different
- *  sentence from `NAME_TAKEN_MESSAGE`, because "pick another name" is the
- *  wrong instruction for someone who already owns this one; a wrong-secret
- *  refusal names the state without building the recovery path (brief 23). */
-const NAME_STALE_MESSAGE =
-  "ce nom est le tien, mais ce navigateur ne peut plus le prouver — choisis un autre nom pour l'instant"
-
-function nameClaimedMessage(reason: NameClaimedReason): string {
-  return reason === "stale" ? NAME_STALE_MESSAGE : NAME_TAKEN_MESSAGE
-}
+ *  a distinct outcome the UI can render, not a generic 500). BRIEF-23 moved
+ *  it to room-service.ts, beside the identity-recovery request that reuses
+ *  it, and this file imports it from there. */
 
 /** `POST /rooms/:code/claim` (PLAN-02 §3-D3 amended) — the browser's join
  *  handshake. The page sends the name it typed plus the join secret it holds
@@ -697,6 +691,61 @@ async function handleRoomClaim(
     displayName: outcome.member.displayName,
     memberToken: outcome.token,
     ...(outcome.claim !== undefined ? { claim: outcome.claim } : {}),
+  })
+}
+
+/** `POST /rooms/:code/recover` (BRIEF-23) — redeem a one-time identity-
+ *  recovery pointer. The token and the name it was issued for are the whole
+ *  request; success hands back the member's own claim, which the page stores
+ *  under the same `rdv-claim:<code>:<name>` key a first claim would have, so
+ *  everything downstream is the ordinary claim path. The refusal bodies name
+ *  the situation (`invalid_token`, `expired_token`, `wrong_member`) rather
+ *  than collapsing to one 409 — the same distinction `name_claimed`'s
+ *  `reason` exists for. */
+async function handleRoomRecover(
+  service: RoomService,
+  req: IncomingMessage,
+  res: ServerResponse,
+  encodedCode: string,
+): Promise<void> {
+  const code = decodeURIComponent(encodedCode)
+  const body = await readJsonBody(req)
+  if (!isRecord(body)) {
+    sendJson(res, 400, { error: "invalid_body" })
+    return
+  }
+  const token = stringField(body, "token")
+  const displayName = stringField(body, "displayName")
+  if (
+    token === undefined ||
+    token.trim().length === 0 ||
+    displayName === undefined ||
+    displayName.trim().length === 0
+  ) {
+    sendJson(res, 400, { error: "invalid_body" })
+    return
+  }
+  const outcome = await service.redeemIdentityRecovery(code, token.trim(), displayName)
+  if (outcome.kind === "unknown-code") {
+    sendJson(res, 404, { error: "not_found" })
+    return
+  }
+  if (outcome.kind === "invalid") {
+    sendJson(res, 409, { error: "invalid_token" })
+    return
+  }
+  if (outcome.kind === "expired") {
+    sendJson(res, 409, { error: "expired_token" })
+    return
+  }
+  if (outcome.kind === "wrong-member") {
+    sendJson(res, 409, { error: "wrong_member" })
+    return
+  }
+  sendJson(res, 200, {
+    memberId: outcome.member.id,
+    displayName: outcome.member.displayName,
+    claim: outcome.claim,
   })
 }
 
@@ -1438,6 +1487,17 @@ async function handle(
     return
   }
 
+  const recoverMatch = /^\/rooms\/([^/]+)\/recover$/.exec(url.pathname)
+  if (recoverMatch !== null && req.method === "POST") {
+    const encodedCode = recoverMatch[1]
+    if (encodedCode === undefined) {
+      sendJson(res, 400, { error: "invalid_code" })
+      return
+    }
+    await handleRoomRecover(service, req, res, encodedCode)
+    return
+  }
+
   const sendMatch = /^\/rooms\/([^/]+)\/send$/.exec(url.pathname)
   if (sendMatch !== null && req.method === "POST") {
     const encodedCode = sendMatch[1]
@@ -1497,6 +1557,23 @@ export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHoo
     storedRender: getStoredRender,
     // Assertion 2 (BRIEF-15, post-turn-assertions).
     reportAssertion: (room, assertion, detail) => service.reportAssertion(room, assertion, detail),
+    // BRIEF-23: `recover_identity` routes to the one recovery path, whose
+    // result is reduced to a status (`unknown` folds the two not-found arms)
+    // so the tool result carries no URL — see `RECOVER_TOOL`.
+    recoverIdentity: async (code, memberId) => {
+      const outcome = await service.requestIdentityRecovery(code, memberId)
+      switch (outcome.kind) {
+        case "sent":
+          return "sent"
+        case "no-surface":
+          return "no-surface"
+        case "conflict":
+          return "conflict"
+        case "unknown-code":
+        case "unknown-member":
+          return "unknown"
+      }
+    },
   })
   const mcpPersonal = createMcpPersonalHandler({
     rooms: () => service.listRooms(),

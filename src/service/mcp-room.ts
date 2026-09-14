@@ -152,6 +152,17 @@ export interface McpRoomDeps {
    *  just means the fact goes unreported, same as omitting `storedRender`
    *  degrades `room_view` — never a throw. */
   readonly reportAssertion?: (room: Room, assertion: PostTurnAssertion, detail: string) => Promise<void>
+  /** BRIEF-23: the sink behind `recover_identity`. It resolves the member
+   *  server-side, mints the one-time link and sends it to that member's own
+   *  surface; the tool only ever learns a status, never the URL (file-top
+   *  HARD RULE). A narrow status union rather than the service's outcome
+   *  type keeps this adapter free of a `room-service` import cycle
+   *  (`room-service` imports `memberToken`/`tokensMatch` from here).
+   *  Omitting it leaves `recover_identity` unadvertised and uncallable. */
+  readonly recoverIdentity?: (
+    code: string,
+    memberId: string,
+  ) => Promise<"sent" | "no-surface" | "conflict" | "unknown">
 }
 
 // --- JSON-RPC / MCP wire handling: same hand-rolled surface as canvakit's
@@ -234,6 +245,30 @@ const WHISPER_TOOL = {
       to: { type: "string", description: "The member_id to whisper to, from roster." },
     },
     required: ["text", "to"],
+  },
+} as const
+
+/** `recover_identity` (BRIEF-23) — the one way back for a member whose own
+ *  name refuses them because the browser that held the claim secret is gone.
+ *  The link is minted and sent server-side to that member's OWN proven
+ *  surface; the agent names WHO, never where, so it can never hand the
+ *  capability to an address it chose. The result carries ids/status only —
+ *  never the URL: `tools/call` results are projected on the room's shared
+ *  screen (file-top HARD RULE), and a capability shown to the room is a
+ *  capability given to the room. */
+const RECOVER_TOOL = {
+  name: "recover_identity",
+  description:
+    "When a member says they cannot get back into the web page under their name — they lost their link, changed device or browser, or cleared their data — call this with their member_id (from roster). The room sends a one-time recovery link to that member's OWN surface (the one they are already talking to you on), never to anywhere else, and the link restores only their own name. Returns {sent: true} or {sent: false, reason}. Do not paste any link yourself and do not promise anyone a name they did not already hold: a name someone else holds stays theirs.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      member_id: {
+        type: "string",
+        description: "member_id from roster — the member asking to get their web name back.",
+      },
+    },
+    required: ["member_id"],
   },
 } as const
 
@@ -438,7 +473,10 @@ export function createMcpRoomHandler(
       // projection, never member-scoped) so it is always advertised, unlike
       // `say`/`whisper` below.
       const base = [ROSTER_TOOL, ROOM_VIEW_TOOL]
-      const tools = deps.deliveries === undefined ? base : [...base, SAY_TOOL, WHISPER_TOOL]
+      const tools =
+        deps.deliveries === undefined
+          ? base
+          : [...base, SAY_TOOL, WHISPER_TOOL, ...(deps.recoverIdentity !== undefined ? [RECOVER_TOOL] : [])]
       return ok(id, { tools })
     }
 
@@ -521,6 +559,35 @@ export function createMcpRoomHandler(
           )
         }
         return ok(id, acceptResult(outcome))
+      }
+
+      if (params.name === RECOVER_TOOL.name) {
+        const recover = deps.recoverIdentity
+        if (recover === undefined) {
+          return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(params.name)}`)
+        }
+        const args = isRecord(params.arguments) ? params.arguments : {}
+        const memberId = typeof args.member_id === "string" ? args.member_id : undefined
+        if (memberId === undefined || memberId.length === 0) {
+          return fail(id, INVALID_REQUEST, "recover_identity requires a member_id")
+        }
+        const status = await recover(room.code, memberId)
+        return ok(id, {
+          content: [
+            {
+              type: "text",
+              // Status and the named member id only — see RECOVER_TOOL's doc:
+              // this result is projected on the room's shared screen, and the
+              // recovery URL must never appear in it.
+              text: JSON.stringify(
+                status === "sent"
+                  ? { sent: true, member_id: memberId }
+                  : { sent: false, member_id: memberId, reason: status },
+              ),
+            },
+          ],
+          isError: false,
+        })
       }
 
       return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(params.name)}`)
