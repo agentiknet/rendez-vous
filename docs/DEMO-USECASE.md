@@ -31,7 +31,8 @@ and the live artifact in one view.
 2. Open the room page on the projected screen and type a name in "Your name"
    (e.g. `Le client`). Nothing is sent until you send.
 3. Check the agent answers once (`ping`), so the box is warm. A cold boot
-   takes ~30s and you don't want that on stage.
+   took **58s** measured on 2026-09-14 (the older "~30s" in this file was
+   stale) and you really don't want that on stage.
 
 ## The script
 
@@ -60,9 +61,16 @@ Attention, à 1200 € en mars on ne tient pas l'hôtel du centre.
 Soit on sort du centre, soit on passe à 1500.
 ```
 
-→ The agent does NOT ask everyone to agree and wait. It picks a path, says in
-one line what it chose and why, and **addresses each of you by name** so
-nobody has to guess which half is theirs.
+→ The agent does NOT ask everyone to agree and wait. It **picks a path and
+says in one line what it chose and why**, naming the constraint that forced
+it — and it says it to the whole room, because an arbitration between two
+people's constraints changes the shared plan.
+
+That broadcast is the correct behaviour, not a shortcut: the agent's rule is
+that a decision changing the shared plan goes to everyone, and that anything
+concerning one person goes to that person alone. Beat 4 is where you show the
+second half. Do not promise per-person answers here — measured twice on
+2026-09-14, the agent broadcasts the arbitration, and it is right to.
 
 **This is the first thing that is actually hard.** Two humans just gave one
 agent contradictory constraints, from two phones, in the same second.
