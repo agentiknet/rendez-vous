@@ -645,6 +645,13 @@ function callInviteTool(
   if (roomSlug.length === 0) {
     return fail(id, INVALID_PARAMS, "rendezvous_invite: arguments.roomSlug must be a room slug you are a member of")
   }
+  if (normalizeCode(roomSlug) !== undefined) {
+    // A code-shaped argument is refused by SHAPE, before membership, exactly
+    // as callSendTool positions the same guard: this is the ONE tool whose
+    // whole payload IS the join capability, so it is the last place to rely
+    // on the accident that a code never matches a three-word slug.
+    return codeShapedRefusal(id)
+  }
 
   const match = matchPrincipalRoom(deps, principal, normalizeSlug(roomSlug))
   if (match === undefined) return membershipRefusal(id, roomSlug)
@@ -679,6 +686,12 @@ async function callDrainTool(
   if (roomSlug.length === 0) {
     return fail(id, INVALID_PARAMS, "rendezvous_drain: arguments.roomSlug must be a room slug you are a member of")
   }
+  if (normalizeCode(roomSlug) !== undefined) {
+    // Same guard, same position as callSendTool/callInviteTool: refused by
+    // SHAPE, before membership — a code-shaped argument is a different
+    // mistake from "not a member" and must not be accepted as a slug.
+    return codeShapedRefusal(id)
+  }
   const sinceGiven = args.since !== undefined
   if (sinceGiven && (typeof args.since !== "number" || !Number.isInteger(args.since) || args.since < 0)) {
     return fail(id, INVALID_PARAMS, "rendezvous_drain: arguments.since must be a non-negative integer when given")
@@ -712,6 +725,11 @@ async function callAckTool(
   const roomSlug = typeof args.roomSlug === "string" ? args.roomSlug.trim() : ""
   if (roomSlug.length === 0) {
     return fail(id, INVALID_PARAMS, "rendezvous_ack: arguments.roomSlug must be a room slug you are a member of")
+  }
+  if (normalizeCode(roomSlug) !== undefined) {
+    // Same guard, same position as callSendTool/callInviteTool/callDrainTool:
+    // refused by SHAPE, before membership.
+    return codeShapedRefusal(id)
   }
   const seq = args.seq
   if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) {

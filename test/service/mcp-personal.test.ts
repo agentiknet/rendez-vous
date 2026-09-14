@@ -954,3 +954,52 @@ test("rendezvous_invite for a room the principal is not a member of gets the SAM
     "one wording, shared — never a second version of the same refusal",
   )
 })
+
+// --- The code-shaped guard: rendezvous_invite is the one tool whose whole
+// payload IS the join capability, so it must not rely on the accident that a
+// code never matches a slug — and neither should drain/ack. --------------
+
+test("rendezvous_invite refuses a room CODE with the SAME code-shaped message rendezvous_send gives, never the membership one", async () => {
+  const { service, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+
+  const invite = asRpc(await callInvite(handler, bearerFor(ALICE), { roomSlug: created.room.code }))
+  const send = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomSlug: created.room.code, text: "hello" }))
+
+  assert.notEqual(invite.status, 401, "the token is good; the ARGUMENT is the wrong shape")
+  assert.ok(invite.error !== undefined, "never a silent no-op")
+  assert.equal(invite.error?.message, send.error?.message, "one wording, shared — never a second version")
+  assert.ok(!/not a member/i.test(invite.error?.message ?? ""), "a code-shaped argument is not a membership question")
+})
+
+test("rendezvous_drain refuses a room CODE with the SAME code-shaped message rendezvous_send gives, never the membership one", async () => {
+  const { service, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+
+  const drain = asRpc(await callDrain(handler, bearerFor(ALICE), { roomSlug: created.room.code }))
+  const send = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomSlug: created.room.code, text: "hello" }))
+
+  assert.notEqual(drain.status, 401, "the token is good; the ARGUMENT is the wrong shape")
+  assert.ok(drain.error !== undefined, "never a silent no-op")
+  assert.equal(drain.error?.message, send.error?.message, "one wording, shared — never a second version")
+  assert.ok(!/not a member/i.test(drain.error?.message ?? ""), "a code-shaped argument is not a membership question")
+})
+
+test("rendezvous_ack refuses a room CODE with the SAME code-shaped message rendezvous_send gives, never the membership one", async () => {
+  const { service, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+
+  const ack = asRpc(await callAck(handler, bearerFor(ALICE), { roomSlug: created.room.code, seq: 1 }))
+  const send = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomSlug: created.room.code, text: "hello" }))
+
+  assert.notEqual(ack.status, 401, "the token is good; the ARGUMENT is the wrong shape")
+  assert.ok(ack.error !== undefined, "never a silent no-op")
+  assert.equal(ack.error?.message, send.error?.message, "one wording, shared — never a second version")
+  assert.ok(!/not a member/i.test(ack.error?.message ?? ""), "a code-shaped argument is not a membership question")
+})
