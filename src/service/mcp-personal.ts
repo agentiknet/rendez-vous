@@ -43,6 +43,7 @@ import { deliverySeqOf, pullMemberStale, type Address, type Member, type Room, t
 import { normalizeSlug } from "../rooms/words.ts"
 import { bearerOf, tokensMatch } from "./mcp-room.ts"
 import { rosterPanelHtml } from "./roster-panel.html.ts"
+import type { OutboxPayload } from "./outbox.ts"
 import type { McpResponse } from "./mcp-canvakit.ts"
 
 /** What a principal token is allowed to do (BRIEF-19, AMENDMENT 2). The
@@ -145,6 +146,25 @@ export interface McpPersonalDeps {
    *  surface, unchanged — exactly as `McpRoomDeps.deliveries` gates
    *  `say`/`whisper`. */
   readonly sendInbound?: PersonalInboundSend
+  /** The listening half (BRIEF-12): `rendezvous_drain`/`rendezvous_ack`, plus
+   *  the lazy creation of the panel's own stable `room-web` member. Omitted
+   *  leaves both unadvertised, exactly as `sendInbound` gates the send. */
+  readonly roomRead?: PersonalRoomRead
+}
+
+/** What the personal mount needs to let a principal READ a room it is a
+ *  member of, as its own `room-web` screen (BRIEF-12). Every field is
+ *  injected from the service, so the personal mount reuses the one outbox
+ *  filter and the one cursor writer rather than a second of either. */
+export interface PersonalRoomRead {
+  /** One member's own deliveries — the existing `outboxFor` (outbox.ts),
+   *  verbatim: same per-member filter, same `pruned` honesty. */
+  readonly drain: (roomCode: string, memberId: string, since: number, sinceGiven: boolean) => OutboxPayload
+  /** The existing cursor writer (`DeliveryEngine.ackCursor`), verbatim. */
+  readonly ackCursor: (roomCode: string, memberId: string, seq: number) => Promise<"applied" | "ignored">
+  /** Resolve-or-create the principal's stable `room-web` member in a room
+   *  (`RoomService.ensureRoomWebMember`). Called only from a drain/ack. */
+  readonly ensureRoomWebMember: (roomCode: string, address: Address, displayName: string) => Promise<Member>
 }
 
 // --- JSON-RPC / MCP wire handling: mcp-room.ts's dialect, unchanged. ----
@@ -204,6 +224,51 @@ const RENDEZVOUS_SEND_TOOL = {
       text: { type: "string", description: "The message, in your own voice." },
     },
     required: ["roomSlug", "text"],
+  },
+} as const
+
+/** `rendezvous_drain` (BRIEF-12) — this mount's one LISTENING tool: the
+ *  member's own deliveries, the transcript the person could not otherwise
+ *  hear. Keyed by `roomSlug` (BRIEF-20: the slug identifies) and authorised
+ *  by the principal token; the principal's own `room-web` member is resolved
+ *  or created server-side, so the panel never holds a room credential.
+ *
+ *  ⚠️ THE DELIBERATE EXCEPTION TO THIS FILE'S HARD RULE. Every other result
+ *  on this mount carries ids, counts and slugs — NEVER message text. This
+ *  one returns `deliveries`, which carry `text`, because a transcript is the
+ *  entire point of the tool: "you have no way to hear the answer" is the
+ *  defect BRIEF-12 exists to fix. It is scoped server-side to THIS member
+ *  (`outboxFor`'s per-member filter) and reads only the caller's own mail.
+ *  Do not "fix" it back to ids-only; that would delete the feature. */
+const RENDEZVOUS_DRAIN_TOOL = {
+  name: "rendezvous_drain",
+  description:
+    "Read YOUR OWN undelivered records in one of the rooms you are a member of, addressed by `roomSlug`. Returns {memberId, cursor, pruned, deliveries}; each delivery carries the message text. This is your private mail in that room, never anyone else's. Pass `since` (the highest seq you have already RENDERED) to fetch only what is new; omit it to get everything retained. `pruned: true` means records below `since` were already dropped and cannot be recovered.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      roomSlug: { type: "string", description: "A room slug from rendezvous_list — one you are a member of." },
+      since: { type: "number", description: "The highest delivery seq you have already rendered. Omit for everything retained." },
+    },
+    required: ["roomSlug"],
+  },
+} as const
+
+/** `rendezvous_ack` (BRIEF-12) — record the highest seq the caller has
+ *  actually RENDERED. This is a liveness statement about the READER, not a
+ *  write into the room, so it needs only the read capability. Monotonic
+ *  server-side: an ack that would move backwards is ignored, not an error. */
+const RENDEZVOUS_ACK_TOOL = {
+  name: "rendezvous_ack",
+  description:
+    "Acknowledge that you have RENDERED every record up to `seq` in `roomSlug`. Ack the highest seq you actually rendered, AFTER rendering it — never what you merely fetched. The ack is what keeps your room-web membership live (a member that stops acking goes stale after 90s) and what lets the room prune what you have already read. Returns {applied, ackedSeq}.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      roomSlug: { type: "string", description: "A room slug from rendezvous_list — one you are a member of." },
+      seq: { type: "number", description: "The highest delivery seq you have actually rendered." },
+    },
+    required: ["roomSlug", "seq"],
   },
 } as const
 
@@ -482,8 +547,7 @@ async function callSendTool(
   }
 
   const normalized = normalizeSlug(roomSlug)
-  const matches = matchesOf(deps.findByAddress(principal.address))
-  const match = matches.find((candidate) => normalizeSlug(candidate.room.slug) === normalized)
+  const match = matchPrincipalRoom(deps, principal, normalized)
   if (match === undefined) return membershipRefusal(id, roomSlug)
 
   const outcome = await sendInbound({
@@ -496,6 +560,98 @@ async function callSendTool(
     text,
   })
   return ok(id, sendResult(match.room.slug, match.member.id, outcome))
+}
+
+/** The principal's membership in the room a (normalized) slug names, if any.
+ *  THE one principal→membership resolution on this mount: `rendezvous_send`,
+ *  `rendezvous_drain` and `rendezvous_ack` all go through it, so there is no
+ *  second path to drift. */
+function matchPrincipalRoom(
+  deps: McpPersonalDeps,
+  principal: ResolvedPrincipal,
+  normalizedSlug: string,
+): AddressMatch | undefined {
+  const matches = matchesOf(deps.findByAddress(principal.address))
+  return matches.find((candidate) => normalizeSlug(candidate.room.slug) === normalizedSlug)
+}
+
+/** `rendezvous_drain`'s whole body. Resolves membership exactly as send does,
+ *  materialises the principal's stable `room-web` member (lazily — this is
+ *  the ONLY creator), then returns that member's own outbox through the one
+ *  existing filter. It deliberately does NOT ack: rendering happens in the
+ *  client, and only the client knows what it actually RENDERED. */
+async function callDrainTool(
+  deps: McpPersonalDeps,
+  principal: ResolvedPrincipal,
+  params: Record<string, unknown>,
+  id: string | number | null,
+): Promise<McpResponse> {
+  const roomRead = deps.roomRead
+  if (roomRead === undefined) {
+    return fail(id, METHOD_NOT_FOUND, `unknown tool: ${RENDEZVOUS_DRAIN_TOOL.name}`)
+  }
+
+  const args = isRecord(params.arguments) ? params.arguments : {}
+  const roomSlug = typeof args.roomSlug === "string" ? args.roomSlug.trim() : ""
+  if (roomSlug.length === 0) {
+    return fail(id, INVALID_PARAMS, "rendezvous_drain: arguments.roomSlug must be a room slug you are a member of")
+  }
+  const sinceGiven = args.since !== undefined
+  if (sinceGiven && (typeof args.since !== "number" || !Number.isInteger(args.since) || args.since < 0)) {
+    return fail(id, INVALID_PARAMS, "rendezvous_drain: arguments.since must be a non-negative integer when given")
+  }
+  const since = sinceGiven && typeof args.since === "number" ? args.since : 0
+
+  const match = matchPrincipalRoom(deps, principal, normalizeSlug(roomSlug))
+  if (match === undefined) return membershipRefusal(id, roomSlug)
+
+  const member = await roomRead.ensureRoomWebMember(match.room.code, principal.address, match.member.displayName)
+  const payload = roomRead.drain(match.room.code, member.id, since, sinceGiven)
+  return ok(id, { content: [{ type: "text", text: JSON.stringify(payload) }], isError: false })
+}
+
+/** `rendezvous_ack`'s whole body. Same resolution and same stable member as
+ *  drain, then the ONE cursor writer. Allowed on the read capability: an ack
+ *  is a liveness statement about the reader, not a word spoken into the
+ *  room. */
+async function callAckTool(
+  deps: McpPersonalDeps,
+  principal: ResolvedPrincipal,
+  params: Record<string, unknown>,
+  id: string | number | null,
+): Promise<McpResponse> {
+  const roomRead = deps.roomRead
+  if (roomRead === undefined) {
+    return fail(id, METHOD_NOT_FOUND, `unknown tool: ${RENDEZVOUS_ACK_TOOL.name}`)
+  }
+
+  const args = isRecord(params.arguments) ? params.arguments : {}
+  const roomSlug = typeof args.roomSlug === "string" ? args.roomSlug.trim() : ""
+  if (roomSlug.length === 0) {
+    return fail(id, INVALID_PARAMS, "rendezvous_ack: arguments.roomSlug must be a room slug you are a member of")
+  }
+  const seq = args.seq
+  if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) {
+    return fail(id, INVALID_PARAMS, "rendezvous_ack: arguments.seq must be a non-negative integer")
+  }
+
+  const match = matchPrincipalRoom(deps, principal, normalizeSlug(roomSlug))
+  if (match === undefined) return membershipRefusal(id, roomSlug)
+
+  const member = await roomRead.ensureRoomWebMember(match.room.code, principal.address, match.member.displayName)
+  const outcome = await roomRead.ackCursor(match.room.code, member.id, seq)
+  return ok(id, {
+    content: [
+      {
+        type: "text",
+        // `ackCursor` mutates `member` in place when it applies, so the
+        // member's field is the effective cursor either way — the same
+        // answer the HTTP cursor route returns.
+        text: JSON.stringify({ applied: outcome === "applied", ackedSeq: member.ackedSeq ?? 0 }),
+      },
+    ],
+    isError: false,
+  })
 }
 
 /**
@@ -535,10 +691,15 @@ export function createMcpPersonalHandler(
     if (method === "tools/list") {
       // `rendezvous_send` is advertised only when something can perform it,
       // exactly as `say`/`whisper` are gated on `deps.deliveries`
-      // (mcp-room.ts). Capability is NOT a listing concern: a read-only
-      // token still sees the tool and still gets a refusal that names why,
-      // which is strictly more useful than a tool that vanishes.
-      const tools = deps.sendInbound === undefined ? [RENDEZVOUS_LIST_TOOL] : [RENDEZVOUS_LIST_TOOL, RENDEZVOUS_SEND_TOOL]
+      // (mcp-room.ts). The BRIEF-12 read tools are gated the same way on
+      // `deps.roomRead`. Capability is NOT a listing concern: a read-only
+      // token still sees the tools it can use and still gets a refusal that
+      // names why for the one it cannot.
+      const tools = [
+        RENDEZVOUS_LIST_TOOL,
+        ...(deps.sendInbound !== undefined ? [RENDEZVOUS_SEND_TOOL] : []),
+        ...(deps.roomRead !== undefined ? [RENDEZVOUS_DRAIN_TOOL, RENDEZVOUS_ACK_TOOL] : []),
+      ]
       return ok(id, { tools })
     }
 
@@ -620,6 +781,14 @@ export function createMcpPersonalHandler(
 
       if (params.name === RENDEZVOUS_SEND_TOOL.name) {
         return callSendTool(deps, principal, params, id)
+      }
+
+      if (params.name === RENDEZVOUS_DRAIN_TOOL.name) {
+        return callDrainTool(deps, principal, params, id)
+      }
+
+      if (params.name === RENDEZVOUS_ACK_TOOL.name) {
+        return callAckTool(deps, principal, params, id)
       }
 
       return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(params.name)}`)

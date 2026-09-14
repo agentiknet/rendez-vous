@@ -33,6 +33,27 @@ function memberFacingArtifactUrl(room: Room): string | undefined {
   return publicArtifactUrl(room.code)
 }
 
+/** The address a principal's PANEL member carries in a room (BRIEF-12): a
+ *  `room-web` pull member DERIVED from the principal's own address, so a
+ *  second drain in the same room finds the same member. The contactRef is
+ *  namespaced with the principal's provider so it can never collide with a
+ *  browser's claimed name (`resolveRoomWebMember` keys those by
+ *  `slugify(displayName)`), and `addMember`'s in-room `sameAddress` match is
+ *  what makes it stable.
+ *
+ *  This is deliberately NOT the `claimRoomWeb` mechanism: the panel holds no
+ *  claim secret (BRIEF-12 decision 3 — no token, no claim, no room CODE
+ *  reaches it), and `resolveRoomWebMember` both keys identity by
+ *  `slugify(displayName)` and refuses a claim-bearing member to any caller
+ *  that does not present the secret, so it cannot serve a secret-less
+ *  caller. Keying the membership directly by the principal (provider +
+ *  contactRef) is possible precisely because the service resolves
+ *  principal → membership server-side; that is the forced, and sufficient,
+ *  second mechanism. */
+function principalRoomWebAddress(address: Address): Address {
+  return { provider: "room-web", source: "room-web", contactRef: `${address.provider}:${address.contactRef}` }
+}
+
 export interface InboundInput {
   address: Address
   displayName: string
@@ -562,6 +583,29 @@ export class RoomService {
   findByAddress(address: Address): AddressLookup {
     return this.store.findByAddress(address)
   }
+
+  /** The stable `room-web` pull member a principal's panel drains in a room
+   *  (BRIEF-12). Called ONLY by `rendezvous_drain` (and the ack that follows
+   *  it) — never by `rendezvous_list`, never at panel load: opening a
+   *  directory must not join the person to every room it lists.
+   *
+   *  Uses `store.addMember` directly, NOT `ensureMembership`: the latter
+   *  MOVES a member off whatever other room its address is in, which is right
+   *  for a person joining by code but wrong here — the same principal may
+   *  drain several rooms at once, and each room needs its own stable screen
+   *  member (BRIEF-12 decision 1: one per (principal, room)). `addMember`
+   *  matches within THIS room by address, so repeated drains find the same
+   *  member and no cross-room move ever happens. */
+  async ensureRoomWebMember(code: string, address: Address, displayName: string): Promise<Member> {
+    const room = this.store.get(code)
+    if (room === undefined) throw new Error(`unknown room: ${code}`)
+    return this.store.addMember(room.code, {
+      displayName,
+      tier: "room-web",
+      address: principalRoomWebAddress(address),
+    })
+  }
+
 
   /** Whether some room already has a member at this provider+contactRef,
    *  regardless of which room's code that member joined under (a member's

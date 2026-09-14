@@ -7,10 +7,12 @@ import { env } from "../../src/env.ts"
 import { DaemonClient } from "../../src/daemon/client.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import type { Address, Delivery, Tier } from "../../src/rooms/types.ts"
+import { deliveryModeOf } from "../../src/rooms/types.ts"
 import { LocalBooter } from "../../src/service/booter.ts"
 import { MediaStore } from "../../src/service/media-store.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
+import { outboxFor } from "../../src/service/outbox.ts"
 import type { McpResponse } from "../../src/service/mcp-canvakit.ts"
 import { createMcpRoomHandler, roomAudienceToken, type McpRoomDeps } from "../../src/service/mcp-room.ts"
 import { createMcpPersonalHandler, principalToken, type McpPersonalDeps } from "../../src/service/mcp-personal.ts"
@@ -90,6 +92,20 @@ async function buildSendHarness(): Promise<SendHarness> {
     rooms: () => store.list(),
     findByAddress: (address) => store.findByAddress(address),
     sendInbound: (input) => service.handleInbound(input),
+    // BRIEF-12: the listening half, wired exactly as http.ts wires it — the
+    // one `outboxFor`, the one `ackCursor`, and the service's stable
+    // room-web membership.
+    roomRead: {
+      drain: (roomCode, memberId, since, sinceGiven) => {
+        const room = store.get(roomCode)
+        if (room === undefined) throw new Error(`unknown room: ${roomCode}`)
+        const member = room.members.find((candidate) => candidate.id === memberId)
+        if (member === undefined) throw new Error(`unknown member in room ${roomCode}`)
+        return outboxFor(room, member, since, sinceGiven)
+      },
+      ackCursor: (roomCode, memberId, seq) => service.deliveryEngine.ackCursor(roomCode, memberId, seq),
+      ensureRoomWebMember: (roomCode, address, displayName) => service.ensureRoomWebMember(roomCode, address, displayName),
+    },
   })
   return { service, store, daemon, handler }
 }
@@ -616,4 +632,193 @@ test("a read-only principal token still works on rendezvous_list, and the send-c
     read.rooms.map((room) => room.slug),
     "a send-capable token must see exactly what a read-only one sees",
   )
+})
+
+// --- BRIEF-12: the panel stops being a directory and becomes a device. ---
+
+function callDrain(
+  handler: ReturnType<typeof createMcpPersonalHandler>,
+  authorization: string | undefined,
+  args: { roomSlug: string; since?: number },
+): Promise<McpResponse> {
+  return handler(
+    { jsonrpc: "2.0", id: 11, method: "tools/call", params: { name: "rendezvous_drain", arguments: args } },
+    authorization,
+  )
+}
+
+function callAck(
+  handler: ReturnType<typeof createMcpPersonalHandler>,
+  authorization: string | undefined,
+  args: { roomSlug: string; seq: number },
+): Promise<McpResponse> {
+  return handler(
+    { jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "rendezvous_ack", arguments: args } },
+    authorization,
+  )
+}
+
+function callToolsList(
+  handler: ReturnType<typeof createMcpPersonalHandler>,
+  authorization: string | undefined,
+): Promise<McpResponse> {
+  return handler({ jsonrpc: "2.0", id: 13, method: "tools/list", params: {} }, authorization)
+}
+
+interface DrainPayload {
+  memberId: string
+  cursor: number
+  pruned: boolean
+  deliveries: { id: string; memberId: string; kind: string; text: string }[]
+}
+
+function drainPayload(res: McpResponse): DrainPayload {
+  return JSON.parse(contentTextOf(asRpc(res))) as DrainPayload
+}
+
+function ackPayload(res: McpResponse): { applied: boolean; ackedSeq: number } {
+  return JSON.parse(contentTextOf(asRpc(res))) as { applied: boolean; ackedSeq: number }
+}
+
+function toolNames(res: McpResponse): string[] {
+  const rpc = asRpc(res)
+  const tools = rpc.result?.tools
+  if (!Array.isArray(tools)) return []
+  const names: string[] = []
+  for (const tool of tools) {
+    if (isRecord(tool) && typeof tool.name === "string") names.push(tool.name)
+  }
+  return names
+}
+
+function roomWebMembers(store: RoomStore, code: string): readonly { id: string; displayName: string }[] {
+  const room = store.get(code)
+  if (room === undefined) return []
+  return room.members.filter((member) => member.address.provider === "room-web")
+}
+
+test("rendezvous_drain/rendezvous_ack are advertised only when the mount can perform them", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  await store.addMember(room.code, { displayName: "Alice", tier: "messenger", address: ALICE })
+
+  // The BRIEF-18 surface with no listener wired: neither tool exists.
+  const plain = createMcpPersonalHandler(deps(store))
+  assert.deepEqual(toolNames(await callToolsList(plain, bearerFor(ALICE))), ["rendezvous_list"])
+
+  const { handler } = await buildSendHarness()
+  const names = toolNames(await callToolsList(handler, bearerFor(ALICE)))
+  assert.ok(names.includes("rendezvous_drain") && names.includes("rendezvous_ack"), `got: ${names.join(", ")}`)
+  assert.ok(names.includes("rendezvous_send"), "the send tool remains advertised alongside them")
+})
+
+test("a drain for a principal with no membership in that room refuses with the SAME message rendezvous_send gives", async () => {
+  const { service, store, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+
+  const stranger = await store.create()
+  await store.addMember(stranger.code, {
+    displayName: "Bob",
+    tier: "messenger",
+    address: { provider: "telegram", source: "telegram", contactRef: "+15550002222" },
+  })
+
+  const drain = asRpc(await callDrain(handler, bearerFor(ALICE), { roomSlug: stranger.slug }))
+  const send = asRpc(await callSend(handler, sendBearerFor(ALICE), { roomSlug: stranger.slug, text: "hello?" }))
+
+  assert.notEqual(drain.status, 401, "a good credential naming the wrong room is not an authentication failure")
+  assert.ok(drain.error !== undefined, "never a silent no-op")
+  assert.ok(/member/i.test(drain.error?.message ?? ""), "the refusal must name membership")
+  assert.equal(
+    drain.error?.message,
+    send.error?.message,
+    "one wording, shared — never a second version of the same refusal",
+  )
+})
+
+test("a drain never auto-acks, and the first drain creates exactly one STABLE, pull room-web member", async () => {
+  const { service, store, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+  const code = created.room.code
+
+  // A directory read must never join anyone.
+  await callList(handler, bearerFor(ALICE))
+  assert.equal(roomWebMembers(store, code).length, 0, "rendezvous_list must create no membership")
+
+  const first = drainPayload(await callDrain(handler, bearerFor(ALICE), { roomSlug: created.room.slug }))
+  assert.equal(roomWebMembers(store, code).length, 1, "the first drain creates exactly one room-web member")
+  const created2 = roomWebMembers(store, code)[0]
+  assert.ok(created2 !== undefined)
+  assert.equal(created2.displayName, "Alice", "the member wears the principal's display name")
+
+  const member = store.get(code)?.members.find((candidate) => candidate.id === first.memberId)
+  assert.ok(member !== undefined)
+  assert.equal(deliveryModeOf(member), "pull", "a screen drains, it is not pushed to")
+  assert.equal(member.ackedSeq, undefined, "a drain must never ack — only the renderer may")
+  assert.equal(member.ackedAt, undefined, "and no liveness is manufactured by a read")
+
+  // Stability: a second drain finds the same member, not a new one.
+  const second = drainPayload(await callDrain(handler, bearerFor(ALICE), { roomSlug: created.room.slug }))
+  assert.equal(roomWebMembers(store, code).length, 1, "a second drain must not mint a second member")
+  assert.equal(second.memberId, first.memberId, "the member id is stable across drains")
+})
+
+test("a drain returns only that member's own deliveries and never another member's", async () => {
+  const { service, store, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+  const code = created.room.code
+
+  const first = drainPayload(await callDrain(handler, bearerFor(ALICE), { roomSlug: created.room.slug }))
+  const mine = first.memberId
+  const bob = await store.addMember(code, {
+    displayName: "Bob",
+    tier: "messenger",
+    address: { provider: "telegram", source: "telegram", contactRef: "+15550002222" },
+  })
+  await store.update(code, {
+    deliveries: [delivery("d1", mine, "mine one"), delivery("d2", bob.id, "bob's"), delivery("d3", mine, "mine two")],
+  })
+
+  const payload = drainPayload(await callDrain(handler, bearerFor(ALICE), { roomSlug: created.room.slug, since: 0 }))
+  assert.deepEqual(
+    payload.deliveries.map((entry) => entry.text),
+    ["mine one", "mine two"],
+    "the transcript is this member's mail, never the room's",
+  )
+  assert.ok(payload.deliveries.every((entry) => entry.memberId === mine))
+})
+
+test("an ack on the read capability moves ackedSeq and refreshes ackedAt", async () => {
+  const { service, store, handler } = await buildSendHarness()
+  const created = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(created.kind, "created")
+  if (created.kind !== "created") return
+  const code = created.room.code
+
+  const first = drainPayload(await callDrain(handler, bearerFor(ALICE), { roomSlug: created.room.slug }))
+  const before = store.get(code)?.members.find((candidate) => candidate.id === first.memberId)
+  assert.ok(before !== undefined)
+  assert.equal(before.ackedSeq, undefined)
+
+  // Read-only bearer: an ack is a liveness statement about the reader, not a
+  // word spoken into the room, so it must NOT need `principal-rw`.
+  const acked = ackPayload(await callAck(handler, bearerFor(ALICE), { roomSlug: created.room.slug, seq: 1 }))
+  assert.equal(acked.applied, true)
+  assert.equal(acked.ackedSeq, 1)
+
+  const after = store.get(code)?.members.find((candidate) => candidate.id === first.memberId)
+  assert.ok(after !== undefined)
+  assert.equal(after.ackedSeq, 1)
+  assert.ok(typeof after.ackedAt === "string" && after.ackedAt.length > 0, "the ack IS the liveness signal")
+
+  // Monotonic, server-side: a backwards ack is ignored, not an error.
+  const backwards = ackPayload(await callAck(handler, bearerFor(ALICE), { roomSlug: created.room.slug, seq: 0 }))
+  assert.equal(backwards.applied, false)
+  assert.equal(backwards.ackedSeq, 1, "the effective cursor does not rewind")
 })
