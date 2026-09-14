@@ -1466,3 +1466,24 @@ test("BRIEF-36: two inbounds in a row from the same member — the first answere
   assert.equal(warnings.length, 1, "the second inbound was genuinely unanswered — exactly one warning")
   assert.equal(warnings[0]?.member.id, aliceId)
 })
+
+test("BRIEF-36: an answer minted before the fan-out's baseline is seeded (the resume shape) still discharges the obligation — the window alone cannot see it", async () => {
+  const { service, store, transport, daemon, code, aliceId, sessionId } = await brief36Room()
+
+  // `new` already started the fan-out, seeding the assertion-4 baseline at
+  // the delivery counter as of now. Stop the reader to reproduce the resume
+  // shape: the room's own answer is minted while NO reader exists...
+  await service.stop()
+  const inbound = await service.handleInbound(alice("On en etait ou ?"))
+  assert.equal(inbound.kind, "message")
+  await service.deliveryEngine.accept(code, "say", "Room shale-lagoon-sage is back — I still have us at: le PDF envoyé.", [aliceId])
+  await service.deliveryEngine.accept(code, "system", "Room resumed. https://rdv.clipgen.co/r/shale-lagoon-sage/artifact/", [aliceId])
+
+  // ...and the reader starts AFTER the mint: the baseline is seeded past
+  // the banner, so no window can ever contain it. Discharge must therefore
+  // happen at mint time, not at window time.
+  service.start()
+  await runDaemonTurn(daemon, sessionId, store, code, 1, "reprise de la salle")
+
+  assert.equal(replyWarnings(transport).length, 0, "the mint itself answered the member — the window is not the only witness")
+})

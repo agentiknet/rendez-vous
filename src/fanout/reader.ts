@@ -178,7 +178,11 @@ export class RoomFanout {
    *  The fact is a ONE-SHOT obligation (brief 36): the production wiring
    *  consumes it on read, so the first post-turn check that runs for an
    *  inbound discharges it, and a later turn that member did not start is
-   *  never judged against it. `undefined` (the default: no wiring, no
+   *  never judged against it. It may also be discharged EARLIER, at mint
+   *  time, when a delivery addressed to that member is accepted (the
+   *  delivery engine's `onMint`): the resume banner is minted while no
+   *  reader exists and lands inside no window, so the mint itself is the
+   *  only witness that can see it. `undefined` (the default: no wiring, no
    *  inbound, or the obligation already discharged) means the fact does not
    *  exist, so the assertion is skipped — never guessed. */
   private readonly triggeredBy: (code: string) => string | undefined

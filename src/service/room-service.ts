@@ -358,17 +358,20 @@ export class RoomService {
    *  inbound message started this room's turn, set right before
    *  `handleMessage` fans it into the session and read back by the fan-out's
    *  post-turn check via `triggeredBy`. A ONE-SHOT obligation (brief 36),
-   *  not a standing property of the room: the first post-turn check that
-   *  reads it consumes it, so once the check has run for an inbound it is
-   *  discharged and a later turn that member did not start (an idle sweep,
-   *  a resume, another member's message) is never judged against it. The
-   *  old set-and-never-cleared shape made the fact mean "who most recently
+   *  not a standing property of the room, discharged by whichever comes
+   *  first: a `say`/`whisper`/`system` mint addressed to this member (the
+   *  delivery engine's `onMint` — the resume banner answers here, since it
+   *  is minted while no reader exists and no window can ever contain it),
+   *  or the first post-turn check that reads it. Once discharged, a later
+   *  turn that member did not start (an idle sweep, a resume, another
+   *  member's message) is never judged against it. The old
+   *  set-and-never-cleared shape made the fact mean "who most recently
    *  sent anything, possibly long ago", so a turn the agent ended without
-   *  speaking — after a resume banner had already answered the member —
-   *  fired "your message did not get a reply" at someone who had just been
-   *  answered: delivery reading as absence. In-process only, like
-   *  `lastSeenCursor` below — a restart loses the fact, which just means the
-   *  first turn after a restart skips the assertion rather than guessing. */
+   *  speaking — after the member had already been answered — fired "your
+   *  message did not get a reply" at someone who had just been answered:
+   *  delivery reading as absence. In-process only, like `lastSeenCursor`
+   *  below — a restart loses the fact, which just means the first turn
+   *  after a restart skips the assertion rather than guessing. */
   private readonly lastInboundMemberId = new Map<string, string>()
   private readonly idlePauseMs: number
   private readonly idleSweepMs: number
@@ -484,6 +487,18 @@ export class RoomService {
       store: this.store,
       transport: fanoutTransport,
       reportFailure: (code, correction) => this.reportToSession(code, correction),
+      // Assertion 4 (BRIEF-15, post-turn-assertions): the trigger obligation
+      // discharges at MINT time (brief 36) — a say/whisper/system record
+      // addressed to the member who started the turn answers them, whenever
+      // it is minted. The resume banner is minted while no fan-out reader
+      // exists and is swallowed into the next baseline, so a window can
+      // never witness it; the mint itself is the only reliable witness.
+      onMint: (code, kind, memberIds) => {
+        if (kind !== "say" && kind !== "whisper" && kind !== "system") return
+        const trigger = this.lastInboundMemberId.get(code)
+        if (trigger === undefined || !memberIds.includes(trigger)) return
+        this.lastInboundMemberId.delete(code)
+      },
     })
     // The ONE send path outside DeliveryEngine (brief A): the room's own
     // voice — join links, QR, join/resume notices, broadcasts — routed by
@@ -504,9 +519,12 @@ export class RoomService {
       reportUnservable: (code, correction) => this.reportUnservableArtifact(code, correction),
       // Assertion 4 (BRIEF-15, post-turn-assertions): who started the turn
       // the fan-out is about to flush, if it was an ordinary inbound message.
-      // One-shot (brief 36): reading it discharges it, so the obligation is
-      // asked once per inbound and never re-asked on a later turn that
-      // member did not start.
+      // One-shot (brief 36): reading it discharges it — but the mint path
+      // (`onMint` above) discharges it first when the turn's deliveries
+      // already answered the member, because a delivery minted outside any
+      // window (the resume banner) is invisible to this check. The
+      // obligation is asked once per inbound and never re-asked on a later
+      // turn that member did not start.
       triggeredBy: (code) => {
         const memberId = this.lastInboundMemberId.get(code)
         this.lastInboundMemberId.delete(code)

@@ -206,6 +206,15 @@ export interface DeliveryEngineOpts {
   /** `false` only in tests: the engine-level suites then drive `drain`
    *  explicitly, so each assertion is deterministic. */
   readonly autoDrain?: boolean
+  /** Brief 36: called synchronously on every accepted mint, with the room
+   *  code, the record kind and the members the records were minted FOR
+   *  (the accepted ids — unknown ids mint nothing and never appear). The
+   *  post-turn assertion set's trigger obligation discharges HERE rather
+   *  than in the fan-out's window check: the delivery that answers a member
+   *  can be minted while no fan-out reader exists (the resume banner) and
+   *  be swallowed into the next baseline, so a window can never witness
+   *  it. Optional — unwired in every engine-level harness. */
+  readonly onMint?: (code: string, kind: Delivery["kind"], memberIds: readonly string[]) => void
 }
 
 export interface AcceptOutcome {
@@ -238,6 +247,7 @@ export class DeliveryEngine {
   private readonly now: () => string
   private readonly sendTimeoutMs: number
   private readonly autoDrain: boolean
+  private readonly onMint: ((code: string, kind: Delivery["kind"], memberIds: readonly string[]) => void) | undefined
   /** Per-room serialization for drains (same shape as `RoomService`'s
    *  `withRoomLock`): a background drain kicked by `accept` and a caller's
    *  explicit `drain` must never attempt the same record concurrently —
@@ -253,6 +263,7 @@ export class DeliveryEngine {
     this.now = opts.now ?? (() => new Date().toISOString())
     this.sendTimeoutMs = opts.sendTimeoutMs ?? SEND_TIMEOUT_MS
     this.autoDrain = opts.autoDrain ?? true
+    this.onMint = opts.onMint
   }
 
   /** The tool handler's half: resolve `memberIds` against the room's CURRENT
@@ -322,6 +333,10 @@ export class DeliveryEngine {
         deliverySeq: lastSeq + created.length,
         ...(spoken !== undefined ? { spokenSeq: spoken } : {}),
       })
+      // The mint is the event (see `onMint`'s doc): discharged the moment
+      // the records exist, never waiting for a flush that may never see
+      // them.
+      this.onMint?.(code, kind, accepted)
       if (this.autoDrain) {
         // Off the handler's critical path: the tool has already returned
         // "accepted"; provider latency must not stall the agent's turn.
