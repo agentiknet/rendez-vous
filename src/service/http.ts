@@ -180,14 +180,20 @@ interface MediaIngress {
  *    description, attributed like any other message.
  *
  *  Explicit hooks always win, so tests never depend on the environment. */
-function resolveMediaIngress(hooks: HttpMediaHooks | undefined): MediaIngress {
+export function resolveMediaIngress(hooks: HttpMediaHooks | undefined, service: RoomService): MediaIngress {
   const openaiKey = env.openaiApiKey
   const telegramToken = env.telegramBotToken
   return {
-    // env.mediaDir is the live runtime store the running service serves
-    // media from; a test must inject its own MediaStore/ArtifactRenderStore,
-    // never rely on this.
-    store: hooks?.mediaStore ?? new MediaStore(env.mediaDir),
+    // THE SAME STORE THE SERVICE WRITES THROUGH, not a second one over the
+    // same directory. A MediaStore keeps its index in memory, so two
+    // instances sharing `env.mediaDir` agree on the bytes and on nothing
+    // else: every voice note, rendered PDF and QR the service saved through
+    // its own store was a 404 on this route, because this route was asking a
+    // different Map. Measured live on room RDV-MQU8 — an .ogg on disk, 404 on
+    // its URL, minutes after it was written by the running process.
+    // A test must still inject its own store; it just has to be the one the
+    // RoomService was built with too.
+    store: hooks?.mediaStore ?? service.mediaStore,
     renders: hooks?.renders ?? new ArtifactRenderStore(env.mediaDir),
     stt: hooks?.stt ?? (openaiKey !== undefined ? new OpenAiSttProvider(openaiKey) : NullProviders.stt),
     vision: hooks?.vision ?? (openaiKey !== undefined ? new OpenAiVisionProvider(openaiKey) : NullProviders.vision),
@@ -1545,7 +1551,7 @@ export function roomMcpDeps(
 
 export function createHttpServer(service: RoomService, mediaHooks?: HttpMediaHooks, stateHooks?: HttpStateHooks): Server {
   const dedup = new MessageDedup()
-  const media = resolveMediaIngress(mediaHooks)
+  const media = resolveMediaIngress(mediaHooks, service)
   const daemon: DaemonExtraOptions =
     stateHooks?.daemon ?? { baseUrl: env.daemonUrl, token: env.daemonToken }
   const hasStoredRender = (code: string) => media.renders.hasOrLoad(code)

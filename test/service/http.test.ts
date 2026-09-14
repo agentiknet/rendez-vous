@@ -11,7 +11,7 @@ import type { Delivery, Member } from "../../src/rooms/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import { ArtifactRenderStore } from "../../src/service/artifact-renders.ts"
 import { LocalBooter, type SessionBooter } from "../../src/service/booter.ts"
-import { createHttpServer, roomMcpDeps } from "../../src/service/http.ts"
+import { createHttpServer, resolveMediaIngress, roomMcpDeps } from "../../src/service/http.ts"
 import { MediaStore } from "../../src/service/media-store.ts"
 import { memberToken } from "../../src/service/mcp-room.ts"
 import { RoomService, type RoomWebSendOutcome } from "../../src/service/room-service.ts"
@@ -2094,6 +2094,37 @@ test("BRIEF-31: roomMcpDeps wires tts/mediaStore/deliverAttachment when openai k
   assert.equal(withoutKey.tts, undefined, "tts omitted without openai key")
   assert.equal(withoutKey.mediaStore, undefined, "mediaStore omitted without openai key")
   assert.equal(withoutKey.deliverAttachment, undefined, "deliverAttachment omitted without openai key")
+})
+
+test("the media route reads through the SAME store the service writes through, not a second one over the same directory", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const transport = new MemoryTransport()
+  const mediaStore = await freshMediaStore()
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore,
+  })
+  services.push(service)
+
+  // A MediaStore keeps its index in memory. Two instances over one directory
+  // agree about the bytes and about nothing else, so anything the service
+  // saved is a 404 on the route. Identity is the only thing worth asserting:
+  // "both point at the same dir" is exactly the state that was broken.
+  const resolved = resolveMediaIngress(undefined, service)
+  assert.equal(resolved.store, service.mediaStore, "the route must share the service's store instance")
+
+  // And a caller that injects one still wins, so tests keep their temp dirs.
+  const injected = await freshMediaStore()
+  const overridden = resolveMediaIngress({ mediaStore: injected }, service)
+  assert.equal(overridden.store, injected, "an injected store must still override")
 })
 
 // BRIEF-35: the egress media route serves the record's own contentType,
