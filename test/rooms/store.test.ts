@@ -746,3 +746,23 @@ test("a persisted delivery whose toolName is not a string makes the whole store 
   // quietly shorter than what is on disk.
   await assert.rejects(() => RoomStore.open(dir), /unexpected shape/)
 })
+
+test("stampMemberSpoke persists the member's last-spoke stamp and survives a store reload (brief 36)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "rdv-store-spoke-"))
+  dirs.push(dir)
+  const store = await RoomStore.open(dir)
+  const room = await store.create()
+  const member = await store.addMember(room.code, aliceInput())
+
+  const at = new Date().toISOString()
+  await store.stampMemberSpoke(room.code, member.id, at)
+  const stamped = store.get(room.code)?.members.find((candidate) => candidate.id === member.id)
+  assert.equal(stamped?.lastSpokeAt, at, "the inbound stamps the sender's liveness on the member")
+
+  const reopened = await RoomStore.open(dir)
+  const roundTripped = reopened.get(room.code)?.members.find((candidate) => candidate.id === member.id)
+  assert.equal(roundTripped?.lastSpokeAt, at, "the stamp round-trips through the persisted JSON like ackedAt does")
+
+  // An unknown member is a no-op, not a throw — mirrors ackCursor's posture.
+  await store.stampMemberSpoke(room.code, "no-such-member", at)
+})

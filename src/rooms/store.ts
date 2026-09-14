@@ -96,6 +96,7 @@ function isMember(value: unknown): value is Member {
   const claim = "claim" in value ? value.claim : undefined
   const ackedSeq = "ackedSeq" in value ? value.ackedSeq : undefined
   const ackedAt = "ackedAt" in value ? value.ackedAt : undefined
+  const lastSpokeAt = "lastSpokeAt" in value ? value.lastSpokeAt : undefined
   const aguiSentMessageIds = "aguiSentMessageIds" in value ? value.aguiSentMessageIds : undefined
   return (
     isString(value.id) &&
@@ -106,6 +107,7 @@ function isMember(value: unknown): value is Member {
     (claim === undefined || isString(value.claim)) &&
     (ackedSeq === undefined || (typeof ackedSeq === "number" && Number.isInteger(ackedSeq) && ackedSeq >= 0)) &&
     isStringOrUndefined(ackedAt) &&
+    isStringOrUndefined(lastSpokeAt) &&
     (aguiSentMessageIds === undefined || (Array.isArray(aguiSentMessageIds) && aguiSentMessageIds.every(isString))) &&
     isString(value.joinedAt)
   )
@@ -666,6 +668,31 @@ export class RoomStore {
     room.updatedAt = at
     await this.enqueueWrite()
     return applied ? "applied" : "ignored"
+  }
+
+  /** Persist the fact that one member SENT a message into the room (brief
+   *  36, presence): receiving a message is proof the member is there —
+   *  stronger evidence than an ack, and the one liveness signal
+   *  `pullMemberStale` ignored. Written only by the ordinary inbound path
+   *  (`RoomService.handleMessage`); `lastSpokeAt` is a liveness stamp and
+   *  nothing else — unlike `ackedAt`, it is not any cursor's wall-clock,
+   *  and the never-acked warning and `presenceBasis` keep reading
+   *  `ackedAt` alone. A member removed between the caller's routing and
+   *  this write is a no-op, mirroring `ackCursor`'s posture. */
+  async stampMemberSpoke(code: string, memberId: string, at: string): Promise<void> {
+    const normalized = normalizeCode(code)
+    if (normalized === undefined) {
+      throw new Error(`invalid room code: ${code}`)
+    }
+    const room = this.rooms.get(normalized)
+    if (room === undefined) {
+      throw new Error(`unknown room: ${normalized}`)
+    }
+    const member = room.members.find((candidate) => candidate.id === memberId)
+    if (member === undefined) return
+    member.lastSpokeAt = at
+    room.updatedAt = at
+    await this.enqueueWrite()
   }
 
   /** Persist the fact that one member has sent this `AguiMessage.id` into

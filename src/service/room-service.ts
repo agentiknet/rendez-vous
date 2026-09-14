@@ -1367,6 +1367,12 @@ export class RoomService {
     let { room } = found
     const { member } = found
 
+    // Receiving a message is proof the member is there (brief 36,
+    // presence): stamped before anything else can look at the roster, so a
+    // member who just spoke is never read as away — the strongest possible
+    // liveness evidence, fresher than any ack.
+    await this.store.stampMemberSpoke(room.code, member.id, new Date().toISOString())
+
     const deliverableText = await this.resolveDeliverableText(room, member, input.text)
     if (deliverableText !== undefined) {
       await this.broadcast(room, deliverableText)

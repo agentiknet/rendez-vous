@@ -98,6 +98,19 @@ export interface Member {
    *  evidence the client is there). */
   ackedSeq?: number
   ackedAt?: string
+  /** The wall-clock of the member's last INBOUND message (brief 36,
+   *  presence): receiving a message from a member is proof they are there —
+   *  stronger evidence than an outbox ack, and the one liveness signal
+   *  `pullMemberStale` ignored. Written only by `RoomStore.stampMemberSpoke`
+   *  from the ordinary inbound path (`RoomService.handleMessage`); a member
+   *  who has never spoken has no stamp. Deliberately NOT `ackedAt`: that is
+   *  the outbox cursor's own fact — `ackedSeq`'s wall-clock twin, and both
+   *  `presenceBasis` (mcp-personal.ts) and the never-acked warning (brief
+   *  14, defect 5) read `ackedAt === undefined` as "this client never
+   *  posted a cursor", which a speak stamp would corrupt. Optional on
+   *  members persisted before the field existed, same JSON round-trip rule
+   *  as `ackedAt`. */
+  lastSpokeAt?: string
   /** The `AguiMessage.id`s this member has already pushed into the room
    *  through `POST /rooms/:code/agui` (D6). AG-UI clients replay the entire
    *  message thread on every run and poll the endpoint to stay alive, so
@@ -316,17 +329,25 @@ export function deliverySeqOf(id: string): number {
  *  show for it. */
 export const PULL_STALE_MS = 90_000
 
-/** Whether a pull member is stale: no ack for `PULL_STALE_MS`. A member that
- *  has never acked is dated from `joinedAt` — it has not acked for exactly
- *  that long, which is what makes the `Ecran` ghost (a tab that joined and
- *  never drained) go away. Undateable timestamps never declare staleness:
- *  a member we cannot age is one we cannot safely release. Push members are
- *  never stale — their delivery is someone else's problem the moment the
- *  transport accepts it. */
+/** Whether a pull member is stale: no liveness evidence for
+ *  `PULL_STALE_MS`. The evidence is the most recent of three stamps — the
+ *  last ack (`ackedAt`, brief 36 extended: whichever of the two liveness
+ *  signals is fresher wins, so a member who stopped acking but just sent a
+ *  message is present, and one who acks after going stale revives too),
+ *  the last inbound (`lastSpokeAt`), or `joinedAt`. A member that has
+ *  never acked and never spoken is dated from `joinedAt` — it has not
+ *  evidenced presence for exactly that long, which is what makes the
+ *  `Ecran` ghost (a tab that joined and never drained) go away.
+ *  Undateable timestamps never declare staleness: a member we cannot age
+ *  is one we cannot safely release. Push members are never stale — their
+ *  delivery is someone else's problem the moment the transport accepts it. */
 export function pullMemberStale(member: Member, nowMs: number): boolean {
   if (deliveryModeOf(member) !== "pull") return false
-  const stamp = Date.parse(member.ackedAt ?? member.joinedAt)
-  return !Number.isNaN(stamp) && nowMs - stamp > PULL_STALE_MS
+  const stamps = [member.ackedAt, member.lastSpokeAt, member.joinedAt]
+    .map((stamp) => (stamp === undefined ? Number.NaN : Date.parse(stamp)))
+    .filter((stamp) => !Number.isNaN(stamp))
+  if (stamps.length === 0) return false
+  return nowMs - Math.max(...stamps) > PULL_STALE_MS
 }
 
 /** The retention floors (PLAN-02 §3-D6, per-member since brief A): one floor

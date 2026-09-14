@@ -4,9 +4,11 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, test } from "node:test"
 import { env } from "../../src/env.ts"
+import { listAudience } from "../../src/audience/contract.ts"
 import { DaemonClient } from "../../src/daemon/client.ts"
 import type { OutboundMessage, Transport } from "../../src/fanout/types.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
+import { pullMemberStale } from "../../src/rooms/types.ts"
 import type { Address, Member, Tier } from "../../src/rooms/types.ts"
 import { publicArtifactUrl } from "../../src/service/artifact-proxy.ts"
 import { LocalBooter, type SessionBooter } from "../../src/service/booter.ts"
@@ -1486,4 +1488,29 @@ test("BRIEF-36: an answer minted before the fan-out's baseline is seeded (the re
   await runDaemonTurn(daemon, sessionId, store, code, 1, "reprise de la salle")
 
   assert.equal(replyWarnings(transport).length, 0, "the mint itself answered the member — the window is not the only witness")
+})
+
+test("BRIEF-36 presence: an inbound from a pull member stamps their liveness — they are neither stale nor away in the roster, even never-acked with an ancient joinedAt", async () => {
+  const { service, store } = await buildHarness()
+  const created = await service.handleInbound(alice("new"))
+  assert.ok(created.kind === "created")
+  if (created.kind !== "created") return
+  const code = created.room.code
+  const joined = await service.handleInbound(web(`join ${created.room.code}`))
+  assert.equal(joined.kind, "joined")
+
+  // Receiving a message is proof of presence: the sender cannot read as
+  // away in the same instant. The stamp is the fact; the roster reads it.
+  const inbound = await service.handleInbound(web("On en etait ou ?"))
+  assert.equal(inbound.kind, "message")
+
+  const room = store.get(code)
+  assert.ok(room !== undefined)
+  const webMember = room.members.find((candidate) => candidate.address.provider === "room-web")
+  assert.ok(webMember !== undefined)
+  assert.ok(webMember.lastSpokeAt !== undefined, "the inbound stamped the sender's lastSpokeAt")
+  assert.equal(pullMemberStale(webMember, Date.now()), false, "the member who just spoke is not stale")
+  const roster = listAudience(room, Date.now())
+  const rosterEntry = roster.members.find((candidate) => candidate.memberId === webMember.id)
+  assert.equal(rosterEntry?.presence, "present", "the roster must agree with the delivery path")
 })

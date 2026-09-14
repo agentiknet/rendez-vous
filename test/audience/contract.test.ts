@@ -161,3 +161,17 @@ test("parseAudienceSendArgs: private takes exactly one id; public takes none, on
   const emptyText = parseAudienceSendArgs({ text: "   " }, "public")
   assert.ok("error" in emptyText)
 })
+
+test("brief 36 presence: a pull member who joined long ago, never acked, but JUST SPOKE is present in the roster — the roster agrees with the delivery path", () => {
+  const nowMs = Date.parse("2026-09-12T12:00:00.000Z")
+  const speaker = {
+    ...member("m1", "Jeremy", "room-web", "room-web", "2026-09-12T10:00:00.000Z"),
+    lastSpokeAt: "2026-09-12T11:59:30.000Z",
+  }
+  // The same member one minute before they spoke: away — this is exactly
+  // the live shape that routed the answer around the person who asked.
+  const ghost = member("m2", "Ghost", "room-web", "room-web", "2026-09-12T10:00:00.000Z")
+  const listed = listAudience(room("RDV-PRES", [speaker, ghost]), nowMs)
+  assert.equal(listed.members[0]?.presence, "present", "a member who just spoke cannot be away")
+  assert.equal(listed.members[1]?.presence, "away", "the tab that never came back is still away — nothing is weakened")
+})
