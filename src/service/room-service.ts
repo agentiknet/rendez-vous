@@ -9,7 +9,7 @@ import type { Transport } from "../fanout/types.ts"
 import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
 import { ensureMembership, handleCommand, parseCommand, type CommandResult } from "../rooms/commands.ts"
 import type { AddressLookup, RoomStore } from "../rooms/store.ts"
-import { UnroutedDeliveryError, deliveryModeOf, type Address, type Member, type RecoveryLink, type Room, type Tier } from "../rooms/types.ts"
+import { UnroutedDeliveryError, deliveryModeOf, sameHumanName, type Address, type Member, type RecoveryLink, type Room, type Tier } from "../rooms/types.ts"
 import { memberToken, tokensMatch } from "./mcp-room.ts"
 import { publicArtifactUrl, publicMediaUrl } from "./artifact-proxy.ts"
 import type { SessionBooter } from "./booter.ts"
@@ -1153,7 +1153,7 @@ export class RoomService {
   private async announceJoin(room: Room, member: Member): Promise<void> {
     if (room.sessionId === undefined) return
     const sameHuman = room.members.some(
-      (candidate) => candidate.id !== member.id && candidate.displayName.toLowerCase() === member.displayName.toLowerCase(),
+      (candidate) => candidate.id !== member.id && sameHumanName(candidate.displayName, member.displayName),
     )
     const line = sameHuman
       ? `${member.displayName} just joined from another device (${member.address.provider}) — the same human already in this room. Nobody new has arrived, and the room has nothing to tell anyone: do not announce this.`

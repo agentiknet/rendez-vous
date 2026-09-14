@@ -114,6 +114,17 @@ export interface Member {
   aguiSentMessageIds?: string[]
 }
 
+/** THE PRODUCT'S ONE DEFINITION OF "SAME HUMAN" (BRIEF-37, reused by BRIEF-38):
+ *  two members of the same room whose display names match, compared
+ *  case-insensitively. Two devices under one name are one person on two
+ *  surfaces (`booter.ts`'s same-person rule). The join announcement asks it
+ *  ("is this a new person?"); the delivery engine's recipient resolution asks
+ *  the same question in the other direction ("who else does this human
+ *  reach?"). One function, so the two answers can never drift. */
+export function sameHumanName(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase()
+}
+
 /** Push or pull, per member — the one question the fan-out's artifact-notice
  *  gate and any other "should this reach a phone?" check asks. Pull members
  *  have no push transport at all (their drain is the outbox); pushing to

@@ -26,6 +26,7 @@ import {
   deliveryModeOf,
   deliverySeqOf,
   retentionFloors,
+  sameHumanName,
 } from "../rooms/types.ts"
 
 /** Per-send hard timeout. Deliberately NOT the 2s house budget (that is for
@@ -272,7 +273,25 @@ export class DeliveryEngine {
    *  delivery*, not *delivered*. An id matching nobody goes in `unknown`
    *  and is delivered to nobody; there is no fallback to broadcast
    *  (`Member.id` is not stable across a leave/rejoin, so a stale cached id
-   *  is a normal occurrence, not an anomaly). */
+   *  is a normal occurrence, not an anomaly).
+   *
+   *  BRIEF-38 — addressing a human addresses that human, on every surface
+   *  they are in the room on. For a `say` or `whisper`, each accepted id
+   *  resolves not to its one member but to EVERY member of the room sharing
+   *  that member's display name (`sameHumanName`, the product's own
+   *  one-human rule from BRIEF-37): the agent is told "answer Jeremy", the
+   *  room holds two Jeremys — one human, two devices — and the answer must
+   *  reach both phones, not whichever row the roster happened to offer. The
+   *  expansion happens at MINT TIME only: membership, presence, the roster
+   *  the agent sees and the outbox are untouched, and no other kind is
+   *  widened (`system` records are per-surface facts, `tool` records are
+   *  minted per pull member and a push member must never receive one).
+   *  An unknown id is still unknown — generosity never rescues a typo.
+   *
+   *  `accepted` stays the ids the CALLER named: if one id now mints three
+   *  records, that is one accepted id that was heard, not three. The agent
+   *  reads it as "the person I addressed exists and will get this", which
+   *  is exactly what it asked. */
   async accept(
     code: string,
     kind: Delivery["kind"],
@@ -292,13 +311,26 @@ export class DeliveryEngine {
     }
 
     if (accepted.length > 0) {
+      // The human expansion (BRIEF-38): one accepted id fans out to every
+      // same-named member of the room, roster order preserved, each surface
+      // exactly once. Only `say`/`whisper` — see `accept`'s doc.
+      let recipients = accepted
+      if (kind === "say" || kind === "whisper") {
+        const acceptedSet = new Set(accepted)
+        const humanNames = new Set(
+          room.members.filter((member) => acceptedSet.has(member.id)).map((member) => member.displayName.toLowerCase()),
+        )
+        recipients = room.members
+          .filter((member) => humanNames.has(member.displayName.toLowerCase()))
+          .map((member) => member.id)
+      }
       const now = this.now()
       // The counter, never the array length: the array is pruned, so a
       // length-derived id would be handed out twice and `mark` would patch
       // the wrong record. `deliveries.length` is only the fallback for a room
       // written before the counter existed, whose ids are exactly `d1..dN`.
       const lastSeq = room.deliverySeq ?? room.deliveries?.length ?? 0
-      const created: Delivery[] = accepted.map((memberId, index) => ({
+      const created: Delivery[] = recipients.map((memberId, index) => ({
         id: `d${lastSeq + index + 1}`,
         memberId,
         kind,
@@ -335,8 +367,11 @@ export class DeliveryEngine {
       })
       // The mint is the event (see `onMint`'s doc): discharged the moment
       // the records exist, never waiting for a flush that may never see
-      // them.
-      this.onMint?.(code, kind, accepted)
+      // them. The RECIPIENTS, not the accepted ids (BRIEF-38): an answer
+      // addressed to one of a human's two devices answers that human — the
+      // obligation of the device that actually asked must discharge even
+      // when the agent picked the sibling id out of the roster.
+      this.onMint?.(code, kind, recipients)
       if (this.autoDrain) {
         // Off the handler's critical path: the tool has already returned
         // "accepted"; provider latency must not stall the agent's turn.
@@ -518,7 +553,7 @@ export class DeliveryEngine {
             confirmedBy: "transport",
           })
           if (delivery.kind === "whisper") {
-            await this.announceWhisper(code, member)
+            await this.announceWhisper(code, member, delivery)
           }
           return
         } catch (error: unknown) {
@@ -543,13 +578,35 @@ export class DeliveryEngine {
    *  told the whisper happened, never its content; room-web is a screen,
    *  and `renderForTier` already returns `undefined` for it). Sent only on
    *  success: announcing a whisper that failed to arrive would be a lie.
-   *  A notice send that throws is logged, never fatal. */
-  private async announceWhisper(code: string, target: Member): Promise<void> {
+   *  A notice send that throws is logged, never fatal.
+   *
+   *  BRIEF-38: one whisper to one human now mints one record per surface,
+   *  so this runs once per record of the SAME whisper. Two consequences are
+   *  handled here, both driven by `sameHumanName`:
+   *  - the target's OTHER surfaces are not "other members" — they just
+   *    received the whisper itself, and must not be told it happened as if
+   *    they were outsiders;
+   *  - the outsider notice must fire ONCE per whisper, not once per record:
+   *    a sibling record of the same whisper that already announced silences
+   *    this one (whichever surface drains first announces; the rest see it
+   *    and stay quiet). */
+  private async announceWhisper(code: string, target: Member, delivery: Delivery): Promise<void> {
     const room = this.store.get(code)
     if (room === undefined) return
+    const siblingAnnounced = (room.deliveries ?? []).some(
+      (other) =>
+        other.id !== delivery.id &&
+        other.kind === "whisper" &&
+        other.text === delivery.text &&
+        other.status === "delivered" &&
+        room.members.some(
+          (member) => member.id === other.memberId && sameHumanName(member.displayName, target.displayName),
+        ),
+    )
+    if (siblingAnnounced) return
     const notice = `(the agent whispered to ${target.displayName})`
     for (const member of room.members) {
-      if (member.id === target.id) continue
+      if (sameHumanName(member.displayName, target.displayName)) continue
       const message = renderForTier(member.tier, notice, undefined, false)
       if (message === undefined) continue
       try {
