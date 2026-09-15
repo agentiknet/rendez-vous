@@ -18,6 +18,9 @@
 import type { DaemonClient, McpServerMount, SandboxSpecInput, SpawnAgentInput, SpawnAgentResult } from "../daemon/client.ts"
 import { isRecordKind } from "../daemon/records.ts"
 import { buildAppSeedScript } from "./app-seed.ts"
+import { readFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
 import { probeArtifact } from "./artifact.ts"
 
 const SANDBOX_PROVIDER = "e2b"
@@ -218,7 +221,23 @@ async function spawnWithReconnectRetry(
  *  module makes (boot, live reuse, or a bare resume reconnect) — harmless
  *  when omitted, and idempotent (a plain overwrite) when present, per
  *  `setupCommands`'s own "runs on every boot/connect" contract. */
+/** The codex adapter ACP wrapper demands a subscription-shaped
+ *  ~/.codex/auth.json inside the box before it will spawn at all — it
+ *  consults env API keys only after that file check, and a fresh box has
+ *  neither. Seed the host codex login into the box at boot (same pattern
+ *  the claude-code path already exercises for its credential); read per
+ *  boot so a host-side refresh propagates on the next room boot. */
+function codexAuthSeedCommand(): string | undefined {
+  try {
+    const b64 = readFileSync(join(homedir(), ".codex", "auth.json")).toString("base64")
+    return b64.length > 0 ? "mkdir -p ~/.codex && echo " + b64 + " | base64 -d > ~/.codex/auth.json" : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function buildSandboxSpec(opts: {
+  readonly adapter: string
   readonly port: number
   readonly appDir: string
   readonly seedFromDir: string | undefined
@@ -228,10 +247,16 @@ function buildSandboxSpec(opts: {
    *  for a sandboxed spawn). See docs/CODEX-FLIP.md. */
   readonly installAdapters: readonly string[] | undefined
 }): SandboxSpecInput {
+  const setupCommands: string[] = []
+  if (opts.adapter === "codex") {
+    const codexSeed = codexAuthSeedCommand()
+    if (codexSeed !== undefined) setupCommands.push(codexSeed)
+  }
+  if (opts.seedFromDir !== undefined) setupCommands.push(buildAppSeedScript(opts.seedFromDir, opts.appDir))
   return {
     provider: SANDBOX_PROVIDER,
     config: {
-      ...(opts.seedFromDir !== undefined ? { setupCommands: [buildAppSeedScript(opts.seedFromDir, opts.appDir)] } : {}),
+      ...(setupCommands.length > 0 ? { setupCommands } : {}),
       ...(opts.installAdapters !== undefined ? { installAdapters: [...opts.installAdapters] } : {}),
     },
     extraPorts: [opts.port],
@@ -296,6 +321,7 @@ export async function bootRoomSession(client: DaemonClient, opts: BootRoomSessio
         label: opts.label,
         prompt: opts.prompt,
         sandbox: buildSandboxSpec({
+          adapter: opts.adapter,
           port: opts.port,
           appDir: opts.appDir,
           seedFromDir: opts.seedFromDir,
@@ -376,6 +402,7 @@ export async function resumeRoomSession(client: DaemonClient, opts: ResumeRoomSe
         label: opts.label,
         prompt: opts.prompt,
         sandbox: buildSandboxSpec({
+          adapter: opts.adapter,
           port: opts.port,
           appDir: opts.appDir,
           seedFromDir: opts.seedFromDir,

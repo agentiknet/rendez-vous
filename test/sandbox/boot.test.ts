@@ -123,11 +123,20 @@ test("bootRoomSession forwards installAdapters into sandbox.config.installAdapte
     const req = daemon.requestsReceived.find(r => r.path === "/sessions/agent")
     assert.ok(req !== undefined)
     assert.ok(isRecord(req.body))
-    assert.deepEqual(req.body.sandbox, {
-      provider: "e2b",
-      config: { installAdapters: ["codex"] },
-      extraPorts: [3210],
-    })
+    assert.ok(isRecord(req.body.sandbox))
+    const sandboxConfig = req.body.sandbox.config
+    assert.ok(isRecord(sandboxConfig))
+    assert.equal(req.body.sandbox.provider, "e2b")
+    assert.deepEqual(sandboxConfig.installAdapters, ["codex"])
+    assert.deepEqual(req.body.sandbox.extraPorts, [3210])
+    // The codex auth seed rides the same spec when the host carries a codex
+    // login, and is absent otherwise (a fresh CI box). Either way it is the
+    // only setupCommands entry here: seedFromDir is omitted, so the app seed
+    // never joins.
+    if (Array.isArray(sandboxConfig.setupCommands)) {
+      assert.equal(sandboxConfig.setupCommands.length, 1)
+      assert.match(String(sandboxConfig.setupCommands[0]), /auth\.json/)
+    }
   } finally {
     await daemon.close()
   }
