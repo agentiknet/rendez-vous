@@ -55,8 +55,13 @@ export class MemberSender {
   }
 
   /** One message to one member. `code` is the room the member belongs to —
-   *  the outbox record needs its room; for a push member it is unused. */
-  async send(code: string, member: Member, message: OutboundMessage): Promise<void> {
+   *  the outbox record needs its room; for a push member it is unused.
+   *  BRIEF-48: resolves to the provider's message id for a push send
+   *  (`Transport.send`'s own return), `undefined` for a pull member — their
+   *  delivery is the outbox record, and no provider ever saw it. Most
+   *  callers (system notices) ignore the value; it exists so the identity
+   *  plumbing has one shape at every send path. */
+  async send(code: string, member: Member, message: OutboundMessage): Promise<string | void> {
     if (this.isPull(member)) {
       // The outbox record has no separate artifact field; a notice whose
       // artifact line the push rendering would have appended gets it spelled
@@ -67,14 +72,14 @@ export class MemberSender {
           ? `${message.text}\n${message.artifactUrl}`
           : message.text
       await this.acceptSystemRecord(code, member, text)
-      return
+      return undefined
     }
     // `code` is the room's own key into the store (always resolvable here —
     // BRIEF-20's backfill guarantees every room has a `slug` by the time it
     // is ever loaded); `""` is the no-room placeholder, which resolves to no
     // room and so appends nothing, same as before.
     const slug = code === "" ? "" : (this.store.get(code)?.slug ?? "")
-    await this.transport.send(member, withRoomSlugSuffix(slug, message))
+    return await this.transport.send(member, withRoomSlugSuffix(slug, message))
   }
 
 /** An agent- or room-authored attachment. A pull member gets the URL as a

@@ -13,7 +13,9 @@ import {
   type DeliveryTarget,
   type Member,
   type MemberDelivery,
+  type MessageRef,
   type PendingDelivery,
+  pruneMessageRefs,
   type RecoveryLink,
   type Room,
   type RoomState,
@@ -242,6 +244,9 @@ function isDelivery(value: unknown): value is Delivery {
   // record failing here refuses the whole room file, it never silently
   // drops one.
   const attachment = "attachment" in value ? value.attachment : undefined
+  // BRIEF-48: optional, present on delivered push records only. Same
+  // optional-key JSON round-trip rule as `toolName`.
+  const providerMessageId = "providerMessageId" in value ? value.providerMessageId : undefined
   return (
     isString(value.id) &&
     isString(value.memberId) &&
@@ -258,8 +263,23 @@ function isDelivery(value: unknown): value is Delivery {
       (failures === undefined && typeof legacyFailureCount === "number" && legacyFailureCount >= 0)) &&
     (confirmedBy === undefined || confirmedBy === "transport" || confirmedBy === "recipient") &&
     isStringOrUndefined(lastError) &&
+    isStringOrUndefined(providerMessageId) &&
     isString(value.createdAt) &&
     isStringOrUndefined(deliveredAt)
+  )
+}
+
+/** One citable message (BRIEF-48, `MessageRef` in src/rooms/types.ts). */
+function isMessageRef(value: unknown): value is MessageRef {
+  if (!isObject(value)) return false
+  return (
+    isString(value.handle) &&
+    /^m\d+$/.test(value.handle) &&
+    isString(value.memberId) &&
+    (value.direction === "inbound" || value.direction === "outbound") &&
+    isString(value.channel) &&
+    isString(value.providerId) &&
+    isString(value.createdAt)
   )
 }
 
@@ -387,6 +407,8 @@ function isRoom(value: unknown): value is Room {
   const spokenSeq = "spokenSeq" in value ? value.spokenSeq : undefined
   const deliveryLowWater = "deliveryLowWater" in value ? value.deliveryLowWater : undefined
   const protocol = "protocol" in value ? value.protocol : undefined
+  const messageRefs = "messageRefs" in value ? value.messageRefs : undefined
+  const messageRefSeq = "messageRefSeq" in value ? value.messageRefSeq : undefined
   return (
     isString(value.code) &&
     isString(value.slug) &&
@@ -402,6 +424,8 @@ function isRoom(value: unknown): value is Room {
     isNumberOrUndefined(deliverySeq) &&
     isNumberOrUndefined(spokenSeq) &&
     isNumberOrUndefined(deliveryLowWater) &&
+    (messageRefs === undefined || (Array.isArray(messageRefs) && messageRefs.every(isMessageRef))) &&
+    isNumberOrUndefined(messageRefSeq) &&
     isProtocol(protocol) &&
     Array.isArray(value.members) &&
     value.members.every(isMember) &&
@@ -759,6 +783,69 @@ export class RoomStore {
     room.updatedAt = new Date().toISOString()
     await this.enqueueWrite()
     return "new"
+  }
+
+  /** Mint one citable message (BRIEF-48, docs/REACT-REPLY.md §2 piece 3):
+   *  the handle is drawn from the room's monotonic `messageRefSeq` — never
+   *  from `messageRefs.length`, which the prune shrinks and a reused
+   *  handle would silently re-point at another message. The mint PRUNES in
+   *  the same write (`pruneMessageRefs`), so the tail stays bounded; a
+   *  handle the prune later drops resolves to `undefined` — the caller
+   *  (a future react/reply tool) reports that named, never as a send to a
+   *  guessed message. In-place mutation like `addMember` above, one
+   *  persist. */
+  async recordMessageRef(
+    code: string,
+    input: { memberId: string; direction: MessageRef["direction"]; channel: string; providerId: string },
+    at?: string,
+  ): Promise<MessageRef> {
+    const normalized = normalizeCode(code)
+    if (normalized === undefined) {
+      throw new Error(`invalid room code: ${code}`)
+    }
+    const room = this.rooms.get(normalized)
+    if (room === undefined) {
+      throw new Error(`unknown room: ${normalized}`)
+    }
+    const createdAt = at ?? new Date().toISOString()
+    const nowMs = Number.isNaN(Date.parse(createdAt)) ? Date.now() : Date.parse(createdAt)
+    const lastSeq = room.messageRefSeq ?? room.messageRefs?.length ?? 0
+    const ref: MessageRef = {
+      handle: `m${lastSeq + 1}`,
+      memberId: input.memberId,
+      direction: input.direction,
+      channel: input.channel,
+      providerId: input.providerId,
+      createdAt,
+    }
+    room.messageRefs = pruneMessageRefs([...(room.messageRefs ?? []), ref], nowMs)
+    room.messageRefSeq = lastSeq + 1
+    room.updatedAt = createdAt
+    await this.enqueueWrite()
+    return ref
+  }
+
+  /** Resolve a handle to the message it cites — `undefined` when the handle
+   *  is unknown, malformed, pruned, or names another room. Deliberately NOT
+   *  an error: the absence is the answer, and the caller's job is to say so
+   *  plainly (`unknown message handle: m12`), never to fall back to a
+   *  guessed message. */
+  async resolveMessageRef(code: string, handle: string): Promise<MessageRef | undefined> {
+    const normalized = normalizeCode(code)
+    if (normalized === undefined) return undefined
+    const room = this.rooms.get(normalized)
+    if (room === undefined) return undefined
+    return (room.messageRefs ?? []).find((ref) => ref.handle === handle)
+  }
+
+  /** The room's whole citable tail, oldest first — the read behind
+   *  `room_view`'s `recent_messages` (the agent's only handle surface; the
+   *  member never sees one — the attribution line is untouched by
+   *  BRIEF-48). */
+  messageRefsOf(code: string): readonly MessageRef[] {
+    const normalized = normalizeCode(code)
+    if (normalized === undefined) return []
+    return this.rooms.get(normalized)?.messageRefs ?? []
   }
 
   async update(

@@ -17,12 +17,14 @@ export interface MediaTransport extends Transport {
   /** `publicUrl`, when given, is a already-published URL for the same
    *  bytes (`publicMediaUrl`). Providers with no upload path of their own —
    *  Telegram — can ONLY send media that way, so omitting it is what makes
-   *  an image silently degrade to text there. */
-  sendMedia?(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<void>
+   *  an image silently degrade to text there. BRIEF-48: resolves to the
+   *  provider's message id for the media send, same rule as `send`. */
+  sendMedia?(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<string | void>
   /** Deliver an agent-authored attachment. Absent on transports with no
    *  media concept; callers detect with `hasSendAttachment` and fall back to
-   *  sending the URL as text, so a file is never silently not-sent. */
-  sendAttachment?(member: Member, attachment: OutboundAttachment): Promise<void>
+   *  sending the URL as text, so a file is never silently not-sent.
+   *  BRIEF-48: resolves to the provider's message id, same rule as `send`. */
+  sendAttachment?(member: Member, attachment: OutboundAttachment): Promise<string | void>
 }
 
 export function hasSendAttachment(
@@ -48,8 +50,9 @@ export function hasSendMedia(
 }
 
 export class ConsoleTransport implements Transport {
-  async send(member: Member, message: OutboundMessage): Promise<void> {
+  async send(member: Member, message: OutboundMessage): Promise<string | undefined> {
     console.log(`→ [${member.displayName}/${member.tier}] ${message.text}`)
+    return undefined
   }
 }
 
@@ -72,18 +75,21 @@ export class MemoryTransport implements MediaTransport {
   readonly sends: RecordedSend[] = []
   readonly mediaSends: RecordedMediaSend[] = []
 
-  async send(member: Member, message: OutboundMessage): Promise<void> {
+  async send(member: Member, message: OutboundMessage): Promise<string | undefined> {
     this.sends.push({ member, message })
+    return undefined
   }
 
   readonly attachmentSends: { member: Member; attachment: OutboundAttachment }[] = []
 
-  async sendMedia(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<void> {
+  async sendMedia(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<string | void> {
     this.mediaSends.push({ member, png, caption, publicUrl })
+    return undefined
   }
 
-  async sendAttachment(member: Member, attachment: OutboundAttachment): Promise<void> {
+  async sendAttachment(member: Member, attachment: OutboundAttachment): Promise<string | void> {
     this.attachmentSends.push({ member, attachment })
+    return undefined
   }
 }
 
@@ -147,30 +153,28 @@ export class CompositeTransport implements MediaTransport {
     return unrouted(member, delivery)
   }
 
-  async send(member: Member, message: OutboundMessage): Promise<void> {
-    await this.routeFor(member).send(member, message)
+  async send(member: Member, message: OutboundMessage): Promise<string | void> {
+    return await this.routeFor(member).send(member, message)
   }
 
-  async sendMedia(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<void> {
+  async sendMedia(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<string | void> {
     const target = this.routeFor(member)
     if (hasSendMedia(target)) {
-      await target.sendMedia(member, png, caption, publicUrl)
-      return
+      return await target.sendMedia(member, png, caption, publicUrl)
     }
-    await target.send(member, { text: caption, artifactUrl: undefined })
+    return await target.send(member, { text: caption, artifactUrl: undefined })
   }
 
-  async sendAttachment(member: Member, attachment: OutboundAttachment): Promise<void> {
+  async sendAttachment(member: Member, attachment: OutboundAttachment): Promise<string | void> {
     const target = this.routeFor(member)
     if (hasSendAttachment(target)) {
-      await target.sendAttachment(member, attachment)
-      return
+      return await target.sendAttachment(member, attachment)
     }
     // Any routed push transport with no attachment concept still gets the
     // file — as its URL, in the record. Never a dropped attachment. (A pull
     // recipient never gets here at all: `routeFor` throws for them — their
     // drain is the outbox.)
-    await target.send(member, { text: attachmentFallbackText(attachment), artifactUrl: undefined })
+    return await target.send(member, { text: attachmentFallbackText(attachment), artifactUrl: undefined })
   }
 }
 

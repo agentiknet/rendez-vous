@@ -628,14 +628,24 @@ export class DeliveryEngine {
         // the URL spelled out, never dropped. `renderFor` returned
         // `undefined` for it, so `message` plays no part here.
         try {
-          await withTimeout(this.sendAttachmentTo(member, delivery.attachment, delivery.text), this.sendTimeoutMs)
+          const providerMessageId = await withTimeout(
+            this.sendAttachmentTo(member, delivery.attachment, delivery.text),
+            this.sendTimeoutMs,
+          )
           // A push hand-off the provider accepted is confirmed by the
           // transport — the only confirmation that exists today (D2/F8).
+          // BRIEF-48: when the provider returned a message id it is captured
+          // ON the record and as a citable outbound ref (docs/REACT-REPLY.md
+          // §2) — the id used to be dropped here.
           await this.mark(code, delivery.id, {
             status: "delivered",
             deliveredAt: this.now(),
             confirmedBy: "transport",
+            ...(providerMessageId !== undefined ? { providerMessageId } : {}),
           })
+          if (providerMessageId !== undefined) {
+            await this.recordOutboundRef(code, member, providerMessageId)
+          }
           return
         } catch (error: unknown) {
           if (error instanceof SendBlockedError) {
@@ -665,14 +675,24 @@ export class DeliveryEngine {
         lastError = `nothing to render for a ${member.tier} member from a ${delivery.kind} record`
       } else {
         try {
-          await withTimeout(this.transport.send(member, message), this.sendTimeoutMs)
+          // BRIEF-48: the provider's message id comes back from the send and
+          // is captured — onto the record (`providerMessageId`) and into the
+          // room's citable tail — instead of vanishing with the promise.
+          // `undefined` (console/memory transports, a provider that returned
+          // nothing) records nothing: absence stays honest, no handle is
+          // minted for a message the room cannot prove the id of.
+          const providerMessageId = await withTimeout(this.transport.send(member, message), this.sendTimeoutMs)
           // A push hand-off the provider accepted is confirmed by the
           // transport — the only confirmation that exists today (D2/F8).
           await this.mark(code, delivery.id, {
             status: "delivered",
             deliveredAt: this.now(),
             confirmedBy: "transport",
+            ...(providerMessageId !== undefined ? { providerMessageId } : {}),
           })
+          if (providerMessageId !== undefined) {
+            await this.recordOutboundRef(code, member, providerMessageId)
+          }
           if (delivery.kind === "whisper") {
             await this.announceWhisper(code, member, delivery)
           }
@@ -717,6 +737,27 @@ if (failed) {
     }
   }
 
+  /** BRIEF-48 (docs/REACT-REPLY.md §2, pieces 2+3): mint the citable
+   *  outbound ref for a send the provider just accepted. Called only when
+   *  the transport actually returned an id — a console/memory send, a
+   *  provider that returned none, and every pull delivery never reach this,
+   *  so the room's tail holds only ids that genuinely exist at a provider.
+   *  A mint failure is logged, never fatal: the record is already
+   *  `delivered`, and losing the ref must not re-send the message. */
+  private async recordOutboundRef(code: string, member: Member, providerMessageId: string): Promise<void> {
+    try {
+      await this.store.recordMessageRef(code, {
+        memberId: member.id,
+        direction: "outbound",
+        channel: member.address.provider,
+        providerId: providerMessageId,
+      })
+    } catch (error: unknown) {
+      const why = error instanceof Error ? error.message : String(error)
+      console.error(`failed to record the outbound message ref in ${code} (member ${member.id}): ${why}`)
+    }
+  }
+
   /** The attachment probe, made total here: no probe wired (bare engine
    *  harnesses) means the gate is open; a probe that throws is a failure —
    *  never a pass. */
@@ -736,7 +777,7 @@ if (failed) {
    *  `MemberSender.sendAttachment` applied before this went through the
    *  engine. Never `undefined`-tolerant: an error here IS the failure
    *  path. */
-  private async sendAttachmentTo(member: Member, attachment: DeliveryAttachment, fallbackText: string): Promise<void> {
+  private async sendAttachmentTo(member: Member, attachment: DeliveryAttachment, fallbackText: string): Promise<string | void> {
     if (hasSendAttachment(this.transport)) {
       await this.transport.sendAttachment(member, attachment)
       return
@@ -869,7 +910,7 @@ if (failed) {
   private async mark(
     code: string,
     deliveryId: string,
-    patch: Partial<Pick<Delivery, "status" | "failures" | "confirmedBy" | "lastError" | "deliveredAt">>,
+    patch: Partial<Pick<Delivery, "status" | "failures" | "confirmedBy" | "lastError" | "deliveredAt" | "providerMessageId">>,
   ): Promise<void> {
     const room = this.store.get(code)
     if (room === undefined) return

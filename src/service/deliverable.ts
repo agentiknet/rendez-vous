@@ -722,11 +722,10 @@ export class DeliverableAwareTransport implements Transport {
     this.store = store
   }
 
-  async send(member: Member, message: OutboundMessage): Promise<void> {
+  async send(member: Member, message: OutboundMessage): Promise<string | void> {
     const blocks = parseDeliverBlocks(message.text)
     if (blocks.length === 0) {
-      await this.inner.send(member, message)
-      return
+      return await this.inner.send(member, message)
     }
 
     const found = this.store.findByAddress(member.address)
@@ -735,8 +734,7 @@ export class DeliverableAwareTransport implements Transport {
     // is a broken invariant (R1) that already logged loudly on read — this
     // is not the seam that resolves it, so both fall through untouched.
     if (found.kind !== "one") {
-      await this.inner.send(member, message)
-      return
+      return await this.inner.send(member, message)
     }
     const { room } = found
 
@@ -753,6 +751,6 @@ export class DeliverableAwareTransport implements Transport {
       text = text.split(block.raw).join(previewText)
     }
 
-    await this.inner.send(member, { ...message, text })
+    return await this.inner.send(member, { ...message, text })
   }
 }

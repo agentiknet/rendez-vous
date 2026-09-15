@@ -9,7 +9,7 @@ import type { Transport } from "../fanout/types.ts"
 import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
 import { ensureMembership, handleCommand, parseCommand, type CommandResult } from "../rooms/commands.ts"
 import type { AddressLookup, RoomStore } from "../rooms/store.ts"
-import { UnroutedDeliveryError, deliveryModeOf, sameHumanName, type Address, type Member, type RecoveryLink, type Room, type Tier } from "../rooms/types.ts"
+import { UnroutedDeliveryError, deliveryModeOf, sameHumanName, type Address, type Member, type MessageRef, type RecoveryLink, type Room, type Tier } from "../rooms/types.ts"
 import { memberToken, tokensMatch } from "./mcp-room.ts"
 import { publicArtifactUrl, publicMediaUrl } from "./artifact-proxy.ts"
 import type { SessionBooter } from "./booter.ts"
@@ -69,6 +69,17 @@ export interface InboundInput {
   displayName: string
   tier: Tier
   text: string
+  /** BRIEF-48 (docs/REACT-REPLY.md §2, piece 1): the provider-native
+   *  `messageId` the envelope carried — captured here instead of dying in
+   *  the dedup FIFO. Present only on paths that actually hold one (the
+   *  agentpush webhooks); a room-web/simulated send passes nothing, and
+   *  nothing is minted for it — no id, no handle, no lie. The mint happens
+   *  only for an ordinary message that actually lands in a room
+   *  (`handleMessage`); a command's (`join <code>`, `resume <slug>`) id is
+   *  still dropped — there is nothing citable to do with a join message
+   *  today, and pretending otherwise would mint a handle no tool could
+   *  honestly use. */
+  providerMessageId?: string
 }
 
 export type InboundOutcome =
@@ -925,6 +936,19 @@ export class RoomService {
     return this.store.recordAguiMessage(code, memberId, messageId)
   }
 
+  /** BRIEF-48 (docs/REACT-REPLY.md §2): the citable-message plumbing's read
+   *  side, over the store. `resolveMessageRef` answers `undefined` for an
+   *  unknown/pruned/foreign handle — the named absence a future react/reply
+   *  tool must report verbatim, never a fallback to a guessed message;
+   *  `messageRefsOf` is the tail `room_view`'s `recent_messages` lists. */
+  resolveMessageRef(code: string, handle: string): Promise<MessageRef | undefined> {
+    return this.store.resolveMessageRef(code, handle)
+  }
+
+  messageRefsOf(code: string): readonly MessageRef[] {
+    return this.store.messageRefsOf(code)
+  }
+
   /** BRIEF-23: issue a one-time pointer that lets a member who can prove
    *  themselves on a push surface re-claim their own web name after losing
    *  the browser's secret.
@@ -1471,6 +1495,25 @@ export class RoomService {
     // member who just spoke is never read as away — the strongest possible
     // liveness evidence, fresher than any ack.
     await this.store.stampMemberSpoke(room.code, member.id, new Date().toISOString())
+
+    // BRIEF-48: the envelope's provider id survives the ingest as a citable
+    // ref (docs/REACT-REPLY.md §2, piece 1) — only when one was actually
+    // carried in. The channel is the member's own provider: the id is native
+    // to exactly that provider's thread. Never fatal — a failed mint must
+    // not lose the member's message, which fans in right after.
+    if (input.providerMessageId !== undefined) {
+      try {
+        await this.store.recordMessageRef(room.code, {
+          memberId: member.id,
+          direction: "inbound",
+          channel: member.address.provider,
+          providerId: input.providerMessageId,
+        })
+      } catch (error: unknown) {
+        const why = error instanceof Error ? error.message : String(error)
+        console.error(`failed to record the inbound message ref in ${room.code} (member ${member.id}): ${why}`)
+      }
+    }
 
     const deliverableText = await this.resolveDeliverableText(room, member, input.text)
     if (deliverableText !== undefined) {

@@ -50,30 +50,48 @@ stopped here.
 
 ## 2. The design that must land before the tools
 
-Four independent pieces, each small, none of them this brief:
+Four independent pieces. **Pieces 1-3 are BUILT** (this brief); piece 4 is
+deliberately deferred — see §4.
 
-1. **Capture the inbound provider id at the dedup boundary.** When an
-   envelope passes dedup (src/service/http.ts:1112), its `messageId` must be
-   stored durably — keyed to the member and the ingest — instead of dying in
-   the dedup FIFO. Durable, because the agent may react a turn (or a
-   restart) later.
-2. **Mint a room-local handle the agent can see.** The attribution line
-   (`attributeText`, src/fanin/index.ts) gains a short stable suffix, e.g.
-   `[Name · whatsapp · #m12] text`. The handle is minted once at ingest and
-   is the agent's only citation currency — same philosophy as `member_id`
-   replacing display names in BRIEF-13/43.
-3. **Keep the map handle → provider id, per channel.** The handle resolves
-   through the stored inbound id (piece 1) or through a captured outbound
-   `message_id` (next piece). Pruning policy mirrors `pruneDeliveries`'s
-   reasoning: bounded count + age window.
-4. **Capture the outbound `message_id` per delivery.** `checkedSend` returns
-   the provider id; `Delivery` gains an optional field (the key-absent rule
-   of `toolName`/`attachment`, delivery.ts:381-385) so the agent can also
-   target a message *it* sent, and mail threading could later be driven by
-   records rather than an in-memory map.
-
-Only after all four does a `react`/`reply` tool have an argument that is
-honest to type into agentpush.
+1. **Capture the inbound provider id at the dedup boundary.** DONE. Both
+   webhooks pass the envelope's `messageId` through `InboundInput
+   .providerMessageId` (src/service/http.ts) instead of letting the dedup
+   FIFO be its grave; `RoomService.handleMessage` mints an `inbound`
+   `MessageRef` on the room the message actually landed in, never fatal —
+   a failed mint must not lose the member's message.
+2. **Capture the outbound `message_id` per delivery.** DONE.
+   `Transport.send` resolves to the provider's `message_id` (the union's
+   second arm is `void`, not `undefined`: every pre-existing transport
+   keeps resolving nothing, unedited). `AgentpushTransport.checkedSend`
+   returns the id on a `sent`/`queued` result instead of dropping it;
+   `DeliveryEngine.attempt` writes it onto the record
+   (`Delivery.providerMessageId`, present only on a delivered PUSH record,
+   key-absent otherwise) and mints an `outbound` ref. A console/memory
+   send, a provider that returned none, and every pull delivery record
+   nothing — absence stays honest, no handle exists for a message the
+   room cannot prove the id of.
+3. **Keep the map handle → provider id, durable on the room.** DONE.
+   `Room.messageRefs` / `Room.messageRefSeq` (same optional-key JSON
+   round-trip rule as `deliveries`), minted by `RoomStore.recordMessageRef`
+   with a monotonic counter — never the array length, which the prune
+   shrinks; a reused handle would silently re-point an old citation.
+   `pruneMessageRefs`: newest 100, 24 h window, undateable entries dropped.
+   Resolution: `RoomStore`/`RoomService.resolveMessageRef` — `undefined`
+   for unknown/malformed/pruned/foreign handles. THE NAMED ABSENCE: a
+   handle that does not resolve must be reported as `unknown message
+   handle`, never a send to a guessed message (OUTBOX §1's fault, wearing
+   a resolver).
+4. **Expose the handles where the agent reads, member-invisible.** DONE,
+   via `room_view`'s `recent_messages` (newest 20, ids only — HARD RULE:
+   no text, and the provider id itself is NOT listed; the agent cites the
+   handle, resolution is the resolver's job). The dep is optional and the
+   key genuinely absent without it, so the pre-BRIEF-48 result shape is
+   unchanged. **The attribution line (`attributeText`) is deliberately
+   UNTOUCHED**: it is the text every member reads on their own phone, and
+   inserting `#m12` there is a member-facing design decision that will be
+   made in daylight, not at the last hour. Consequence, accepted: the
+   agent correlates a transcript line to a handle by member_id and
+   recency, not by an in-line token.
 
 ## 3. Pre-agreed return shape, for the next attempt
 
@@ -95,3 +113,28 @@ third one:
   the send may go out unthreaded (`reply_threading: false` on non-Gmail
   providers, push.ts:1029) and the agent must learn the omission, not read
   it as delivered.
+
+## 4. What this brief accepted, and what it did not touch
+
+- **Nothing a member receives changed.** No rendering, no attribution
+  text, no marker, no message body: the only new surface is the room MCP
+  server's `room_view`, which members never see. Proven by test: the text
+  a member receives is byte-identical with and without the capture, and
+  the pre-BRIEF-48 `room_view` shape is preserved exactly when the dep is
+  unwired.
+- **Handle-less paths, declared (the "dead handle" audit):** a room-web or
+  simulated message mints no handle (no provider id exists — absence, not
+  a dead handle); a command's id (`join <code>`, `resume <slug>`) is still
+  dropped (nothing citable to do with it); a blocked/failed send mints
+  none (nothing was accepted, nothing to react to); a pruned handle
+  resolves to `undefined` — the future tool reports it named.
+- **Resolution ≠ capability.** A mail inbound id resolves fine and is
+  perfectly good for reply threading; a reaction on mail must still be a
+  named refusal. The ref's `channel` is there so the future tool can draw
+  that line without a second source of truth.
+- **A legacy room** (written before `messageRefs` existed) loads
+  unchanged: both keys are optional, absent reads as "no citable
+  messages", the first mint backfills the counter from the array length
+  the same way `deliverySeq` did. Nothing is rewritten at load.
+- **Not done here, on purpose:** the react/reply TOOLS themselves, and any
+  `#m12`-in-the-attribution-line design. Both need daylight.

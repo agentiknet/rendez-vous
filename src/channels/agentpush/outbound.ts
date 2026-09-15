@@ -68,10 +68,10 @@ export class AgentpushTransport implements Transport {
     this.fetchImpl = opts.fetchImpl ?? fetch
   }
 
-  async send(member: Member, message: OutboundMessage): Promise<void> {
+  async send(member: Member, message: OutboundMessage): Promise<string | undefined> {
     const provider = this.providerFor(member)
-    if (provider === undefined) return
-    await this.checkedSend(member.id, provider, member.address.contactRef, { text: message.text })
+    if (provider === undefined) return undefined
+    return await this.checkedSend(member.id, provider, member.address.contactRef, { text: message.text })
   }
 
   /** Two real paths, one fallback:
@@ -88,29 +88,26 @@ export class AgentpushTransport implements Transport {
    *    Telegram member silently became a line of text. The limitation was
    *    real; treating it as unfixable was not.
    */
-  async sendMedia(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<void> {
+  async sendMedia(member: Member, png: Uint8Array, caption: string, publicUrl?: string): Promise<string | undefined> {
     const provider = this.providerFor(member)
-    if (provider === undefined) return
+    if (provider === undefined) return undefined
 
     if (provider !== "whatsapp") {
       if (publicUrl === undefined) {
-        await this.sendText(member.id, provider, member.address.contactRef, caption)
-        return
+        return await this.sendText(member.id, provider, member.address.contactRef, caption)
       }
-      await this.checkedSend(member.id, provider, member.address.contactRef, {
+      return await this.checkedSend(member.id, provider, member.address.contactRef, {
         text: caption,
         media: [{ type: "image", url: publicUrl, caption }],
       })
-      return
     }
 
     const mediaId = await this.uploadImage(member.id, provider, png)
     if (mediaId === undefined) {
-      await this.sendText(member.id, provider, member.address.contactRef, caption)
-      return
+      return await this.sendText(member.id, provider, member.address.contactRef, caption)
     }
 
-    await this.checkedSend(member.id, provider, member.address.contactRef, {
+    return await this.checkedSend(member.id, provider, member.address.contactRef, {
       text: caption,
       media: [{ type: "image", providerMediaId: mediaId, caption }],
     })
@@ -131,17 +128,16 @@ export class AgentpushTransport implements Transport {
    *  - **Telegram and the rest** — send by the public `media[].url`, the
    *    only media path that driver has.
    *  - **SMS** — no media at all; degrades to the URL as text. */
-  async sendAttachment(member: Member, attachment: OutboundAttachment): Promise<void> {
+  async sendAttachment(member: Member, attachment: OutboundAttachment): Promise<string | undefined> {
     const provider = this.providerFor(member)
-    if (provider === undefined) return
+    if (provider === undefined) return undefined
 
     if (provider === "sms") {
-      await this.sendText(member.id, provider, member.address.contactRef, attachmentFallbackText(attachment))
-      return
+      return await this.sendText(member.id, provider, member.address.contactRef, attachmentFallbackText(attachment))
     }
 
     if (provider !== "whatsapp") {
-      await this.checkedSend(member.id, provider, member.address.contactRef, {
+      return await this.checkedSend(member.id, provider, member.address.contactRef, {
         ...(attachment.caption !== undefined ? { text: attachment.caption } : {}),
         media: [
           {
@@ -153,7 +149,6 @@ export class AgentpushTransport implements Transport {
           },
         ],
       })
-      return
     }
 
     const bytes = await this.fetchAttachment(member.id, attachment)
@@ -169,7 +164,7 @@ export class AgentpushTransport implements Transport {
       throw new Error(`agentpush upload_media returned no media id for ${attachment.filename} (member ${member.id})`)
     }
 
-    await this.checkedSend(member.id, provider, member.address.contactRef, {
+    return await this.checkedSend(member.id, provider, member.address.contactRef, {
       ...(attachment.caption !== undefined ? { text: attachment.caption } : {}),
       media: [
         {
@@ -213,13 +208,19 @@ export class AgentpushTransport implements Transport {
    *  path runs). BRIEF-42: `client.call` never throws, so without this
    *  every one of these resolved silently and the caller stamped a
    *  confirmation for a hand-off that never happened. Shared by `send`,
-   *  `sendMedia` and `sendAttachment`. */
+   *  `sendMedia` and `sendAttachment`.
+   *
+   *  BRIEF-48: resolves to the provider's `message_id` on a
+   *  `sent`/`queued` result — the id the engine captures onto the delivery
+   *  record and the room's citable tail (`Room.messageRefs`), instead of
+   *  dropping it as this method did before. `undefined` on any other
+   *  outcome (the caller has already thrown for `blocked`/`failed`). */
   private async checkedSend(
     memberId: string,
     provider: MessengerProvider,
     address: string,
     content: Record<string, unknown>,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const result = await this.client.call(`member ${memberId}`, "send_message", {
       to: { channel: provider, address },
       content,
@@ -233,10 +234,19 @@ export class AgentpushTransport implements Transport {
     if (isSendMessageResult(result) && result.status === "failed") {
       throw new Error(result.error)
     }
+    if (isSendMessageResult(result) && (result.status === "sent" || result.status === "queued")) {
+      return result.message_id
+    }
+    return undefined
   }
 
-  private async sendText(memberId: string, provider: MessengerProvider, address: string, text: string): Promise<void> {
-    await this.checkedSend(memberId, provider, address, { text })
+  private async sendText(
+    memberId: string,
+    provider: MessengerProvider,
+    address: string,
+    text: string,
+  ): Promise<string | undefined> {
+    return await this.checkedSend(memberId, provider, address, { text })
   }
 
   /** THE one upload path (BRIEF-44: shared with `sendAttachment`, which used

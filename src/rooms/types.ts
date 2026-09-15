@@ -311,6 +311,17 @@ export interface Delivery {
    *  concept degrades to. Same reason it is optional rather than a separate
    *  `Delivery` arm as `toolName`'s doc gives. */
   readonly attachment?: DeliveryAttachment
+  /** BRIEF-48: the provider-native message id of the send this record
+   *  delivered (agentpush `send_message` → `message_id`), captured by the
+   *  drain the moment the transport accepted the hand-off. Present only on
+   *  PUSH records a provider actually confirmed (`status: "delivered"`,
+   *  `confirmedBy: "transport"`) and only when the provider returned one —
+   *  a pull record (outbox) and a failed send carry none, and absence is
+   *  the honest value, never backfilled. It is the outbound half of the
+   *  react/reply identity plumbing (docs/REACT-REPLY.md §2, piece 2): the
+   *  handle that resolves to it lives in `Room.messageRefs`. Same optional-
+   *  key JSON round-trip rule as `toolName` and `attachment`. */
+  readonly providerMessageId?: string
   readonly status: "pending" | "delivered" | "failed"
   /** Failure count, not attempt count: it only moves when a send fails, and
    *  a delivered record carries `0` (PLAN-02 §3-D2). Renamed from `attempts`
@@ -328,6 +339,79 @@ export interface Delivery {
   readonly lastError: string | undefined
   readonly createdAt: string
   readonly deliveredAt: string | undefined
+}
+
+/** BRIEF-48 (docs/REACT-REPLY.md §2): one message this room can PROVE the
+ *  id of — a provider-native id an agent could hand to agentpush's
+ *  `send_reaction`/`reply_to_message_id` tomorrow. Two halves of the same
+ *  plumbing:
+ *
+ *  - `direction: "inbound"` — the `messageId` of a member's message,
+ *    captured at ingest instead of dying in the dedup FIFO
+ *    (src/service/http.ts passes it through `InboundInput
+ *    .providerMessageId`);
+ *  - `direction: "outbound"` — the `message_id` a provider returned for a
+ *    send, captured by the drain (`Delivery.providerMessageId`) instead of
+ *    being discarded.
+ *
+ *  `handle` is the agent's citation currency: a short room-local `m<n>`,
+ *  minted once (never reused — `messageRefSeq` is a monotonic counter like
+ *  `deliverySeq`), resolvable ONLY within its room. The member never sees a
+ *  handle: the attribution line is untouched (the deliberate out-of-scope
+ *  decision this brief records); handles are exposed agent-side, through
+ *  `room_view`'s `recent_messages`.
+ *
+ *  Honesty rules this type encodes:
+ *  - a handle exists only where a provider id was ACTUALLY captured — no
+ *    handle is minted for a room-web message (no provider), a message whose
+ *    envelope carried no id, or a send that failed/blocked (nothing was
+ *    accepted, so there is nothing to react to);
+ *  - a handle resolving proves the id, NOT the capability: mail inbound
+ *    ids resolve fine, and a future reaction tool must still refuse named
+ *    on a channel that cannot react (check_delivery's receipts convention
+ *    — resolution ≠ capability);
+ *  - the map is a bounded tail (prune below); a pruned handle resolves to
+ *    nothing, which the future tool must report as `unknown message
+ *    handle`, never as a send to a guessed message. */
+export interface MessageRef {
+  readonly handle: string
+  readonly memberId: string
+  readonly direction: "inbound" | "outbound"
+  /** The channel the id is native to — `whatsapp`/`telegram`/`sms`/`mail`,
+   *  i.e. the address provider the id belongs to, never `room-web` (no
+   *  provider, no handle — see above). */
+  readonly channel: string
+  readonly providerId: string
+  readonly createdAt: string
+}
+
+/** How many `MessageRef`s one room keeps, newest first. Same reasoning as
+ *  `MAX_RETAINED_DELIVERED`: `RoomStore.persist` serializes the whole store
+ *  on every write, so an unbounded array taxes every room; and a handle
+ *  older than a day is one an agent is unlikely to still be citing — the
+ *  conversation it belonged to has moved on. 100 is a full day of a busy
+ *  room's citable messages. Past the window or the cap, the handle resolves
+ *  to nothing and the caller says so — never a guessed message. */
+export const MAX_RETAINED_MESSAGE_REFS = 100
+
+/** How old a `MessageRef` may be. See `MAX_RETAINED_MESSAGE_REFS`. */
+export const MESSAGE_REF_RETENTION_MS = 24 * 60 * 60 * 1000
+
+/** Drop `MessageRef`s past the retention window or beyond the newest
+ *  `MAX_RETAINED_MESSAGE_REFS`, keeping the survivors newest-first in their
+ *  original (oldest-first) order. An undateable ref (unparseable
+ *  `createdAt`) is dropped rather than kept: it can never age out, which is
+ *  exactly the unbounded retention this prune exists to prevent. */
+export function pruneMessageRefs(
+  refs: readonly MessageRef[],
+  nowMs: number,
+): MessageRef[] {
+  const fresh = refs.filter((ref) => {
+    const stamp = Date.parse(ref.createdAt)
+    return !Number.isNaN(stamp) && nowMs - stamp <= MESSAGE_REF_RETENTION_MS
+  })
+  if (fresh.length <= MAX_RETAINED_MESSAGE_REFS) return [...fresh]
+  return fresh.slice(fresh.length - MAX_RETAINED_MESSAGE_REFS)
 }
 
 /** `Delivery.id` → its position in the room's monotonic `deliverySeq`. Ids
@@ -557,4 +641,23 @@ export interface Room {
    *  zero, the honest value for a room that has (as far as we know) never
    *  pruned anything. Costs one number. */
   deliveryLowWater?: number
+  /** BRIEF-48: the citable-message tail (docs/REACT-REPLY.md §2, piece 3)
+   *  — provider-native message ids an agent can reach through a short
+   *  `handle`, inbound and outbound alike. See `MessageRef`. A work tail
+   *  like `deliveries`, pruned on the same reasoning
+   *  (`pruneMessageRefs`); a handle past the prune resolves to nothing and
+   *  the resolver says so. Optional key, absent on rooms that predate the
+   *  field — same JSON round-trip rule as `pendingDeliveries` and `asks`;
+   *  carries provider ids, never message text, so it needs no public-
+   *  projection strip beyond what `room_view`'s ids-and-counts HARD RULE
+   *  already enforces. */
+  messageRefs?: MessageRef[]
+  /** Monotonic counter behind `MessageRef.handle` (`m<n>`) — the LAST seq
+   *  handed out, so the next is `messageRefSeq + 1`. Never derived from
+   *  `messageRefs.length`: that array is pruned, and a reused handle would
+   *  silently re-point an old citation at a different message — the wrong-
+   *  record fault `deliverySeq`'s doc records for `Delivery.id`. Optional
+   *  key, absent on rooms that predate the field; `RoomStore
+   *  .recordMessageRef` falls back to the array length for such a room. */
+  messageRefSeq?: number
 }

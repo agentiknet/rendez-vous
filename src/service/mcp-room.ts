@@ -43,7 +43,7 @@ import {
   type AudienceSendBackend,
   type AudienceSendOutcome,
 } from "../audience/contract.ts"
-import type { Room } from "../rooms/types.ts"
+import type { MessageRef, Room } from "../rooms/types.ts"
 import { sendReachedNobody } from "./post-turn-assertions.ts"
 import { roomViewHtml } from "./room-view.html.ts"
 import type { McpResponse, McpServerMount } from "./mcp-canvakit.ts"
@@ -178,6 +178,14 @@ export interface McpRoomDeps {
    *  `room_view` exactly as the step-1 surface: announced to nobody, which —
    *  unlike a record minted for a member with no surface — claims nothing. */
   readonly recordToolCall?: (code: string, toolName: string, args: unknown) => Promise<void>
+  /** BRIEF-48 (docs/REACT-REPLY.md §2): the citable-message tail behind
+   *  `room_view`'s `recent_messages` — the one place the agent can learn a
+   *  message HANDLE, because tool results here are agent-only (the member
+   *  never sees them; the attribution line is deliberately untouched). The
+   *  refs carry ids, directions and timestamps, never message text (the
+   *  file-top HARD RULE). Omitting it leaves `room_view` exactly its
+   *  pre-BRIEF-48 shape — no `recent_messages` key at all. */
+  readonly recentMessages?: (code: string) => readonly MessageRef[]
   /** Deliver a voice-note attachment (the result of rendering a `[[say …]]`
    *  marker inside a say/whisper call) to one member. When absent, spoken
    *  words from markers are included in the delivery text instead. */
@@ -242,7 +250,7 @@ const ROSTER_TOOL = {
 const ROOM_VIEW_TOOL = {
   name: "room_view",
   description:
-    "Render THIS room as a live panel for whoever is looking at this conversation. It shows the SHARED view every member and spectator can already see — code, state, roster, artifact — and nothing private: no whispers, no addressed traffic. The text result reports whether a document is currently rendered (`artifact.rendered` and `artifact.rendered_at`) but NOT its contents: if `rendered` is true, say so — the humans are already looking at it — and do not claim nothing has been rendered.",
+    "Render THIS room as a live panel for whoever is looking at this conversation. It shows the SHARED view every member and spectator can already see — code, state, roster, artifact — and nothing private: no whispers, no addressed traffic. The text result reports whether a document is currently rendered (`artifact.rendered` and `artifact.rendered_at`) but NOT its contents: if `rendered` is true, say so — the humans are already looking at it — and do not claim nothing has been rendered. When the result carries `recent_messages`, each entry is a citable message: `handle` (quote it verbatim when asked to react to or reply to a specific message — a handle you invent is refused), `member_id` (who sent/received it), `direction` (`inbound` = a member's message, `outbound` = something the room sent), `channel` and `created_at`. Handles are for YOU only — never mention them to members; correlate a transcript line to a handle by its member_id and recency.",
   inputSchema: { type: "object", properties: {} },
   _meta: { ui: { resourceUri: ROOM_VIEW_RESOURCE_URI } },
 } as const
@@ -453,6 +461,12 @@ function rosterResult(room: Room): Record<string, unknown> {
 async function roomViewResult(
   room: Room,
   storedRender: McpRoomDeps["storedRender"],
+  /** BRIEF-48: the citable-message tail, listed newest-first. Optional dep,
+   *  so a harness without it leaves the result EXACTLY its pre-BRIEF-48
+   *  shape — the key is genuinely absent, not present-and-empty (an empty
+   *  list would claim "nothing citable", which the absence of a dep cannot
+   *  know). */
+  recentMessages: McpRoomDeps["recentMessages"],
 ): Promise<{
   result: Record<string, unknown>
   /** BRIEF-10 step 2: the summary recorded in the outbox when this view
@@ -465,6 +479,10 @@ async function roomViewResult(
 }> {
   const render = storedRender === undefined ? undefined : await storedRender(room.code)
   const artifactRendered = render !== undefined
+  // Newest-first, capped at 20: the agent correlates a transcript line it
+  // just read with a handle by SENDER (member_id) and recency, so the head
+  // of the tail is what is ever useful — and ids only, HARD RULE (no text).
+  const messageRefs = recentMessages === undefined ? undefined : recentMessages(room.code).slice(-20).reverse()
   const result: Record<string, unknown> = {
     content: [
       {
@@ -477,6 +495,17 @@ async function roomViewResult(
             artifactRendered
               ? { rendered: true, rendered_at: render.renderedAt }
               : { rendered: false },
+          ...(messageRefs !== undefined
+            ? {
+                recent_messages: messageRefs.map((ref) => ({
+                  handle: ref.handle,
+                  member_id: ref.memberId,
+                  direction: ref.direction,
+                  channel: ref.channel,
+                  created_at: ref.createdAt,
+                })),
+              }
+            : {}),
         }),
       },
     ],
@@ -618,7 +647,7 @@ export function createMcpRoomHandler(
       }
 
       if (params.name === ROOM_VIEW_TOOL.name) {
-        const view = await roomViewResult(room, deps.storedRender)
+        const view = await roomViewResult(room, deps.storedRender, deps.recentMessages)
         // BRIEF-10 step 2, after the result exists — never before, so a
         // failed view cannot announce itself (the same ordering rule
         // `render_artifact`'s arm follows). Nothing here selects the

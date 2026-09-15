@@ -1130,6 +1130,10 @@ async function handleAgentpushWebhook(
     displayName,
     tier: "messenger",
     text: ingested.text,
+    // BRIEF-48: the envelope's provider id was previously consumed by the
+    // dedup and dropped — it now survives the ingest as a citable ref
+    // (docs/REACT-REPLY.md §2, piece 1).
+    providerMessageId: envelope.messageId,
   })
 
   if (ingested.records.length > 0 && "room" in outcome) {
@@ -1205,6 +1209,9 @@ async function handleAgentpushMailWebhook(
     displayName: envelope.displayName,
     tier: "email",
     text: ingested.text,
+    // BRIEF-48: same capture as the messaging webhook above — the mail
+    // envelope's `message.message_id` survives as a citable ref.
+    providerMessageId: envelope.messageId,
   })
 
   if (ingested.records.length > 0 && "room" in outcome) {
@@ -1549,6 +1556,11 @@ export function roomMcpDeps(
     recordToolCall: async (code, toolName, args) => {
       await service.deliveryEngine.recordToolCall(code, toolName, args)
     },
+    // BRIEF-48: the agent's ONLY handle surface (docs/REACT-REPLY.md §2) —
+    // the citable-message tail, listed by `room_view`'s `recent_messages`.
+    // The member never sees a handle: the attribution line is deliberately
+    // untouched by this brief.
+    recentMessages: (code) => service.messageRefsOf(code),
     ...(openaiKey !== undefined
       ? {
           tts: new OpenAiTtsProvider(openaiKey),

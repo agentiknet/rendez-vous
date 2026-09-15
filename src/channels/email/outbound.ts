@@ -36,8 +36,8 @@ export class EmailTransport implements Transport {
     this.client = new AgentpushToolClient(opts)
   }
 
-  async send(member: Member, message: OutboundMessage): Promise<void> {
-    if (member.address.provider !== "email") return
+  async send(member: Member, message: OutboundMessage): Promise<string | undefined> {
+    if (member.address.provider !== "email") return undefined
 
     const artifactLine =
       message.artifactUrl !== undefined && !message.text.includes(message.artifactUrl)
@@ -58,7 +58,13 @@ export class EmailTransport implements Transport {
 
     if (isSendMessageResult(result) && (result.status === "sent" || result.status === "queued")) {
       this.threadRefByMember.set(member.id, result.message_id)
+      // BRIEF-48: the id no longer stays in this in-memory map alone — it is
+      // returned so the delivery engine can put it on the record and mint
+      // the room's citable outbound ref. The map keeps its thread role
+      // (Gmail threading needs the LAST message id, not any citable one).
+      return result.message_id
     }
+    return undefined
   }
 
   private subjectFor(member: Member): string {
