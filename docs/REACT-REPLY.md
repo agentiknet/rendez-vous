@@ -76,11 +76,16 @@ deliberately deferred — see §4.
    with a monotonic counter — never the array length, which the prune
    shrinks; a reused handle would silently re-point an old citation.
    `pruneMessageRefs`: newest 100, 24 h window, undateable entries dropped.
+   **The 24 h bound is an expiry, enforced at READ, not a write-time
+   retention** (the follow-up commit made this true after the verifier's
+   finding): `resolveMessageRef` and `messageRefsOf` both refuse a ref
+   past the window (and an undateable one — it can never be proven young),
+   so a quiet room's stale-but-still-arrayed refs answer `undefined` too.
    Resolution: `RoomStore`/`RoomService.resolveMessageRef` — `undefined`
-   for unknown/malformed/pruned/foreign handles. THE NAMED ABSENCE: a
-   handle that does not resolve must be reported as `unknown message
-   handle`, never a send to a guessed message (OUTBOX §1's fault, wearing
-   a resolver).
+   for unknown/malformed/expired/pruned/foreign handles. THE NAMED
+   ABSENCE: a handle that does not resolve must be reported as `unknown
+   message handle`, never a send to a guessed message (OUTBOX §1's fault,
+   wearing a resolver).
 4. **Expose the handles where the agent reads, member-invisible.** DONE,
    via `room_view`'s `recent_messages` (newest 20, ids only — HARD RULE:
    no text, and the provider id itself is NOT listed; the agent cites the

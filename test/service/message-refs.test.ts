@@ -333,6 +333,57 @@ test("RoomService resolves handles: named failure for an unknown one", async () 
 
 // --- agent surface: room_view's recent_messages -------------------------------
 
+test("the 24h bound holds at READ, not just at the next mint — a quiet room loses nothing, a loud room keeps the door honest", async () => {
+  const { store, code } = await roomWith()
+  const now = Date.now()
+  const fresh = await store.recordMessageRef(
+    code,
+    { memberId: "member-a", direction: "inbound", channel: "telegram", providerId: "wamid.fresh" },
+    new Date(now - 1000).toISOString(),
+  )
+  await store.recordMessageRef(
+    code,
+    { memberId: "member-a", direction: "inbound", channel: "telegram", providerId: "wamid.stale" },
+    new Date(now - MESSAGE_REF_RETENTION_MS - 60_000).toISOString(),
+  )
+  // No mint happens after this point: the stale ref is still IN the room's
+  // array. The resolver must still refuse it — the bound is an expiry, not
+  // a write-time retention that depends on traffic.
+  assert.ok(
+    (store.get(code)?.messageRefs ?? []).some((ref) => ref.providerId === "wamid.stale"),
+    "precondition: the stale ref is physically still in the array",
+  )
+  const freshResolved = await store.resolveMessageRef(code, fresh.handle)
+  assert.equal(freshResolved?.providerId, "wamid.fresh")
+  const staleHandle = (store.get(code)?.messageRefs ?? []).find((ref) => ref.providerId === "wamid.stale")?.handle
+  assert.ok(staleHandle !== undefined)
+  assert.equal(
+    await store.resolveMessageRef(code, staleHandle),
+    undefined,
+    "an expired handle fails named, whatever the room's traffic",
+  )
+})
+
+test("an undateable ref never resolves — it can never be proven young", async () => {
+  const { store, code } = await roomWith()
+  const ref = await store.recordMessageRef(
+    code,
+    { memberId: "member-a", direction: "inbound", channel: "telegram", providerId: "wamid.x" },
+    "not-a-date",
+  )
+  assert.equal(await store.resolveMessageRef(code, ref.handle), undefined)
+})
+
+test("RoomService.resolveMessageRef inherits the read-side bound", async () => {
+  const { service, store, code } = await serviceWith()
+  const stale = await store.recordMessageRef(
+    code,
+    { memberId: "y", direction: "inbound", channel: "telegram", providerId: "tg-old" },
+    new Date(Date.now() - MESSAGE_REF_RETENTION_MS - 60_000).toISOString(),
+  )
+  assert.equal(await service.resolveMessageRef(code, stale.handle), undefined)
+})
+
 test("room_view lists the citable tail for the agent, ids only", async () => {
   const { createMcpRoomHandler, roomAudienceToken } = await import("../../src/service/mcp-room.ts")
   const { env } = await import("../../src/env.ts")

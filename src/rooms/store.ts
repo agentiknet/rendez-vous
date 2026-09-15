@@ -15,6 +15,7 @@ import {
   type MemberDelivery,
   type MessageRef,
   type PendingDelivery,
+  MESSAGE_REF_RETENTION_MS,
   pruneMessageRefs,
   type RecoveryLink,
   type Room,
@@ -826,26 +827,45 @@ export class RoomStore {
   }
 
   /** Resolve a handle to the message it cites — `undefined` when the handle
-   *  is unknown, malformed, pruned, or names another room. Deliberately NOT
-   *  an error: the absence is the answer, and the caller's job is to say so
-   *  plainly (`unknown message handle: m12`), never to fall back to a
-   *  guessed message. */
+   *  is unknown, malformed, pruned, EXPIRED, or names another room.
+   *
+   *  BRIEF-48 follow-up: the 24 h bound is an expiry enforced HERE, at
+   *  read, not merely a write-time retention. `pruneMessageRefs` runs only
+   *  on mint, so a quiet room's array can still physically hold refs past
+   *  their window — and a resolver that read the array directly would keep
+   *  answering for them, making "100 recent, 24 h" a guarantee wider than
+   *  the code honours (traffic-dependent, exactly the OUTBOX §1 shape).
+   *  An undateable ref is refused too: it can never be proven young, and
+   *  the prune would have dropped it at the next mint anyway. Deliberately
+   *  NOT an error: the absence is the answer, and the caller's job is to
+   *  say so plainly (`unknown message handle: m12`), never to fall back to
+   *  a guessed message. */
   async resolveMessageRef(code: string, handle: string): Promise<MessageRef | undefined> {
     const normalized = normalizeCode(code)
     if (normalized === undefined) return undefined
     const room = this.rooms.get(normalized)
     if (room === undefined) return undefined
-    return (room.messageRefs ?? []).find((ref) => ref.handle === handle)
+    const ref = (room.messageRefs ?? []).find((candidate) => candidate.handle === handle)
+    if (ref === undefined) return undefined
+    const stamp = Date.parse(ref.createdAt)
+    if (Number.isNaN(stamp) || Date.now() - stamp > MESSAGE_REF_RETENTION_MS) return undefined
+    return ref
   }
 
   /** The room's whole citable tail, oldest first — the read behind
    *  `room_view`'s `recent_messages` (the agent's only handle surface; the
    *  member never sees one — the attribution line is untouched by
-   *  BRIEF-48). */
+   *  BRIEF-48). Filtered by the SAME read-side expiry `resolveMessageRef`
+   *  applies, so the agent can never cite a handle this list showed and
+   *  the resolver then refuses: one bound, enforced at both doors. */
   messageRefsOf(code: string): readonly MessageRef[] {
     const normalized = normalizeCode(code)
     if (normalized === undefined) return []
-    return this.rooms.get(normalized)?.messageRefs ?? []
+    const now = Date.now()
+    return (this.rooms.get(normalized)?.messageRefs ?? []).filter((ref) => {
+      const stamp = Date.parse(ref.createdAt)
+      return !Number.isNaN(stamp) && now - stamp <= MESSAGE_REF_RETENTION_MS
+    })
   }
 
   async update(
