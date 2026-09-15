@@ -17,6 +17,7 @@ import { join } from "node:path"
 import { after, test } from "node:test"
 import { MediaStore } from "../../src/service/media-store.ts"
 import type { RoomService } from "../../src/service/room-service.ts"
+import { ADDRESSING_REMINDER } from "../../src/fanin/index.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
 
 const WEBHOOK_SECRET = "test-email-webhook-secret"
@@ -179,7 +180,7 @@ test("POST /inbound/agentpush-mail with a room code hint joins the room first, t
   const lastPrompt = promptRequests[promptRequests.length - 1]?.body
   assert.ok(isRecord(lastPrompt))
   if (!isRecord(lastPrompt)) return
-  assert.equal(lastPrompt.prompt, "[bob@example.com · email] count me in")
+  assert.equal(lastPrompt.prompt, "[bob@example.com · email] count me in" + ADDRESSING_REMINDER)
 })
 
 test("POST /inbound/agentpush-mail replays the same messageId and returns deduped:true, without fanning in twice", async () => {

@@ -15,6 +15,7 @@ import { LocalBooter, type SessionBooter } from "../../src/service/booter.ts"
 import { MediaStore } from "../../src/service/media-store.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport, type RecordedSend } from "../../src/service/transports.ts"
+import { ADDRESSING_REMINDER } from "../../src/fanin/index.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -855,7 +856,7 @@ test("a plain message from a known member fans in with queue:true and the [Name 
   assert.ok(isRecord(body))
   if (!isRecord(body)) return
   assert.equal(body.queue, true)
-  assert.equal(body.prompt, "[Alice · whatsapp] what is the plan?")
+  assert.equal(body.prompt, "[Alice · whatsapp] what is the plan?" + ADDRESSING_REMINDER)
 
   await service.stop()
 })

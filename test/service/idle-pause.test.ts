@@ -10,6 +10,7 @@ import { LocalBooter } from "../../src/service/booter.ts"
 import { MediaStore } from "../../src/service/media-store.ts"
 import { RoomService } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
+import { ADDRESSING_REMINDER } from "../../src/fanin/index.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -171,7 +172,7 @@ test("a message to a paused room resumes it, and the message still fans in with 
   assert.equal(body.queue, true)
   // Attribution names the CHANNEL, not the tier: `messenger` covers both
   // Telegram and WhatsApp, so one human on both was indistinguishable.
-  assert.equal(body.prompt, "[Alice · whatsapp] are you still there?")
+  assert.equal(body.prompt, "[Alice · whatsapp] are you still there?" + ADDRESSING_REMINDER)
 })
 
 test("resume <code> on an active room is a no-op that replies with room status", async () => {

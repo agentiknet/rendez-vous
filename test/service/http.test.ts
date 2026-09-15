@@ -16,6 +16,7 @@ import { MediaStore } from "../../src/service/media-store.ts"
 import { memberToken } from "../../src/service/mcp-room.ts"
 import { RoomService, type RoomWebSendOutcome } from "../../src/service/room-service.ts"
 import { MemoryTransport } from "../../src/service/transports.ts"
+import { ADDRESSING_REMINDER } from "../../src/fanin/index.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -421,7 +422,7 @@ test("POST /rooms/:code/send registers a room-web member once (idempotent) and p
   assert.ok(isRecord(firstBody))
   if (!isRecord(firstBody)) return
   assert.equal(firstBody.queue, true)
-  assert.equal(firstBody.prompt, "[Chloe · room-web] hi from the web")
+  assert.equal(firstBody.prompt, "[Chloe · room-web] hi from the web" + ADDRESSING_REMINDER)
 })
 
 test("POST /rooms/:code/send treats new/join/resume as plain text, not commands", async () => {
@@ -438,7 +439,7 @@ test("POST /rooms/:code/send treats new/join/resume as plain text, not commands"
   assert.equal(promptRequests.length, 1)
   const body = promptRequests[0]?.body
   assert.ok(isRecord(body))
-  if (isRecord(body)) assert.equal(body.prompt, "[Dana · room-web] new")
+  if (isRecord(body)) assert.equal(body.prompt, "[Dana · room-web] new" + ADDRESSING_REMINDER)
 
   const spawnCalls = daemon.requestsReceived.filter((r) => r.path === "/sessions/agent").length
   assert.equal(spawnCalls, 1, "no second room should have been created")
@@ -1282,7 +1283,7 @@ test("POST /rooms/:code/agui routes a trailing user message to the SAME send pat
   assert.equal(promptRequests.length, 1, "the message must reach the fan-in exactly once, not be reimplemented")
   const body = promptRequests[0]?.body
   assert.ok(isRecord(body))
-  if (isRecord(body)) assert.equal(body.prompt, "[Chloe · room-web] hi from AG-UI")
+  if (isRecord(body)) assert.equal(body.prompt, "[Chloe · room-web] hi from AG-UI" + ADDRESSING_REMINDER)
 })
 
 test("POST /rooms/:code/agui writes RUN_STARTED before awaiting the room's send — a client that gives up mid-turn has still seen a run that started, never a silent empty response (BRIEF-07)", async () => {
@@ -1424,7 +1425,7 @@ test("POST /rooms/:code/agui: replaying the same AguiMessage.id as the same memb
   assert.equal(prompts.length, 1, "the room must hold exactly one inbound record for the one sentence")
   const body = prompts[0]?.body
   assert.ok(isRecord(body))
-  if (isRecord(body)) assert.equal(body.prompt, "[Chloe · room-web] one sentence, polled")
+  if (isRecord(body)) assert.equal(body.prompt, "[Chloe · room-web] one sentence, polled" + ADDRESSING_REMINDER)
 })
 
 test("POST /rooms/:code/agui: a genuinely NEW user message with a NEW id, posted after a replayed one, IS sent — the send-once key is per message, not 'never send twice'", async () => {
@@ -1465,7 +1466,7 @@ test("POST /rooms/:code/agui: a genuinely NEW user message with a NEW id, posted
   assert.equal(prompts.length, 2, "a new id must be sent even though the thread it rides replays an old one")
   const lastBody = prompts[1]?.body
   assert.ok(isRecord(lastBody))
-  if (isRecord(lastBody)) assert.equal(lastBody.prompt, "[Chloe · room-web] the second one")
+  if (isRecord(lastBody)) assert.equal(lastBody.prompt, "[Chloe · room-web] the second one" + ADDRESSING_REMINDER)
 })
 
 // --- POST /rooms/:code/outbox/cursor (PLAN-02 step 4: the ack) --------------

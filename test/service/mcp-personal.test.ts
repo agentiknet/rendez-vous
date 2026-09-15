@@ -16,6 +16,7 @@ import { outboxFor } from "../../src/service/outbox.ts"
 import type { McpResponse } from "../../src/service/mcp-canvakit.ts"
 import { createMcpRoomHandler, roomAudienceToken, type McpRoomDeps } from "../../src/service/mcp-room.ts"
 import { createMcpPersonalHandler, principalToken, type McpPersonalDeps } from "../../src/service/mcp-personal.ts"
+import { ADDRESSING_REMINDER } from "../../src/fanin/index.ts"
 import { startExtendedFakeDaemon, type ExtendedFakeDaemon } from "./fake-daemon-extra.ts"
 
 async function freshDir(): Promise<string> {
@@ -523,7 +524,7 @@ test("rendezvous_send into a room the principal is in produces the byte-identica
   const body = afterSend[1]?.body
   assert.ok(isRecord(body))
   if (!isRecord(body)) return
-  assert.equal(body.prompt, "[Alice · whatsapp] what is the plan?", "attributed to Alice, in her own voice")
+  assert.equal(body.prompt, "[Alice · whatsapp] what is the plan?" + ADDRESSING_REMINDER, "attributed to Alice, in her own voice")
   assert.equal(body.queue, true)
 
   // And the result says nothing about the content (the file-top HARD RULE),
