@@ -336,7 +336,9 @@ function script(code: string, room: Room, agentBusy: boolean): string {
         badge.className = "badge";
         badge.textContent = match[1].trim() + " · " + match[2].trim();
         const body = document.createElement("div");
-        body.textContent = match[3];
+        // fanIn appends a trailing (system note: ...) addressing reminder to
+        // every member prompt; it is for the agent, never for the screen.
+        body.textContent = match[3].replace(/\s*\(system note:.*\)\s*$/, "");
         el.appendChild(badge);
         el.appendChild(body);
       } else {

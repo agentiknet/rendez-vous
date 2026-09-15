@@ -1,7 +1,13 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { DaemonClient } from "../../src/daemon/client.ts"
-import { attributeText, fanIn, parseAudienceDirective, type Sender } from "../../src/fanin/index.ts"
+import {
+  ADDRESSING_REMINDER,
+  attributeText,
+  fanIn,
+  parseAudienceDirective,
+  type Sender,
+} from "../../src/fanin/index.ts"
 import { startFakeDaemon } from "../daemon/fake-daemon.ts"
 
 const alice: Sender = { id: "member_alice", displayName: "Alice", tier: "messenger" }
@@ -120,7 +126,7 @@ test("fanIn sends the private marker and strips the directive", async () => {
     const req = daemon.requestsReceived.find(r => r.path === "/sessions/sess_priv/prompt")
     assert.ok(req !== undefined)
     assert.deepEqual(req.body, {
-      prompt: "[Alice · messenger · private] did Bob approve the budget?",
+      prompt: "[Alice · messenger · private] did Bob approve the budget?" + ADDRESSING_REMINDER,
       queue: true,
       origin: "rdv:member_alice",
     })
@@ -139,7 +145,7 @@ test("fanIn posts the attributed text with queue:true and an rdv: origin", async
     const req = daemon.requestsReceived.find(r => r.path === "/sessions/sess_fanin/prompt")
     assert.ok(req !== undefined)
     assert.deepEqual(req.body, {
-      prompt: "[Alice · messenger] hello room",
+      prompt: "[Alice · messenger] hello room" + ADDRESSING_REMINDER,
       queue: true,
       origin: "rdv:member_alice",
     })
@@ -155,7 +161,7 @@ test("fanIn trims raw text before attribution", async () => {
     await fanIn(client, "sess_trim", alice, "  hello  \n")
     const req = daemon.requestsReceived.find(r => r.path === "/sessions/sess_trim/prompt")
     assert.ok(req !== undefined)
-    assert.deepEqual(req.body, { prompt: "[Alice · messenger] hello", queue: true, origin: "rdv:member_alice" })
+    assert.deepEqual(req.body, { prompt: "[Alice · messenger] hello" + ADDRESSING_REMINDER, queue: true, origin: "rdv:member_alice" })
   } finally {
     await daemon.close()
   }
@@ -196,9 +202,9 @@ test("two members fanning in while the session is busy both land as queued turns
       .filter(r => r.path === "/sessions/sess_room/prompt")
       .map(r => r.body)
     assert.deepEqual(prompts, [
-      { prompt: "[Alice · messenger] who wants pizza", queue: true, origin: "rdv:member_alice" },
-      { prompt: "[Alice · messenger] I vote pepperoni", queue: true, origin: "rdv:member_alice" },
-      { prompt: "[Bob · email] I vote mushroom", queue: true, origin: "rdv:member_bob" },
+      { prompt: "[Alice · messenger] who wants pizza" + ADDRESSING_REMINDER, queue: true, origin: "rdv:member_alice" },
+      { prompt: "[Alice · messenger] I vote pepperoni" + ADDRESSING_REMINDER, queue: true, origin: "rdv:member_alice" },
+      { prompt: "[Bob · email] I vote mushroom" + ADDRESSING_REMINDER, queue: true, origin: "rdv:member_bob" },
     ])
   } finally {
     await daemon.close()

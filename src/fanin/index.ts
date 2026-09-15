@@ -77,6 +77,14 @@ export function parseAudienceDirective(raw: string): AudienceDirective {
   return { audience: "room", text: trimmed, explicit: false }
 }
 
+/** Per-turn nudge (Jeremy, 2026-09-15): under load the agent answers in
+ *  bare text, which no phone receives — the capability lines only say this
+ *  once, at boot, and it forgets. Every member turn carries the reminder at
+ *  its end; the room page strips it back out when rendering
+ *  (src/web/page.ts renderUserPrompt). */
+export const ADDRESSING_REMINDER =
+  "\n\n(system note: bare text reaches no phone — reply through the say/whisper tools: say = the whole room, whisper = one member)"
+
 /** `· private` is the whole contract with the agent: the capability lines
  *  (src/service/booter.ts) tell it that a turn carrying that marker must be
  *  answered entirely inside a whisper block addressed to that member. The
@@ -104,7 +112,7 @@ export async function fanIn(
     return { ok: false, reason: "other", status: 0, message: "empty message, not sent" }
   }
   return client.prompt(sessionId, {
-    prompt: attributeText(sender, directive.text, directive.audience),
+    prompt: attributeText(sender, directive.text, directive.audience) + ADDRESSING_REMINDER,
     queue: true,
     origin: `rdv:${sender.id}`,
   })
