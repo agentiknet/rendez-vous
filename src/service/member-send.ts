@@ -2,7 +2,7 @@ import type { OutboundMessage, Transport } from "../fanout/types.ts"
 import { deliveryModeOf, type Member } from "../rooms/types.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import type { DeliveryEngine } from "./delivery.ts"
-import { attachmentFallbackText, hasSendAttachment, hasSendMedia, type OutboundAttachment } from "./transports.ts"
+import { attachmentFallbackText, hasSendMedia, type OutboundAttachment } from "./transports.ts"
 
 /** R6/BRIEF-20: every outbound push message carries its room's SLUG — the
  *  one affordance that makes the active room legible on a surface (Telegram,
@@ -77,20 +77,36 @@ export class MemberSender {
     await this.transport.send(member, withRoomSlugSuffix(slug, message))
   }
 
-  /** An agent- or room-authored attachment. A push transport with no
-   *  attachment concept still gets the file — as its URL in text, the same
-   *  fallback the call sites applied themselves before this helper existed.
-   *  A pull member gets the URL as a record; their tab fetches it. */
+/** An agent- or room-authored attachment. A pull member gets the URL as a
+ *  record; their tab fetches it. A push member is a delivery like any other
+ *  (BRIEF-44): minted as a `kind: "attachment"` record through the engine
+ *  and sent by the drain, so a refused file is `failed` with the provider's
+ *  reason as `lastError`, retried, reported to the agent, and apologised for
+ *  to the member — instead of vanishing between the caller and the
+ *  transport, which is how the WhatsApp images of 2026-09-14 left no trace.
+ *  The drain is awaited, so a caller that resolves has seen the send
+ *  attempted, exactly as when the transport was called directly. */
   async sendAttachment(code: string, member: Member, attachment: OutboundAttachment): Promise<void> {
     if (this.isPull(member)) {
       await this.acceptSystemRecord(code, member, attachmentFallbackText(attachment))
       return
     }
-    if (hasSendAttachment(this.transport)) {
-      await this.transport.sendAttachment(member, attachment)
+    const outcome = await this.engine.accept(
+      code,
+      "attachment",
+      attachmentFallbackText(attachment),
+      [member.id],
+      undefined,
+      attachment,
+    )
+    if (outcome.unknown.includes(member.id)) {
+      const room = this.store.get(code)
+      console.warn(
+        `member-send: push member ${member.id} is not in room ${code} (${room === undefined ? "no such room" : "roster mismatch"}) — nothing was delivered`,
+      )
       return
     }
-    await this.transport.send(member, { text: attachmentFallbackText(attachment), artifactUrl: undefined })
+    await this.engine.drain(code)
   }
 
   /** Media (the join QR). A pull member cannot be pushed bytes; the record

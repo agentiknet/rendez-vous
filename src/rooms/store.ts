@@ -9,6 +9,7 @@ import {
   type Ask,
   type AskStatus,
   type Delivery,
+  type DeliveryAttachment,
   type DeliveryTarget,
   type Member,
   type MemberDelivery,
@@ -236,11 +237,21 @@ function isDelivery(value: unknown): value is Delivery {
   // one record, it refuses to boot the service against a room file that
   // contains one. Keep it in step with `Delivery["kind"]`.
   const toolName = "toolName" in value ? value.toolName : undefined
+  // `attachment` (BRIEF-44) is optional and present on `kind: "attachment"`
+  // records only: the file the record delivers. Same rule as `toolName` — a
+  // record failing here refuses the whole room file, it never silently
+  // drops one.
+  const attachment = "attachment" in value ? value.attachment : undefined
   return (
     isString(value.id) &&
     isString(value.memberId) &&
-    (value.kind === "say" || value.kind === "whisper" || value.kind === "system" || value.kind === "tool") &&
+    (value.kind === "say" ||
+      value.kind === "whisper" ||
+      value.kind === "system" ||
+      value.kind === "tool" ||
+      value.kind === "attachment") &&
     isStringOrUndefined(toolName) &&
+    (attachment === undefined || isDeliveryAttachment(attachment)) &&
     isString(value.text) &&
     isDeliveryStatus(value.status) &&
     ((typeof failures === "number" && failures >= 0) ||
@@ -255,6 +266,20 @@ function isDelivery(value: unknown): value is Delivery {
 /** The pre-rename failure count key, read off the raw record. */
 function legacyAttempts(record: object): unknown {
   return "attempts" in record ? record.attempts : undefined
+}
+
+/** The file on a `kind: "attachment"` record (BRIEF-44). Kept in step with
+ *  `DeliveryAttachment` (src/rooms/types.ts). */
+function isDeliveryAttachment(value: unknown): value is DeliveryAttachment {
+  if (!isObject(value)) return false
+  const caption = "caption" in value ? value.caption : undefined
+  return (
+    isString(value.url) &&
+    isString(value.filename) &&
+    isString(value.mimeType) &&
+    (value.kind === "image" || value.kind === "document" || value.kind === "audio" || value.kind === "video") &&
+    isStringOrUndefined(caption)
+  )
 }
 
 /** Read-time migration for one room (PLAN-02 §3-D1/D2): members persisted

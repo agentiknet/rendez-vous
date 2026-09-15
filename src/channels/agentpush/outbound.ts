@@ -58,9 +58,14 @@ export type AgentpushTransportOptions = AgentpushToolClientOptions
 
 export class AgentpushTransport implements Transport {
   private readonly client: AgentpushToolClient
+  /** Same injectable fetch as the tool client's: BRIEF-44's WhatsApp
+   *  fetch-then-upload fetches the attachment bytes back through it, so a
+   *  test can serve both the file and the tool endpoints with one stub. */
+  private readonly fetchImpl: typeof fetch
 
   constructor(opts: AgentpushTransportOptions) {
     this.client = new AgentpushToolClient(opts)
+    this.fetchImpl = opts.fetchImpl ?? fetch
   }
 
   async send(member: Member, message: OutboundMessage): Promise<void> {
@@ -111,12 +116,21 @@ export class AgentpushTransport implements Transport {
     })
   }
 
-  /** An agent-authored attachment (`[[attach …]]`). Unlike `sendMedia` there
-   *  are no local bytes: the file is already served at a public, room-keyed
-   *  URL, which is exactly the shape every messenger provider here accepts —
-   *  so this one path covers image, document, audio and video on WhatsApp and
-   *  Telegram alike, with no per-provider branch. SMS has no media at all and
-   *  degrades to the URL as text. */
+  /** An agent-authored attachment (`[[attach …]]`). BRIEF-44: the same
+   *  asymmetry `sendMedia` above documents, so this branches the same way —
+   *  the one-path-for-everyone version sent WhatsApp a `media[].url`, which
+   *  that driver cannot send (it has no URL fetch of its own), and the two
+   *  images of room RDV-LJ6J on 2026-09-14 never arrived while the tool
+   *  result still said `sent`.
+   *
+   *  - **WhatsApp** — fetch the bytes back from the attachment's public URL
+   *    (it is OUR url, served by this very service — a local concern, not a
+   *    third-party one), then the SAME `uploadImage` upload `sendMedia`
+   *    uses, then send by the returned `providerMediaId`. No second upload
+   *    path: two of them is how this file ended up with two beliefs.
+   *  - **Telegram and the rest** — send by the public `media[].url`, the
+   *    only media path that driver has.
+   *  - **SMS** — no media at all; degrades to the URL as text. */
   async sendAttachment(member: Member, attachment: OutboundAttachment): Promise<void> {
     const provider = this.providerFor(member)
     if (provider === undefined) return
@@ -126,14 +140,41 @@ export class AgentpushTransport implements Transport {
       return
     }
 
+    if (provider !== "whatsapp") {
+      await this.checkedSend(member.id, provider, member.address.contactRef, {
+        ...(attachment.caption !== undefined ? { text: attachment.caption } : {}),
+        media: [
+          {
+            type: attachment.kind,
+            url: attachment.url,
+            filename: attachment.filename,
+            mimeType: attachment.mimeType,
+            ...(attachment.caption !== undefined ? { caption: attachment.caption } : {}),
+          },
+        ],
+      })
+      return
+    }
+
+    const bytes = await this.fetchAttachment(member.id, attachment)
+    const mediaId = await this.uploadImage(member.id, provider, bytes, {
+      type: attachment.kind,
+      filename: attachment.filename,
+      mimeType: attachment.mimeType,
+    })
+    if (mediaId === undefined) {
+      // Not a silent degrade: converting the file to a caption is how the
+      // old Telegram path hid its limitation. The caller (the delivery
+      // engine) records the failure and the member is told.
+      throw new Error(`agentpush upload_media returned no media id for ${attachment.filename} (member ${member.id})`)
+    }
+
     await this.checkedSend(member.id, provider, member.address.contactRef, {
       ...(attachment.caption !== undefined ? { text: attachment.caption } : {}),
       media: [
         {
           type: attachment.kind,
-          url: attachment.url,
-          filename: attachment.filename,
-          mimeType: attachment.mimeType,
+          providerMediaId: mediaId,
           ...(attachment.caption !== undefined ? { caption: attachment.caption } : {}),
         },
       ],
@@ -198,15 +239,50 @@ export class AgentpushTransport implements Transport {
     await this.checkedSend(memberId, provider, address, { text })
   }
 
-  private async uploadImage(memberId: string, provider: MessengerProvider, png: Uint8Array): Promise<string | undefined> {
+  /** THE one upload path (BRIEF-44: shared with `sendAttachment`, which used
+   *  to have none and sent WhatsApp a url instead). `meta` generalises the
+   *  QR call's hardcoded image/qr.png/image/png to any attachment; omitted,
+   *  the QR defaults hold. A `blocked` upload is the provider refusing —
+   *  same typed refusal as `send_message`, thrown so the engine's failure
+   *  path sees the reason verbatim. */
+  private async uploadImage(
+    memberId: string,
+    provider: MessengerProvider,
+    png: Uint8Array,
+    meta?: { readonly type?: string; readonly filename?: string; readonly mimeType?: string },
+  ): Promise<string | undefined> {
     const result = await this.client.call(`member ${memberId}`, "upload_media", {
       channel: provider,
-      type: "image",
+      type: meta?.type ?? "image",
       data: Buffer.from(png).toString("base64"),
-      filename: "qr.png",
-      mimeType: "image/png",
+      filename: meta?.filename ?? "qr.png",
+      mimeType: meta?.mimeType ?? "image/png",
     })
+    if (isSendMessageResult(result) && result.status === "blocked") {
+      throw new SendBlockedError(result.blocked_reason)
+    }
     if (!isUploadMediaResult(result)) return undefined
     return result.media_id
+  }
+
+  /** BRIEF-44: `sendAttachment` holds no bytes, only the public URL this
+   *  service itself serves (`attachmentUrl` → the artifact proxy) — so the
+   *  WhatsApp upload needs a fetch-then-upload. The fetch is deliberately
+   *  through the same `fetchImpl` the tool client uses: in tests one stub
+   *  serves both the file and the tool endpoints, and in production it is
+   *  the same global fetch the sends ride. A failed fetch throws — the
+   *  engine records it and retries, never a silent degrade. */
+  private async fetchAttachment(memberId: string, attachment: OutboundAttachment): Promise<Uint8Array> {
+    let response: Response
+    try {
+      response = await this.fetchImpl(attachment.url)
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new Error(`could not fetch ${attachment.filename} for upload (member ${memberId}): ${reason}`)
+    }
+    if (!response.ok) {
+      throw new Error(`could not fetch ${attachment.filename} for upload (member ${memberId}): HTTP ${response.status}`)
+    }
+    return new Uint8Array(await response.arrayBuffer())
   }
 }

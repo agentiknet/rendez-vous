@@ -1,3 +1,5 @@
+import type { AttachmentKind } from "../fanout/attach.ts"
+
 export type Tier = "messenger" | "email" | "room-web"
 
 export interface Address {
@@ -244,6 +246,19 @@ export interface Ask {
  *  agent is told through the reactive channel instead. */
 export const MAX_DELIVERY_ATTEMPTS = 5
 
+/** The file a `kind: "attachment"` delivery record carries (BRIEF-44) —
+ *  structurally the same payload `OutboundAttachment`
+ *  (src/service/transports.ts) hands the transport, defined here so the
+ *  persisted record stays self-describing without `rooms` depending on
+ *  `service`. */
+export interface DeliveryAttachment {
+  readonly url: string
+  readonly filename: string
+  readonly mimeType: string
+  readonly kind: AttachmentKind
+  readonly caption: string | undefined
+}
+
 /** One accepted-but-not-yet-confirmed outbound message to one member
  *  (PLAN §3.3). Persisted so a process that dies between acceptance and
  *  delivery re-attempts on boot: this, not a tool receipt, is the
@@ -263,9 +278,17 @@ export interface Delivery {
    *  shared document moved. It rides this same queue rather than a second
    *  channel so it inherits the cursor, the per-member scoping, the
    *  retention floor and the gap marker — a parallel "events" stream would
-   *  have to re-derive all four, and §1's table is ten entries of what
-   *  happens when a second path re-derives one of them wrongly. */
-  readonly kind: "say" | "whisper" | "system" | "tool"
+*  have to re-derive all four, and §1's table is ten entries of what
+ *  happens when a second path re-derives one of them wrongly.
+ *
+ *  `"attachment"` (BRIEF-44) is a file the agent or the room authored,
+ *  addressed to one member. It is NOT a new agent-callable kind —
+ *  `AudienceSendKind` (src/audience/contract.ts) is untouched, and the
+ *  comment there about `system` staying out of the agent's vocabulary
+ *  applies to this one too: the agent says words with say/whisper; an
+ *  attachment is minted by the delivery layer that already parsed the
+ *  marker. It rides the same queue for the same reason `"tool"` does. */
+  readonly kind: "say" | "whisper" | "system" | "tool" | "attachment"
   /** For every kind but `"tool"`, the text a human reads. For `"tool"` it is
    *  the call's arguments as JSON — which is exactly what AG-UI's
    *  `TOOL_CALL_ARGS.delta` carries, so the translation is a copy, not a
@@ -280,6 +303,14 @@ export interface Delivery {
    *  engine, the store and the retention prune; splitting the type would
    *  touch all of them to express one extra string. */
   readonly toolName?: string
+  /** Set on `kind: "attachment"` records only (BRIEF-44): the file the record
+   *  delivers, held on the record so the drain can hand it to the transport
+   *  (`sendAttachment`) and a failed send can name it in the member's
+   *  apology. `text` carries the URL spelled out (`attachmentFallbackText`) —
+   *  what a pull member reads and what a transport with no attachment
+   *  concept degrades to. Same reason it is optional rather than a separate
+   *  `Delivery` arm as `toolName`'s doc gives. */
+  readonly attachment?: DeliveryAttachment
   readonly status: "pending" | "delivered" | "failed"
   /** Failure count, not attempt count: it only moves when a send fails, and
    *  a delivered record carries `0` (PLAN-02 §3-D2). Renamed from `attempts`

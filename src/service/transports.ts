@@ -1,17 +1,14 @@
-import type { AttachmentKind } from "../fanout/attach.ts"
+import type { DeliveryAttachment } from "../rooms/types.ts"
 import type { OutboundMessage, Transport } from "../fanout/types.ts"
 import { UnroutedDeliveryError, deliveryFromAddress, type Member, type MemberDelivery } from "../rooms/types.ts"
 
 /** A file the agent asked to send (`[[attach …]]`, src/fanout/attach.ts),
  *  already addressable at a public, room-keyed URL the provider fetches
- *  server-side. No bytes pass through this service. */
-export interface OutboundAttachment {
-  readonly url: string
-  readonly filename: string
-  readonly mimeType: string
-  readonly kind: AttachmentKind
-  readonly caption: string | undefined
-}
+ *  server-side. No bytes pass through this service. BRIEF-44: it is the SAME
+ *  shape a `kind: "attachment"` delivery record carries
+ *  (`DeliveryAttachment`, src/rooms/types.ts) — one type, not two that can
+ *  drift, because the record is what the engine's drain sends. */
+export type OutboundAttachment = DeliveryAttachment
 
 /** A `Transport` that can optionally also deliver an image. Detect support
  *  with `hasSendMedia`/`"sendMedia" in transport` rather than assuming it —
