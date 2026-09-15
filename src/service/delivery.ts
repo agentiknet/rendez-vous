@@ -113,6 +113,27 @@ function spokenSeqFor(kind: Delivery["kind"], seq: number): number | undefined {
   }
 }
 
+/** True when MEMBER's most recent `kind: "tool"` record of this exact
+ *  TOOLNAME already carries TEXT — the dedup `recordToolCall` mints against
+ *  (see its doc comment for why). Scanned newest-first, and matched on
+ *  `toolName` as well as `memberId`, so an interleaved call to a DIFFERENT
+ *  tool (a `render_artifact` between two `room_view`s) can never hide behind
+ *  it: only the most recent record of the SAME tool, for the SAME member,
+ *  counts. A member with no such record yet — never called, or its record
+ *  already pruned — always mints: there is nothing on file to compare
+ *  against, so nothing is skipped (docs/OUTBOX.md §1: an absent comparison
+ *  must never read as "unchanged"). */
+function sameAsLastToolCall(deliveries: readonly Delivery[], memberId: string, toolName: string, text: string): boolean {
+  for (let index = deliveries.length - 1; index >= 0; index -= 1) {
+    const delivery = deliveries[index]
+    if (delivery === undefined || delivery.memberId !== memberId || delivery.kind !== "tool" || delivery.toolName !== toolName) {
+      continue
+    }
+    return delivery.text === text
+  }
+  return false
+}
+
 /** Drop `delivered` records that are past the retention window or beyond the
  *  newest `MAX_RETAINED_DELIVERED`; keep every `pending` and `failed` one, and
  *  keep the surviving records in their original order.
@@ -435,16 +456,37 @@ export class DeliveryEngine {
    *  eleven. A push member simply gets no record, and the absence claims
    *  nothing.
    *
+   *  DEDUPED AT THE MINT, per member (BRIEF-10 step 2 follow-up): a member
+   *  whose most recent `kind: "tool"` record of this SAME `toolName`
+   *  already carries this exact `text` gets no new record. `room_view` is
+   *  what forced this — an agent that looks at the room every turn before
+   *  acting (the normal pattern) would otherwise mint one record per turn
+   *  forever, and `MAX_RETAINED_DELIVERED` is a ROOM-WIDE cap: those records
+   *  eventually crowd `say`/`whisper` history out of it, including the
+   *  history addressed to the exact member the announcement is for. Docs
+   *  §1 ("absence MUST NEVER read as delivery") does not forbid this: the
+   *  existing record already states the true fact, and skipping a byte-
+   *  identical repeat asserts nothing new about delivery — it declines to
+   *  restate what is already on record, for the member it is already on
+   *  record for. A room that actually changed (a member joined, an artifact
+   *  rendered) produces a different `text` and mints exactly as before.
+   *
    *  `args` is serialised once, here, so `text` holds exactly the bytes
    *  `TOOL_CALL_ARGS.delta` will carry. Returns the ids of the members that
    *  got a record, so a caller can tell "nobody was watching" from "the room
-   *  was told" — the two must never look alike. */
+   *  was told" — the two must never look alike; a deduped member is neither
+   *  (the room already told it, in the record still on file), so it appears
+   *  in neither list. */
   async recordToolCall(code: string, toolName: string, args: unknown): Promise<AcceptOutcome> {
     const room = this.store.get(code)
     if (room === undefined) throw new Error(`unknown room: ${code}`)
     const watching = room.members.filter((member) => deliveryModeOf(member) === "pull").map((member) => member.id)
     if (watching.length === 0) return { accepted: [], unknown: [] }
-    return this.accept(code, "tool", JSON.stringify(args), watching, toolName)
+    const text = JSON.stringify(args)
+    const deliveries = room.deliveries ?? []
+    const changed = watching.filter((memberId) => !sameAsLastToolCall(deliveries, memberId, toolName, text))
+    if (changed.length === 0) return { accepted: [], unknown: [] }
+    return this.accept(code, "tool", text, changed, toolName)
   }
 
   /** Attempt every `pending` delivery still under the retry cap for one

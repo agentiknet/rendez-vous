@@ -6,7 +6,7 @@ import { after, test } from "node:test"
 import { env } from "../../src/env.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
 import type { Delivery, Member, Room } from "../../src/rooms/types.ts"
-import { DeliveryEngine } from "../../src/service/delivery.ts"
+import { DeliveryEngine, MAX_RETAINED_DELIVERED } from "../../src/service/delivery.ts"
 import { MemberSender } from "../../src/service/member-send.ts"
 import { publicArtifactUrl } from "../../src/service/artifact-proxy.ts"
 import { roomRenderToken, type McpResponse } from "../../src/service/mcp-canvakit.ts"
@@ -408,7 +408,7 @@ interface DeliveryHarness {
   engine: DeliveryEngine
 }
 
-async function deliveryHarness(members: Member[]): Promise<DeliveryHarness> {
+async function deliveryHarness(members: Member[], storedRender?: McpRoomDeps["storedRender"]): Promise<DeliveryHarness> {
   const dir = trackDir(await freshDir())
   const store = await RoomStore.open(dir)
   const created = await store.create()
@@ -430,6 +430,7 @@ async function deliveryHarness(members: Member[]): Promise<DeliveryHarness> {
     recordToolCall: async (code, toolName, args) => {
       await engine.recordToolCall(code, toolName, args)
     },
+    ...(storedRender !== undefined ? { storedRender } : {}),
   }
   return { store, code: created.code, memberIds, transport, engine, handler: createMcpRoomHandler(deps) }
 }
@@ -1216,4 +1217,67 @@ test("BRIEF-47: the marker path keeps its exact behaviour — a [[attach …]] i
   }
   const payload = resultPayload(res)
   assert.ok(Array.isArray(payload.accepted))
+})
+
+// --- BRIEF-10 step 2 follow-up: room_view churn must not evict the
+// conversation it announces itself into (docs/OUTBOX.md §1, §7) ---
+
+const CHURN_CALLS = MAX_RETAINED_DELIVERED + 5
+
+test("BRIEF-10 step 2 follow-up: N consecutive room_view calls on an unchanged room mint exactly one kind:tool record", async () => {
+  const h = await deliveryHarness([member("m1", DISTINCTIVE_NAME, "room-web", "room-web")])
+
+  for (let i = 0; i < CHURN_CALLS; i += 1) {
+    const res = asRpc(await callTool(h.handler, "room_view", {}, h.code))
+    assert.equal(res.status, 200)
+  }
+
+  const records = h.store.get(h.code)?.deliveries ?? []
+  const tools = records.filter((record) => record.kind === "tool")
+  assert.equal(tools.length, 1, `${CHURN_CALLS} identical room_view calls must mint exactly one record, not one per call`)
+})
+
+test("BRIEF-10 step 2 follow-up: a say sent before repeated room_view calls on an unchanged room is still retained afterwards", async () => {
+  const h = await deliveryHarness([member("m1", DISTINCTIVE_NAME, "room-web", "room-web")])
+  const screenId = h.memberIds[0]
+  assert.ok(screenId !== undefined)
+
+  const sayRes = asRpc(await callTool(h.handler, "say", { text: "the picnic moves to noon" }, h.code))
+  assert.equal(sayRes.status, 200)
+  await h.engine.drain(h.code)
+  await h.engine.ackCursor(h.code, screenId, h.store.get(h.code)?.deliverySeq ?? 0)
+
+  // The normal pattern: look at the room, then act — and a real client
+  // drains and acks what it was just shown, exactly like the room page
+  // does. Repeating this is what turns "one laggard tab" (protected by its
+  // own retention floor) into "an acked member's own history, competing in
+  // the room-wide count cap" — the shape the churn actually takes.
+  for (let i = 0; i < CHURN_CALLS; i += 1) {
+    await callTool(h.handler, "room_view", {}, h.code)
+    await h.engine.drain(h.code)
+    await h.engine.ackCursor(h.code, screenId, h.store.get(h.code)?.deliverySeq ?? 0)
+  }
+
+  const records = h.store.get(h.code)?.deliveries ?? []
+  const say = records.find((record) => record.kind === "say")
+  assert.ok(say !== undefined, "the say record must survive the room_view churn it predates")
+})
+
+test("BRIEF-10 step 2 follow-up: a room that genuinely changed between two room_view calls still mints a second record", async () => {
+  let rendered = false
+  const h = await deliveryHarness(
+    [member("m1", DISTINCTIVE_NAME, "room-web", "room-web")],
+    async () => (rendered ? { renderedAt: "2026-09-15T00:00:00.000Z" } : undefined),
+  )
+
+  const first = asRpc(await callTool(h.handler, "room_view", {}, h.code))
+  assert.equal(first.status, 200)
+  rendered = true
+  const second = asRpc(await callTool(h.handler, "room_view", {}, h.code))
+  assert.equal(second.status, 200)
+
+  const records = h.store.get(h.code)?.deliveries ?? []
+  const tools = records.filter((record) => record.kind === "tool")
+  assert.equal(tools.length, 2, "the artifact went from absent to rendered between the two views — both facts are true and both must be on record")
+  assert.notEqual(tools[0]?.text, tools[1]?.text)
 })

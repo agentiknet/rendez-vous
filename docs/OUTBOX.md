@@ -114,6 +114,20 @@ The rules that are specific to it:
   is the one most likely to need it.
 - **It is recorded only after a successful render**, and a failure to record
   never fails the render: the document exists and the agent must be told so.
+- **Deduped at the mint, per member (BRIEF-10 step 2 follow-up).** A member
+  whose most recent `kind: "tool"` record of the SAME `toolName` already
+  carries the SAME `text` gets no new record. `room_view` is what forced
+  this: it is called every turn by design (look at the room, then act), and
+  every call mints one record per pull member. Retention (§7) is a ROOM-WIDE
+  cap, so an unchanging room's repeated announcement would otherwise crowd
+  `say`/`whisper` history — including the addressee's own — out of it. This
+  does not weaken §1: the existing record already states the true fact, and
+  skipping a byte-identical repeat asserts nothing new about delivery, for
+  the member it is already on record for. A room that actually changed
+  (a member joined, an artifact rendered) produces different `text` and
+  mints exactly as before. A member with no prior record of that `toolName`
+  — never called, or its record already pruned — always mints: absence of a
+  comparison is not itself grounds to skip one.
 
 In AG-UI it becomes the `TOOL_CALL_START` / `TOOL_CALL_ARGS` / `TOOL_CALL_END`
 triple, keyed by the delivery id, **instead of** — never alongside — the text
