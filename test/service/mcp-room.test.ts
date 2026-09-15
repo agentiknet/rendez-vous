@@ -872,8 +872,16 @@ test("BRIEF-41: a whisper with [[attach ...]] delivers the file only to the targ
   await h.engine.drain(h.code)
 
   const sends = h.transport.sends
-  const targetSend = sends.find((s) => s.memberId === target)
-  assert.ok(targetSend !== undefined, "target received the whisper")
+  // BRIEF 46 (inverted assertion): the old line here asserted
+  // `targetSend !== undefined` — "target received the whisper" — but the
+  // harness stubs `deliverAttachment` (the file never appears in
+  // `transport.sends`), so that send could only be the EMPTY-TEXT whisper
+  // record the BRIEF-46 defect-2 fix removed. The target's real receipt is
+  // the file, asserted two lines down. The property is now stated the
+  // strong way: no empty transport send goes out to anyone.
+  for (const send of sends) {
+    assert.notEqual(send.text, "", "no empty transport send, for anyone")
+  }
   for (const send of sends) {
     assert.ok(!send.text.includes("[[attach"), "no literal marker reaches any member")
   }
