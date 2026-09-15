@@ -5,10 +5,12 @@ import { join } from "node:path"
 import { after, test } from "node:test"
 import { env } from "../../src/env.ts"
 import { RoomStore } from "../../src/rooms/store.ts"
-import type { Member, Room } from "../../src/rooms/types.ts"
+import type { Delivery, Member, Room } from "../../src/rooms/types.ts"
 import { DeliveryEngine } from "../../src/service/delivery.ts"
+import { MemberSender } from "../../src/service/member-send.ts"
 import { publicArtifactUrl } from "../../src/service/artifact-proxy.ts"
 import { roomRenderToken, type McpResponse } from "../../src/service/mcp-canvakit.ts"
+import type { OutboundAttachment } from "../../src/service/transports.ts"
 import {
   createMcpRoomHandler,
   localRoomMcpServer,
@@ -943,4 +945,275 @@ test("BRIEF-10 step 2: the recorded text carries no display name — the deliver
   const recorded = tools.map((record) => record.text).join("\n")
   assert.ok(!recorded.includes(DISTINCTIVE_NAME), "the pull member's display name must never appear in the record")
   assert.ok(!recorded.includes("Bob"), "no other member's display name either")
+})
+
+// --- BRIEF-47: send_file — the typed path beside the [[attach …]] marker --
+
+/** A harness for the `send_file` tool that routes through the SAME machinery
+ *  the marker path uses: MemberSender.sendAttachment over a real
+ *  DeliveryEngine, with the probe and the failure corrections wired. */
+async function sendFileHarness(
+  members: Member[],
+  opts?: { probeUrl?: (url: string) => Promise<boolean> },
+): Promise<
+  DeliveryHarness & {
+    corrections: string[]
+    sender: MemberSender
+    memberNotice: (memberId: string) => string
+  }
+> {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+  const created = await store.create()
+  for (const member of members) {
+    await store.addMember(created.code, {
+      displayName: member.displayName,
+      tier: member.tier,
+      address: member.address,
+    })
+  }
+  const live = store.get(created.code)
+  assert.ok(live !== undefined)
+  const memberIds = live.members.map((member) => member.id)
+  const transport = new FakeTransport()
+  const corrections: string[] = []
+  const engine = new DeliveryEngine({
+    store,
+    transport,
+    ...(opts?.probeUrl !== undefined ? { probeUrl: opts.probeUrl } : {}),
+    reportFailure: async (_code, correction) => {
+      corrections.push(correction)
+    },
+  })
+  const sender = new MemberSender({ store, transport, engine })
+  const sendOne = async (code: string, memberId: string, attachment: OutboundAttachment): Promise<void> => {
+    const room = store.get(code)
+    if (room === undefined) return
+    const target = room.members.find((candidate) => candidate.id === memberId)
+    if (target === undefined) return
+    await sender.sendAttachment(code, target, attachment)
+  }
+  const deps: McpRoomDeps = {
+    rooms: () => [live],
+    deliveries: engine,
+    // The room-service wiring: ONE sink (`service.deliverAttachment`) behind
+    // both dep names, so the marker path and the tool path share it.
+    sendFile: sendOne,
+    deliverAttachment: sendOne,
+  }
+  return {
+    store,
+    code: created.code,
+    memberIds,
+    transport,
+    engine,
+    sender,
+    corrections,
+    handler: createMcpRoomHandler(deps),
+    memberNotice: (memberId: string) =>
+      (store.get(created.code)?.deliveries ?? [])
+        .filter((record) => record.memberId === memberId && record.kind === "system")
+        .map((record) => record.text)
+        .join("\n"),
+  }
+}
+
+function resultPayload(res: { result?: Record<string, unknown> }): Record<string, unknown> {
+  const content = res.result?.content
+  assert.ok(Array.isArray(content) && content.length === 1)
+  return JSON.parse(String((content[0] as Record<string, unknown>).text)) as Record<string, unknown>
+}
+
+test("BRIEF-47: send_file delivers the file, minting the same attachment records a [[attach …]] marker produces", async () => {
+  const h = await sendFileHarness(DELIVERY_MEMBERS)
+
+  const res = asRpc(
+    await callTool(h.handler, "send_file", { file: "report.pdf", caption: "the Q3 numbers" }, h.code),
+  )
+  assert.equal(res.status, 200)
+  const payload = resultPayload(res)
+  assert.deepEqual(payload, {
+    accepted: true,
+    file: "report.pdf",
+    recipients: h.memberIds.map((id) => ({ member_id: id, ok: true })),
+    unknown: [],
+  })
+
+  await h.engine.drain(h.code)
+  const records = h.store.get(h.code)?.deliveries ?? []
+  const url = attachmentUrl(publicArtifactUrl(h.code), "report.pdf")
+  for (const memberId of h.memberIds) {
+    const record = records.find((candidate) => candidate.memberId === memberId)
+    assert.ok(record !== undefined, `member ${memberId} has a delivery record`)
+    if (record.kind === "attachment") {
+      assert.equal(record.status, "delivered", "the push member's file is confirmed by the transport")
+      assert.equal(record.attachment?.url, url)
+      assert.equal(record.attachment?.filename, "report.pdf")
+      assert.equal(record.attachment?.mimeType, "application/pdf")
+      assert.equal(record.attachment?.caption, "the Q3 numbers")
+      assert.equal(record.text, `the Q3 numbers\nreport.pdf: ${url}`)
+    } else {
+      assert.equal(record.kind, "system", "the pull member gets its URL spelled out, as the marker path does")
+      assert.ok(record.text.includes(url), "the pull record carries the same public URL")
+    }
+  }
+})
+
+// NOT a proof that production wires one sink — here `sendFile` and
+// `deliverAttachment` are the same stub by construction, so this only pins
+// the RECORD shape: what `MemberSender.sendAttachment` (the call
+// `RoomFanout.flush` makes for a served `[[attach …]]`) mints is what the
+// tool's mint must look like. The production one-sink wiring is asserted by
+// reading it at the composition root (test/service/http.test.ts, BRIEF-47
+// roomMcpDeps test), not by this harness.
+test("BRIEF-47: the send_file mint matches the record MemberSender.sendAttachment mints for the same file (record-shape pin, not a wiring proof)", async () => {
+  const viaTool = await sendFileHarness(DELIVERY_MEMBERS)
+  const viaMarker = await sendFileHarness(DELIVERY_MEMBERS)
+
+  const attachment = {
+    url: attachmentUrl(publicArtifactUrl(viaTool.code), "report.pdf"),
+    filename: "report.pdf",
+    mimeType: "application/pdf",
+    kind: "document" as const,
+    caption: "the Q3 numbers",
+  }
+
+  const res = asRpc(
+    await callTool(viaTool.handler, "send_file", { file: "report.pdf", caption: "the Q3 numbers" }, viaTool.code),
+  )
+  assert.equal(res.status, 200)
+  await viaTool.engine.drain(viaTool.code)
+
+  for (let index = 0; index < viaMarker.memberIds.length; index += 1) {
+    const markerRoom = viaMarker.store.get(viaMarker.code)
+    assert.ok(markerRoom !== undefined)
+    const markerMember = markerRoom.members[index]
+    assert.ok(markerMember !== undefined)
+    // The marker path's sender — the exact call RoomFanout.flush makes for a
+    // served `[[attach …]]` — mints the reference record.
+    await viaMarker.sender.sendAttachment(viaMarker.code, markerMember, attachment)
+
+    const toolRecord = (viaTool.store.get(viaTool.code)?.deliveries ?? []).find(
+      (candidate) => candidate.memberId === viaTool.memberIds[index],
+    )
+    const markerRecord = (viaMarker.store.get(viaMarker.code)?.deliveries ?? []).find(
+      (candidate) => candidate.memberId === markerMember.id,
+    )
+    assert.ok(toolRecord !== undefined && markerRecord !== undefined)
+    const strip = (record: Delivery) => {
+      const { id, memberId, createdAt, deliveredAt, ...rest } = record
+      void id
+      void memberId
+      void createdAt
+      void deliveredAt
+      return rest
+    }
+    assert.deepEqual(strip(toolRecord), strip(markerRecord), "the tool's mint has the marker sender's exact record shape")
+  }
+})
+
+test("BRIEF-47: send_file on a dead URL is never delivered — the member is told, the agent corrected, by the SAME engine probe", async () => {
+  const h = await sendFileHarness(
+    [member("m1", "Alice", "messenger", "telegram"), member("m2", "Bob", "messenger", "whatsapp")],
+    { probeUrl: async () => false },
+  )
+
+  const res = asRpc(await callTool(h.handler, "send_file", { file: "missing.pdf" }, h.code))
+  assert.equal(res.status, 200)
+  const payload = resultPayload(res)
+  assert.ok(!("sent" in payload), "no field may claim a send — BRIEF-23A's rule, one more tool")
+  assert.equal(payload.accepted, true, "the honest claim is accepted-for-delivery, not delivered")
+  await h.engine.drain(h.code)
+
+  const records = h.store.get(h.code)?.deliveries ?? []
+  const attachmentRecords = records.filter((record) => record.kind === "attachment")
+  assert.ok(attachmentRecords.length > 0, "the accept minted the attachment records")
+  for (const record of attachmentRecords) {
+    assert.equal(record.status, "failed", "a probed-dead file is never `delivered`")
+    assert.ok((record.lastError ?? "").length > 0, "the failure carries its reason")
+  }
+  assert.ok(
+    !records.some((record) => record.kind === "attachment" && record.status === "delivered"),
+    "no delivered attachment record exists",
+  )
+  assert.ok(h.corrections.length > 0, "the agent is corrected, naming the file")
+  assert.ok(h.corrections.some((correction) => correction.includes("missing.pdf")))
+  for (const memberId of h.memberIds) {
+    assert.ok(
+      h.memberNotice(memberId).includes("the file was not actually sent"),
+      "the member receives the honest one-liner, not the file",
+    )
+  }
+})
+
+test("BRIEF-47: an unknown member id comes back in the tool result, honestly, and nothing is sent", async () => {
+  const h = await sendFileHarness(DELIVERY_MEMBERS)
+
+  const res = asRpc(
+    await callTool(h.handler, "send_file", { file: "report.pdf", to: ["m-does-not-exist"] }, h.code),
+  )
+  assert.equal(res.status, 200)
+  const payload = resultPayload(res)
+  assert.deepEqual(payload, {
+    accepted: false,
+    file: "report.pdf",
+    recipients: [],
+    unknown: ["m-does-not-exist"],
+  })
+
+  const records = h.store.get(h.code)?.deliveries ?? []
+  assert.equal(records.length, 0, "an unknown id mints nothing — no broadcast, no record, no rescue")
+  assert.equal(h.transport.sends.length, 0)
+  assert.equal(h.corrections.length, 0)
+})
+
+test("BRIEF-47: send_file refuses a path that escapes the served root, without probing or minting", async () => {
+  const h = await sendFileHarness(DELIVERY_MEMBERS)
+
+  const res = asRpc(await callTool(h.handler, "send_file", { file: ".." }, h.code))
+  assert.equal(res.status, 200)
+  const payload = resultPayload(res)
+  assert.equal(payload.accepted, false)
+  assert.equal(payload.reason, "invalid-path")
+
+  const records = h.store.get(h.code)?.deliveries ?? []
+  assert.equal(records.length, 0, "no record, no notice, no send")
+  assert.equal(h.corrections.length, 0)
+})
+
+test("BRIEF-47: send_file is advertised only when the sendFile sink is wired, with its full schema", async () => {
+  const wired = await sendFileHarness(DELIVERY_MEMBERS)
+  const listing = asRpc(await wired.handler({ jsonrpc: "2.0", id: 1, method: "tools/list" }, tokenFor(wired.code)))
+  const tools = (listing.result?.tools as { name: string; inputSchema: Record<string, unknown> }[] | undefined) ?? []
+  const tool = tools.find((candidate) => candidate.name === "send_file")
+  assert.ok(tool !== undefined, "send_file must be advertised when the sink is wired")
+  const properties = tool.inputSchema.properties as Record<string, { type: string; required?: boolean }>
+  assert.equal(properties.file?.type, "string")
+  assert.equal(properties.caption?.type, "string")
+  assert.equal(properties.to?.type, "array")
+
+  const bare = harness([room(ROOM_A, MEMBERS_A)])
+  const bareRes = asRpc(await bare.handler({ jsonrpc: "2.0", id: 1, method: "tools/list" }, undefined))
+  const bareNames = ((bareRes.result?.tools as { name: string }[] | undefined) ?? []).map((tool) => tool.name)
+  assert.ok(!bareNames.includes("send_file"), "no sink, no tool")
+})
+
+test("BRIEF-47: the marker path keeps its exact behaviour — a [[attach …]] in a say still delivers the file through the same sink", async () => {
+  const h = await sendFileHarness(DELIVERY_MEMBERS)
+
+  const res = asRpc(
+    await callTool(h.handler, "say", { text: "here is the file\n[[attach brief47.pdf the brief]]" }, h.code),
+  )
+  assert.equal(res.status, 200)
+
+  const records = h.store.get(h.code)?.deliveries ?? []
+  assert.ok(records.length > 0)
+  for (const record of records) {
+    if (record.kind === "attachment") {
+      assert.equal(record.attachment?.filename, "brief47.pdf")
+      assert.equal(record.attachment?.caption, "the brief")
+    }
+  }
+  const payload = resultPayload(res)
+  assert.ok(Array.isArray(payload.accepted))
 })

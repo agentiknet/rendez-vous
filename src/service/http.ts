@@ -1537,6 +1537,12 @@ export function roomMcpDeps(
     deliveries: service.deliveryEngine,
     storedRender: getStoredRender,
     recoverIdentity,
+    // BRIEF-47: the sink behind `send_file`, the typed path beside the
+    // `[[attach …]]` marker — the SAME sink the marker-in-say path uses
+    // below (`service.deliverAttachment`), so both paths cross the exact
+    // same `MemberSender.sendAttachment` → `DeliveryEngine.attempt`
+    // machinery, URL probe and honest-failure arms included.
+    sendFile: (code, memberId, attachment) => service.deliverAttachment(code, memberId, attachment),
     // BRIEF-10 step 2: `room_view` announces itself on the SAME engine
     // `say`/`whisper` go through — one outbox, one cursor, no second channel
     // re-deriving them (docs/OUTBOX.md §2.1).

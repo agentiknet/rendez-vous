@@ -50,7 +50,7 @@ import type { McpResponse, McpServerMount } from "./mcp-canvakit.ts"
 import type { TtsProvider } from "../media/openai.ts"
 import type { SpeechMediaStore } from "../markers.ts"
 import { parseSpeech, renderSpeech } from "../markers.ts"
-import { attachmentUrl, parseAttachments } from "../fanout/attach.ts"
+import { attachmentUrl, kindAndMimeFor, parseAttachments, sanitizeName } from "../fanout/attach.ts"
 import { publicArtifactUrl } from "./artifact-proxy.ts"
 import type { OutboundAttachment } from "./transports.ts"
 
@@ -186,6 +186,18 @@ export interface McpRoomDeps {
     memberId: string,
     attachment: OutboundAttachment,
   ) => Promise<void>
+  /** BRIEF-47: the sink behind `send_file`, the typed path beside the
+   *  `[[attach …]]` marker. The SAME sink `deliverAttachment` is in
+   *  production — `RoomService.deliverAttachment` → `MemberSender
+   *  .sendAttachment` → `DeliveryEngine.accept` → `attempt` — so a file
+   *  sent by the tool crosses the exact machinery a marker's file crosses,
+   *  probe and honest-failure arms included. Omitting it leaves `send_file`
+   *  unadvertised and uncallable. */
+  readonly sendFile?: (
+    code: string,
+    memberId: string,
+    attachment: OutboundAttachment,
+  ) => Promise<void>
 }
 
 // --- JSON-RPC / MCP wire handling: same hand-rolled surface as canvakit's
@@ -268,6 +280,39 @@ const WHISPER_TOOL = {
       to: { type: "string", description: "The member_id to whisper to, from roster." },
     },
     required: ["text", "to"],
+  },
+} as const
+
+/** `send_file` (BRIEF-47) — the typed replacement for `[[attach …]]`, living
+ *  BESIDE it for now: the marker parser stays, and both paths deliver.
+ *  `file` is a path relative to the served artifact directory (sanitized
+ *  exactly as the marker parser sanitizes — `..` dropped outright, no
+ *  spaces). The tool result means ACCEPTED, never delivered: the file is
+ *  minted as a `kind: "attachment"` record through the same engine the
+ *  marker path uses, and THAT engine's URL probe decides whether anything
+ *  is ever handed to a provider. A file that is not actually being served
+ *  is never delivered — the agent is corrected, the member told the file
+ *  never went — because the tool rides the same `attempt` everything else
+ *  rides, not a second probe. */
+const SEND_FILE_TOOL = {
+  name: "send_file",
+  description:
+    "Send a file to members of THIS room as a real attachment. `file` is the path you wrote it to, relative to the served artifact directory (no spaces, no directory traversal — the path the [[attach …]] marker would name); `caption` optional; `to` an array of member_id values from roster, or omitted to send to every member. Returns immediately with {accepted, file, recipients, unknown}: `accepted` is a boolean and means accepted FOR DELIVERY, not delivered — a file that is not actually being served is never delivered to anyone; you will be told and the members are told the file never went. `recipients` lists the member_ids the file was accepted for. An unknown member_id receives nothing and is reported in `unknown`.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      file: {
+        type: "string",
+        description: "Path relative to the served artifact directory, e.g. report.pdf. No spaces, no `..`.",
+      },
+      caption: { type: "string", description: "Optional one-line caption sent with the file." },
+      to: {
+        type: "array",
+        items: { type: "string" },
+        description: "member_id values from roster. Omit for every member.",
+      },
+    },
+    required: ["file"],
   },
 } as const
 
@@ -517,7 +562,13 @@ export function createMcpRoomHandler(
       const tools =
         deps.deliveries === undefined
           ? base
-          : [...base, SAY_TOOL, WHISPER_TOOL, ...(deps.recoverIdentity !== undefined ? [RECOVER_TOOL] : [])]
+          : [
+              ...base,
+              SAY_TOOL,
+              WHISPER_TOOL,
+              ...(deps.sendFile !== undefined ? [SEND_FILE_TOOL] : []),
+              ...(deps.recoverIdentity !== undefined ? [RECOVER_TOOL] : []),
+            ]
       return ok(id, { tools })
     }
 
@@ -677,6 +728,78 @@ export function createMcpRoomHandler(
           )
         }
         return ok(id, acceptResult(outcome))
+      }
+
+      if (params.name === SEND_FILE_TOOL.name) {
+        const sendFile = deps.sendFile
+        if (sendFile === undefined) {
+          return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(params.name)}`)
+        }
+        const args = isRecord(params.arguments) ? params.arguments : {}
+        const file = args.file
+        if (typeof file !== "string" || file.trim().length === 0) {
+          return fail(id, INVALID_REQUEST, "invalid arguments: send_file requires a `file` path")
+        }
+        // Sanitized exactly as the marker parser sanitizes (sanitizeName):
+        // `..` dropped outright, the URL is fetched by a third party.
+        const name = sanitizeName(file)
+        if (name === undefined) {
+          // A normal, honest return — ids and booleans only (HARD RULE):
+          // nothing minted, nobody notified, nothing probed.
+          return ok(id, {
+            content: [{ type: "text", text: JSON.stringify({ accepted: false, reason: "invalid-path" }) }],
+            isError: false,
+          })
+        }
+        const captionArg = args.caption
+        const caption = typeof captionArg === "string" && captionArg.trim().length > 0 ? captionArg.trim() : undefined
+        const to = args.to
+        let targets: readonly string[]
+        if (to === undefined) {
+          targets = room.members.map((member) => member.id)
+        } else if (Array.isArray(to) && to.every((item) => typeof item === "string")) {
+          const ids: string[] = []
+          for (const item of to) {
+            if (typeof item === "string" && item.trim().length > 0) ids.push(item.trim())
+          }
+          targets = ids
+        } else {
+          return fail(id, INVALID_REQUEST, "invalid arguments: send_file's `to` must be an array of member_id strings (from roster)")
+        }
+        const known = new Set(room.members.map((member) => member.id))
+        const accepted = targets.filter((memberId) => known.has(memberId))
+        const unknownIds = targets.filter((memberId) => !known.has(memberId))
+        const { kind, mime } = kindAndMimeFor(name)
+        const attachment: OutboundAttachment = {
+          url: attachmentUrl(publicArtifactUrl(room.code), name),
+          filename: name,
+          mimeType: mime,
+          kind,
+          caption,
+        }
+        // The ONE passage: each accepted member's file goes through the same
+        // sink a marker's file goes through — MemberSender.sendAttachment →
+        // DeliveryEngine.accept → drain → attempt, where the URL probe and
+        // the honest-failure arms live. The tool result reports the accepted
+        // split only; whether the send ultimately lands is the record's
+        // business, never the tool receipt's.
+        for (const memberId of accepted) {
+          await sendFile(room.code, memberId, attachment)
+        }
+        return ok(id, {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                accepted: accepted.length > 0,
+                file: name,
+                recipients: accepted.map((memberId) => ({ member_id: memberId, ok: true })),
+                unknown: [...unknownIds],
+              }),
+            },
+          ],
+          isError: false,
+        })
       }
 
       if (params.name === RECOVER_TOOL.name) {

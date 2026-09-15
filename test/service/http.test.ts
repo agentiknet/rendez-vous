@@ -2203,3 +2203,46 @@ test("BRIEF-35: egress media record saved as application/pdf is still served wit
   const served = Buffer.from(await res.arrayBuffer())
   assert.deepEqual(served, pdfBytes)
 })
+
+// --- BRIEF-47: the composition root wires send_file's sink unconditionally --
+
+test("BRIEF-47: roomMcpDeps wires sendFile to the SAME sink deliverAttachment uses, with or without an openai key", async () => {
+  const dir = await freshDir()
+  const daemon = await freshDaemon()
+  const store = await RoomStore.open(dir)
+  const client = new DaemonClient({ baseUrl: daemon.url, token: undefined })
+  const booter = new LocalBooter(client, { baseUrl: daemon.url, token: undefined })
+  const transport = new MemoryTransport()
+  const service = new RoomService({
+    store,
+    client,
+    booter,
+    transport,
+    daemon: { baseUrl: daemon.url, token: undefined },
+    mediaStore: await freshMediaStore(),
+  })
+  services.push(service)
+  const getStoredRender = async () => undefined
+
+  const withKey = roomMcpDeps(service, getStoredRender, "sk-openai-key")
+  assert.ok(withKey.sendFile !== undefined, "send_file's sink must be wired with an openai key")
+  const withoutKey = roomMcpDeps(service, getStoredRender)
+  assert.ok(withoutKey.sendFile !== undefined, "send_file's sink must be wired WITHOUT an openai key too — a file is not a voice note")
+  // The tool path and the marker path must share ONE sink (the brief's
+  // governing constraint): both dep names delegate to
+  // `service.deliverAttachment`, the same `MemberSender.sendAttachment`
+  // passage.
+  const room = await store.create()
+  assert.ok(room !== undefined)
+  await store.addMember(room.code, { displayName: "Zoé", tier: "messenger", address: { provider: "telegram", source: room.code, contactRef: "ref-sendfile" } })
+  const attachment = {
+    url: "http://example.test/r/x/artifact/f.pdf",
+    filename: "f.pdf",
+    mimeType: "application/pdf",
+    kind: "document" as const,
+    caption: undefined,
+  }
+  await withKey.sendFile?.(room.code, "missing-member", attachment)
+  await withKey.deliverAttachment?.(room.code, "missing-member", attachment)
+  assert.equal((store.get(room.code)?.deliveries ?? []).length, 0, "an unknown member mints nothing through either dep")
+})

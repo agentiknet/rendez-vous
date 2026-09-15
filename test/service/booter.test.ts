@@ -172,3 +172,18 @@ test("resumePrompt carries the same capability lines as openingPrompt", () => {
     assert.ok(resumed.includes(line), `resume prompt should contain the same capability line: ${line}`)
   }
 })
+
+test("BRIEF-47: the prompt teaches the send_file tool beside the [[attach …]] marker", () => {
+  const room = fakeRoom("RDV-7F3K")
+  const opts = { appDir: "/home/user/apps/rdv-hello" }
+  const opening = openingPrompt(room, opts)
+  const resumed = resumePrompt(room, opts)
+
+  for (const prompt of [opening, resumed]) {
+    assert.ok(prompt.includes("`send_file` tool"), "the prompt must teach the send_file tool")
+    assert.ok(prompt.includes("{accepted, file, recipients, unknown}"), "the tool's honest outcome vocabulary is taught")
+    assert.ok(prompt.includes("accepted for delivery, not delivered"), "the tool never promises delivery")
+    // The marker teaching stays: both paths coexist in this commit.
+    assert.ok(prompt.includes('[[attach <filename>'), "the [[attach …]] marker is still taught while the parsers live")
+  }
+})
