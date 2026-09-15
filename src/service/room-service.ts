@@ -4,7 +4,7 @@ import { randomBytes } from "node:crypto"
 import { AgentpushToolClient } from "../channels/agentpush/tools-client.ts"
 import { env } from "../env.ts"
 import { fanIn } from "../fanin/index.ts"
-import { RoomFanout, type ArtifactProbe } from "../fanout/reader.ts"
+import { RoomFanout, probeArtifactUrl, type ArtifactProbe } from "../fanout/reader.ts"
 import type { Transport } from "../fanout/types.ts"
 import { joinLinks, qrPng, type JoinLinks } from "../links/index.ts"
 import { ensureMembership, handleCommand, parseCommand, type CommandResult } from "../rooms/commands.ts"
@@ -515,6 +515,11 @@ export class RoomService {
       store: this.store,
       transport: fanoutTransport,
       reportFailure: (code, correction) => this.reportToSession(code, correction),
+      // BRIEF 46: the SAME probe the fanout reader uses (one implementation,
+      // src/service/probe.ts — never a second one) now gates the engine's
+      // attachment hand too, so the tool path and the boot replay inherit
+      // the fanout's "confirmed 2xx or nothing" rule.
+      probeUrl: opts.probeUrl ?? probeArtifactUrl,
       // Assertion 4 (BRIEF-15, post-turn-assertions): the trigger obligation
       // discharges at MINT time (brief 36) — a say/whisper/system record
       // addressed to the member who started the turn answers them, whenever
@@ -522,7 +527,10 @@ export class RoomService {
       // exists and is swallowed into the next baseline, so a window can
       // never witness it; the mint itself is the only reliable witness.
       onMint: (code, kind, memberIds) => {
-        if (kind !== "say" && kind !== "whisper" && kind !== "system") return
+        // BRIEF 46: an `attachment` mint discharges the obligation too — a
+        // file delivered to the member who started the turn IS the reply
+        // (the same line `turnAnsweredNobody` draws since BRIEF 46).
+        if (kind !== "say" && kind !== "whisper" && kind !== "system" && kind !== "attachment") return
         const entry = this.outstandingAnswer.get(code)
         if (entry === undefined || !memberIds.includes(entry.memberId)) return
         this.outstandingAnswer.delete(code)

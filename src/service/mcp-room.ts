@@ -38,6 +38,7 @@ import { env } from "../env.ts"
 import {
   listAudience,
   parseAudienceSendArgs,
+  resolveTargets,
   sendAudience,
   type AudienceSendBackend,
   type AudienceSendOutcome,
@@ -615,7 +616,30 @@ export function createMcpRoomHandler(
             textToDeliver = spoken.join("\n")
           }
         }
-        const outcome = await sendAudience(room, deliveries, { ...parsed.input, text: textToDeliver })
+        // BRIEF 46: `parseAttachments`/`parseSpeech` strip the marker lines
+        // AFTER `parseAudienceSendArgs` validated the ORIGINAL text as
+        // non-empty, so a send reduced to a single `[[attach …]]` (or
+        // `[[say …]]`) marker leaves `textToDeliver === ""` — and minting a
+        // say/whisper record at text "" pushed a literally empty message to
+        // the provider. The fanout path is immune (a marker-only turn mints
+        // no text record, reader.ts's `buffer.length > 0`); the tool path
+        // matches it now: an empty remainder mints NO text record, while
+        // the attachments (and voice notes) still go to exactly the
+        // audience the send resolved — the tool result keeps reporting the
+        // honest accepted/unknown split.
+        let outcome: AudienceSendOutcome
+        if (textToDeliver.length > 0) {
+          outcome = await sendAudience(room, deliveries, { ...parsed.input, text: textToDeliver })
+        } else {
+          const targets = resolveTargets(room, parsed.input.to)
+          const known = new Set(room.members.map((member) => member.id))
+          const accepted = targets.filter((id) => known.has(id))
+          outcome = {
+            ok: true,
+            accepted,
+            unknown: targets.filter((id) => !known.has(id)),
+          }
+        }
         if (!outcome.ok) return fail(id, INVALID_REQUEST, `unroutable delivery: ${outcome.message}`)
         if (withoutAttachments.attachments.length > 0 && outcome.accepted.length > 0 && deps.deliverAttachment !== undefined) {
           const artifactBase = publicArtifactUrl(room.code)

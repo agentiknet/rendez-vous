@@ -38,18 +38,24 @@ export function sendReachedNobody(outcome: {
 }
 
 /** Assertion 4: an inbound message from `triggerMemberId` started this turn,
- *  and none of the say/whisper/system deliveries minted during it named them
- *  back — a `system` record delivered to that member is the room telling them
- *  something and counts as having been answered. `tool` records are never
- *  audience speech (`delivery.ts`'s `spokenSeqFor` draws the same line) and
- *  play no part here. */
+ *  and none of the say/whisper/system/attachment deliveries minted during it
+ *  named them back — a `system` record delivered to that member is the room
+ *  telling them something and counts as having been answered, and so does an
+ *  `attachment` record (BRIEF 46): a file the member asked for and received
+ *  IS the reply — "your message did not get a reply" after the PDF arrived
+ *  was factually false. `tool` records are never audience speech
+ *  (`delivery.ts`'s `spokenSeqFor` draws the same line) and play no part
+ *  here. */
 export function turnAnsweredNobody(
   triggerMemberId: string,
   mintedThisTurn: readonly Pick<Delivery, "kind" | "memberId">[],
 ): boolean {
   return !mintedThisTurn.some(
     (delivery) =>
-      (delivery.kind === "say" || delivery.kind === "whisper" || delivery.kind === "system") &&
+      (delivery.kind === "say" ||
+        delivery.kind === "whisper" ||
+        delivery.kind === "system" ||
+        delivery.kind === "attachment") &&
       delivery.memberId === triggerMemberId,
   )
 }

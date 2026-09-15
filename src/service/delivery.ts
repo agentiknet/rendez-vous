@@ -99,13 +99,17 @@ function spokenSeqFor(kind: Delivery["kind"], seq: number): number | undefined {
     // likely to need it: the agent produced an artifact and told nobody.
     case "tool":
       return undefined
-    // BRIEF-44: an attachment is a file, not speech. The say/whisper turn
-    // that carried the `[[attach …]]` marker already moved the counter with
-    // its own record, so moving it again here would double-count; treating
-    // the file as speech would silence the silent-turn warning for exactly
-    // the turn that produced a file and said nothing.
+    // BRIEF-44 said an attachment is a file, not speech, and left the
+    // counter alone on the argument that the say/whisper turn carrying the
+    // `[[attach …]]` marker had already moved it. That argument was false
+    // on the fanout path — no say record is minted there for an attachment
+    // (the tool path's empty-text say was the defect BRIEF-46 fixed first,
+    // so it no longer carries the counter either) — and a delivered file IS
+    // a reply: the turn that produced a document and addressed it to a
+    // member did not say nothing. The counter moves for the attachment
+    // record itself, on both paths alike.
     case "attachment":
-      return undefined
+      return seq
   }
 }
 
@@ -227,6 +231,16 @@ export interface DeliveryEngineOpts {
    *  be swallowed into the next baseline, so a window can never witness
    *  it. Optional — unwired in every engine-level harness. */
   readonly onMint?: (code: string, kind: Delivery["kind"], memberIds: readonly string[]) => void
+  /** BRIEF 46: the attachment-URL probe, applied before ANY attachment hand
+   *  to a push transport — the same rule the fanout reader applies before
+   *  its own sends (probe.ts: an attachment is only ever delivered on a
+   *  confirmed 2xx). Every minter inherits it, including the boot replay
+   *  (`drainAll`), which is why the gate lives here at the attempt and not
+   *  at the mint: a file that was served when minted can be gone by the
+   *  time the process comes back up, and the replay is exactly that case.
+   *  Optional so engine-level harnesses without a served artifact root stay
+   *  network-free; production wiring (RoomService) always supplies it. */
+  readonly probeUrl?: (url: string) => Promise<boolean>
 }
 
 export interface AcceptOutcome {
@@ -260,6 +274,7 @@ export class DeliveryEngine {
   private readonly sendTimeoutMs: number
   private readonly autoDrain: boolean
   private readonly onMint: ((code: string, kind: Delivery["kind"], memberIds: readonly string[]) => void) | undefined
+  private readonly probeUrl: ((url: string) => Promise<boolean>) | undefined
   /** Per-room serialization for drains (same shape as `RoomService`'s
    *  `withRoomLock`): a background drain kicked by `accept` and a caller's
    *  explicit `drain` must never attempt the same record concurrently —
@@ -276,6 +291,7 @@ export class DeliveryEngine {
     this.sendTimeoutMs = opts.sendTimeoutMs ?? SEND_TIMEOUT_MS
     this.autoDrain = opts.autoDrain ?? true
     this.onMint = opts.onMint
+    this.probeUrl = opts.probeUrl
   }
 
   /** The tool handler's half: resolve `memberIds` against the room's CURRENT
@@ -583,6 +599,29 @@ export class DeliveryEngine {
         return
       }
       if (delivery.attachment !== undefined) {
+        // BRIEF 46: nothing is handed to a provider before the URL is
+        // probed — the fanout reader's rule ("an attachment is only ever
+        // delivered on a confirmed 2xx", probe.ts) applied at the one choke
+        // point every attachment send shares, so the tool path and the boot
+        // replay inherit it and a dead file can no longer read as a
+        // confirmed delivery. A probed-dead file is deterministic, not
+        // flaky: retrying would re-probe the same 404 four more times, so
+        // the record goes straight to `failed` — the same reasoning as the
+        // SendBlockedError arm below — with the agent corrected and the
+        // member told the file never went.
+        const probed = await this.probeAttachment(delivery.attachment.url)
+        if (!probed) {
+          const lastError = `nothing is served at ${delivery.attachment.url}`
+          const failures = MAX_DELIVERY_ATTEMPTS
+          await this.mark(code, delivery.id, {
+            failures,
+            status: "failed",
+            lastError,
+          })
+          await this.reportFinalFailure(code, delivery, failures, lastError)
+          await this.tellMemberAttachmentFailed(code, delivery)
+          return
+        }
         // BRIEF-44: an attachment is sent through the transport's attachment
         // hand (`sendAttachment`), not rendered as text — the record carries
         // the file. A transport with no attachment concept still gets it: as
@@ -675,6 +714,19 @@ if (failed) {
       // come. Guarded on `attachment`, or a failed system notice would mint
       // a notice of its own, forever.
       if (delivery.attachment !== undefined) await this.tellMemberAttachmentFailed(code, delivery)
+    }
+  }
+
+  /** The attachment probe, made total here: no probe wired (bare engine
+   *  harnesses) means the gate is open; a probe that throws is a failure —
+   *  never a pass. */
+  private async probeAttachment(url: string): Promise<boolean> {
+    const probe = this.probeUrl
+    if (probe === undefined) return true
+    try {
+      return await probe(url)
+    } catch {
+      return false
     }
   }
 
