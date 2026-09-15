@@ -745,7 +745,10 @@ export class RoomService {
 
   /** Deliver a voice-note attachment (from `[[say …]]` marker rendering in
    *  a say/whisper call) to one member, through the same ONE send path every
-   *  other room-authored message uses (MemberSender). */
+   *  other room-authored message uses (MemberSender). BRIEF-44: for a push
+   *  member that path now mints a `kind: "attachment"` delivery record
+   *  through the engine — status, retry, `lastError`, the agent told, the
+   *  member told — instead of calling the transport and believing. */
   async deliverAttachment(code: string, memberId: string, attachment: OutboundAttachment): Promise<void> {
     const room = this.store.get(code)
     if (room === undefined) return

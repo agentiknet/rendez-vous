@@ -21,9 +21,11 @@ import type { OutboundMessage, Transport } from "../fanout/types.ts"
 import { SendBlockedError } from "../fanout/types.ts"
 import { whisperNoticeOf } from "../audience/contract.ts"
 import type { RoomStore } from "../rooms/store.ts"
+import { hasSendAttachment } from "./transports.ts"
 import {
   MAX_DELIVERY_ATTEMPTS,
   type Delivery,
+  type DeliveryAttachment,
   type Member,
   deliveryModeOf,
   deliverySeqOf,
@@ -96,6 +98,13 @@ function spokenSeqFor(kind: Delivery["kind"], seq: number): number | undefined {
     // here would silence the silent-turn warning for exactly the turn most
     // likely to need it: the agent produced an artifact and told nobody.
     case "tool":
+      return undefined
+    // BRIEF-44: an attachment is a file, not speech. The say/whisper turn
+    // that carried the `[[attach …]]` marker already moved the counter with
+    // its own record, so moving it again here would double-count; treating
+    // the file as speech would silence the silent-turn warning for exactly
+    // the turn that produced a file and said nothing.
+    case "attachment":
       return undefined
   }
 }
@@ -302,6 +311,9 @@ export class DeliveryEngine {
     text: string,
     memberIds: readonly string[],
     toolName?: string,
+    /** BRIEF-44: the file a `kind: "attachment"` mint carries. Present on
+     *  attachment records only, like `toolName` on tool records. */
+    attachment?: DeliveryAttachment,
   ): Promise<AcceptOutcome> {
     const room = this.store.get(code)
     if (room === undefined) throw new Error(`unknown room: ${code}`)
@@ -315,7 +327,7 @@ export class DeliveryEngine {
     }
 
     if (accepted.length > 0) {
-      await this.mintRecords(code, kind, text, accepted, toolName, true)
+      await this.mintRecords(code, kind, text, accepted, toolName, true, attachment)
     }
 
     return { accepted, unknown }
@@ -333,6 +345,7 @@ export class DeliveryEngine {
     recipients: readonly string[],
     toolName: string | undefined,
     discharge: boolean,
+    attachment?: DeliveryAttachment,
   ): Promise<void> {
     const room = this.store.get(code)
     if (room === undefined) return
@@ -351,6 +364,9 @@ export class DeliveryEngine {
       // present-and-undefined (the rule `confirmedBy` follows).
       ...(toolName !== undefined ? { toolName } : {}),
       text,
+      // BRIEF-44: written only when supplied — a text record round-trips with
+      // the key genuinely absent, same rule as `toolName`.
+      ...(attachment !== undefined ? { attachment } : {}),
       status: "pending",
       failures: 0,
       lastError: undefined,
@@ -566,7 +582,43 @@ export class DeliveryEngine {
         }
         return
       }
-      if (message === undefined) {
+      if (delivery.attachment !== undefined) {
+        // BRIEF-44: an attachment is sent through the transport's attachment
+        // hand (`sendAttachment`), not rendered as text — the record carries
+        // the file. A transport with no attachment concept still gets it: as
+        // the URL spelled out, never dropped. `renderFor` returned
+        // `undefined` for it, so `message` plays no part here.
+        try {
+          await withTimeout(this.sendAttachmentTo(member, delivery.attachment, delivery.text), this.sendTimeoutMs)
+          // A push hand-off the provider accepted is confirmed by the
+          // transport — the only confirmation that exists today (D2/F8).
+          await this.mark(code, delivery.id, {
+            status: "delivered",
+            deliveredAt: this.now(),
+            confirmedBy: "transport",
+          })
+          return
+        } catch (error: unknown) {
+          if (error instanceof SendBlockedError) {
+            // BRIEF-42: the provider itself refused (its policy gate, HTTP
+            // 200) — a deterministic, permanent refusal, not a flaky send.
+            // Retrying would replay the same refusal four more times, so the
+            // record goes straight to `failed` with the blocked_reason
+            // verbatim as `lastError`, and the agent is told once. No
+            // `confirmedBy` here — nobody confirmed anything.
+            const failures = MAX_DELIVERY_ATTEMPTS
+            await this.mark(code, delivery.id, {
+              failures,
+              status: "failed",
+              lastError: error.blockedReason,
+            })
+            await this.reportFinalFailure(code, delivery, failures, error.blockedReason)
+            await this.tellMemberAttachmentFailed(code, delivery)
+            return
+          }
+          lastError = messageOf(error)
+        }
+      } else if (message === undefined) {
         // Nothing to render for a member we WOULD have pushed to. Nobody
         // received anything, so this falls through to the failure path
         // below — never to the `delivered` arm above, which is the pull
@@ -615,7 +667,49 @@ export class DeliveryEngine {
       status: failed ? "failed" : "pending",
       lastError,
     })
-    if (failed) await this.reportFinalFailure(code, delivery, failures, lastError)
+if (failed) {
+      await this.reportFinalFailure(code, delivery, failures, lastError)
+      // BRIEF-44: a failed ATTACHMENT reaches the member too — a text failure
+      // needs no apology beyond the agent's correction, but a file that never
+      // arrived leaves the member waiting on a download that will never
+      // come. Guarded on `attachment`, or a failed system notice would mint
+      // a notice of its own, forever.
+      if (delivery.attachment !== undefined) await this.tellMemberAttachmentFailed(code, delivery)
+    }
+  }
+
+  /** The attachment hand, shared by every attachment attempt: the
+   *  transport's `sendAttachment` when it has one (`hasSendAttachment`),
+   *  otherwise the URL spelled out — the same fallback
+   *  `MemberSender.sendAttachment` applied before this went through the
+   *  engine. Never `undefined`-tolerant: an error here IS the failure
+   *  path. */
+  private async sendAttachmentTo(member: Member, attachment: DeliveryAttachment, fallbackText: string): Promise<void> {
+    if (hasSendAttachment(this.transport)) {
+      await this.transport.sendAttachment(member, attachment)
+      return
+    }
+    await this.transport.send(member, { text: fallbackText, artifactUrl: undefined })
+  }
+
+  /** BRIEF-44: the member's own words when their attachment is finally
+   *  recorded `failed` — the same sentence shape the unservable case uses
+   *  (`unservableNotice`, src/fanout/reader.ts:68), not a second apology.
+   *  Minted as a `kind: "system"` record with `discharge: false`: it is a
+   *  notice about a file, not an answer to anything the member asked, and
+   *  must not silence their turn-answered obligation. If THIS notice's own
+   *  send fails, the ordinary failure path takes it — the record carries no
+   *  attachment, so there is no recursion. */
+  private async tellMemberAttachmentFailed(code: string, delivery: Delivery): Promise<void> {
+    const filename = delivery.attachment?.filename ?? "a file"
+    await this.mintRecords(
+      code,
+      "system",
+      `Sorry — the room said it attached "${filename}", but the file was not actually sent. Nothing to download yet; the room has been told to fix it.`,
+      [delivery.memberId],
+      undefined,
+      false,
+    )
   }
 
   /** The content-free notice every OTHER member sees once a whisper has
@@ -696,6 +790,12 @@ export class DeliveryEngine {
     // future caller that mints one wrongly gets a loud `failed` record
     // rather than a silent lie.
     if (delivery.kind === "tool") return undefined
+    // An attachment never travels as prose: `attempt` sends it through the
+    // transport's attachment hand (`sendAttachmentTo`) using the file on the
+    // record. Returning `undefined` here also routes a pull member into the
+    // delivered-outbox arm — their record's `text` already carries the URL
+    // spelled out.
+    if (delivery.kind === "attachment") return undefined
     let text: string
     if (delivery.kind === "whisper") {
       if (delivery.memberId === member.id) {
@@ -765,8 +865,12 @@ export class DeliveryEngine {
   ): Promise<void> {
     const report = this.reportFailure
     if (report === undefined) return
+    const subject =
+      delivery.kind === "attachment"
+        ? "An attachment you sent"
+        : `A ${delivery.kind} message you sent`
     const correction =
-      `[system · delivery] A ${delivery.kind} message you sent did NOT reach member ${delivery.memberId}: ` +
+      `[system · delivery] ${subject} did NOT reach member ${delivery.memberId}: ` +
       `the transport failed ${failures} times (last error: ${lastError ?? "unknown"}). ` +
       `Re-read the roster — the member may have left — and send it again if it still matters.`
     try {
