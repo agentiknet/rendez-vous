@@ -53,6 +53,7 @@ import { parseSpeech, renderSpeech } from "../markers.ts"
 import { attachmentUrl, kindAndMimeFor, parseAttachments, sanitizeName } from "../fanout/attach.ts"
 import { publicArtifactUrl } from "./artifact-proxy.ts"
 import type { OutboundAttachment } from "./transports.ts"
+import type { MessageActionOutcome } from "./member-send.ts"
 
 /** The delivery half of the audience tools (PLAN §3.2): the `say`/`whisper`
  *  handlers below only ACCEPT — validation, `pending` `Delivery` records and
@@ -206,6 +207,16 @@ export interface McpRoomDeps {
     memberId: string,
     attachment: OutboundAttachment,
   ) => Promise<void>
+  /** BRIEF 49: the sinks behind `react` and `reply`. Each resolves the
+   *  handle server-side (RoomStore.resolveMessageRef), draws the
+   *  capability line from the member's own channel, and — only when the
+   *  handle resolves AND the channel can do the act — mints the record
+   *  through the engine, so the send crosses `attempt` like everything
+   *  else. The outcome union's named arms are the whole agent-facing
+   *  contract; the tool below only maps them onto the wire. Omitting one
+   *  leaves that tool unadvertised and uncallable. */
+  readonly reactMessage?: (code: string, handle: string, emoji: string) => Promise<MessageActionOutcome>
+  readonly replyToMessage?: (code: string, handle: string, text: string) => Promise<MessageActionOutcome>
 }
 
 // --- JSON-RPC / MCP wire handling: same hand-rolled surface as canvakit's
@@ -332,8 +343,51 @@ const SEND_FILE_TOOL = {
  *  never the URL: `tools/call` results are projected on the room's shared
  *  screen (file-top HARD RULE), and a capability shown to the room is a
  *  capability given to the room. */
-const RECOVER_TOOL = {
-  name: "recover_identity",
+/** `react` (BRIEF 49, docs/REACT-REPLY.md §3) — react to a message the
+ *  agent CITES by handle (from `room_view`'s `recent_messages`). The tool
+ *  resolves the handle server-side and refuses namedly when it does not
+ *  (`unknown-message-handle`: unknown, pruned, expired, or another room's)
+ *  and separately when the member's channel cannot react
+ *  (`channel-cannot-react`: whatsapp and telegram only — mail/sms/room-web
+ *  are refused, never degraded into a text "👍"). `emoji: ""` removes a
+ *  reaction previously placed. The result means ACCEPTED FOR DELIVERY,
+ *  never delivered — and the same `send_file`-family vocabulary. */
+const REACT_TOOL = {
+  name: "react",
+  description:
+    "React with an emoji to a specific message of THIS room, cited by its `handle` (from room_view's recent_messages — a handle you invent is refused). `emoji` is the emoji, or an empty string \"\" to REMOVE a reaction you placed. Only whatsapp and telegram members can receive reactions: for any other channel the call is refused with reason \"channel-cannot-react\" and NOTHING is sent — never send the emoji as a text instead. An unresolvable handle is refused with reason \"unknown-message-handle\" and nothing is sent. Returns {accepted, handle, recipients} or {accepted: false, reason, ...}: accepted means accepted for delivery, not delivered.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      handle: { type: "string", description: "The message handle to react to, verbatim from room_view's recent_messages." },
+      emoji: { type: "string", description: "The reaction emoji (e.g. \"👍\"), or \"\" to remove a reaction." },
+    },
+    required: ["handle", "emoji"],
+  },
+} as const
+
+/** `reply` (BRIEF 49) — answer a specific message the agent CITES by its
+ *  handle, threaded: the room resolves the handle to the provider's native
+ *  id and the send quotes it (WhatsApp/Telegram natively; mail threads
+ *  server-side). Refusals mirror `react` — an unresolvable handle is
+ *  `unknown-message-handle`, a channel without a reply concept (sms,
+ *  room-web) is `channel-cannot-react` — and nothing is ever minted or
+ *  sent for either. */
+const REPLY_TOOL = {
+  name: "reply",
+  description:
+    "Reply to a specific message of THIS room, cited by its `handle` (from room_view's recent_messages — a handle you invent is refused), with the reply threaded onto the original (the member sees it quoted). `text` is the reply. Threads on whatsapp, telegram and email; another channel is refused with reason \"channel-cannot-react\" — send an ordinary `say` there instead. An unresolvable handle is refused with reason \"unknown-message-handle\" and nothing is sent. Returns {accepted, handle, recipients} or {accepted: false, reason, ...}: accepted means accepted for delivery, not delivered.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      handle: { type: "string", description: "The message handle to reply to, verbatim from room_view's recent_messages." },
+      text: { type: "string", description: "The reply to send." },
+    },
+    required: ["handle", "text"],
+  },
+} as const
+
+const RECOVER_TOOL = {  name: "recover_identity",
   description:
     "When a member says they cannot get back into the web page under their name — they lost their link, changed device or browser, or cleared their data — call this with their member_id (from roster). The room sends a one-time recovery link to that member's OWN surface (the one they are already talking to you on), never to anywhere else, and the link restores only their own name. Returns {accepted: true} or {accepted: false, reason}. Do not paste any link yourself and do not promise anyone a name they did not already hold: a name someone else holds stays theirs.",
   inputSchema: {
@@ -545,6 +599,29 @@ function acceptResult(outcome: Extract<AudienceSendOutcome, { ok: true }>): Reco
   }
 }
 
+/** BRIEF 49: the `react`/`reply` result — the outcome union mapped onto
+ *  the `send_file`-family vocabulary, ids and named reasons ONLY (the
+ *  file-top HARD RULE). `accepted` never claims a delivery; the two
+ *  refusal arms stay DISTINCT so the agent can tell "cite a real message"
+ *  (`unknown-message-handle`) from "this channel cannot do it"
+ *  (`channel-cannot-react`). */
+function messageActionResult(outcome: MessageActionOutcome): Record<string, unknown> {
+  switch (outcome.kind) {
+    case "accepted":
+      return {
+        accepted: true,
+        handle: outcome.ref.handle,
+        recipients: [{ member_id: outcome.ref.memberId, ok: true }],
+      }
+    case "unknown-handle":
+      return { accepted: false, reason: "unknown-message-handle" }
+    case "member-not-in-room":
+      return { accepted: false, reason: "member-not-in-room" }
+    case "channel-cannot-react":
+      return { accepted: false, reason: "channel-cannot-react", channel: outcome.channel }
+  }
+}
+
 /**
  * Handle one JSON-RPC 2.0 request body (already JSON.parse'd) with its
  * `Authorization` header value. Canvakit's method surface
@@ -596,6 +673,8 @@ export function createMcpRoomHandler(
               SAY_TOOL,
               WHISPER_TOOL,
               ...(deps.sendFile !== undefined ? [SEND_FILE_TOOL] : []),
+              ...(deps.reactMessage !== undefined ? [REACT_TOOL] : []),
+              ...(deps.replyToMessage !== undefined ? [REPLY_TOOL] : []),
               ...(deps.recoverIdentity !== undefined ? [RECOVER_TOOL] : []),
             ]
       return ok(id, { tools })
@@ -827,6 +906,29 @@ export function createMcpRoomHandler(
               }),
             },
           ],
+          isError: false,
+        })
+      }
+
+      if (params.name === REACT_TOOL.name || params.name === REPLY_TOOL.name) {
+        const act = params.name === REACT_TOOL.name ? deps.reactMessage : deps.replyToMessage
+        if (act === undefined) {
+          return fail(id, METHOD_NOT_FOUND, `unknown tool: ${String(params.name)}`)
+        }
+        const args = isRecord(params.arguments) ? params.arguments : {}
+        const handle = args.handle
+        if (typeof handle !== "string" || handle.trim().length === 0) {
+          return fail(id, INVALID_REQUEST, `invalid arguments: ${String(params.name)} requires a message \`handle\` (from room_view's recent_messages)`)
+        }
+        const isReact = params.name === REACT_TOOL.name
+        const payloadArg = isReact ? args.emoji : args.text
+        if (typeof payloadArg !== "string" || (isReact ? false : payloadArg.trim().length === 0)) {
+          const what = isReact ? "an `emoji` (or \"\" to remove)" : "a non-empty `text`"
+          return fail(id, INVALID_REQUEST, `invalid arguments: ${String(params.name)} requires ${what}`)
+        }
+        const outcome = await act(room.code, handle.trim(), payloadArg)
+        return ok(id, {
+          content: [{ type: "text", text: JSON.stringify(messageActionResult(outcome)) }],
           isError: false,
         })
       }

@@ -17,7 +17,7 @@ import { BoxLivenessUnknownError, isSandboxAlive, type BoxLivenessCheck } from "
 import { isSessionAlive, type DaemonExtraOptions } from "./daemon-extra.ts"
 import { DeliverableAwareTransport, DeliverableService, parseDeliverableCommand } from "./deliverable.ts"
 import { DeliveryEngine } from "./delivery.ts"
-import { MemberSender } from "./member-send.ts"
+import { MemberSender, type MessageActionOutcome } from "./member-send.ts"
 import { OpenAiTtsProvider } from "../media/openai.ts"
 import { MediaStore } from "./media-store.ts"
 import { buildSessionRecap } from "./recap.ts"
@@ -774,6 +774,19 @@ export class RoomService {
     const member = room.members.find((candidate) => candidate.id === memberId)
     if (member === undefined) return
     await this.sender.sendAttachment(code, member, attachment)
+  }
+
+  /** BRIEF 49 (docs/REACT-REPLY.md §3): the sinks behind the `react` and
+   *  `reply` tools. The handle is resolved and the capability drawn BEFORE
+   *  anything is minted (MemberSender.react/reply), so an unresolvable
+   *  handle never produces a send — and a capable act crosses the same
+   *  `DeliveryEngine.attempt` everything else crosses. */
+  reactToMessage(code: string, handle: string, emoji: string): Promise<MessageActionOutcome> {
+    return this.sender.react(code, handle, emoji)
+  }
+
+  replyToMessage(code: string, handle: string, text: string): Promise<MessageActionOutcome> {
+    return this.sender.reply(code, handle, text)
   }
 
   async daemonHealth(): Promise<HealthResult | "unreachable"> {

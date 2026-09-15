@@ -49,6 +49,54 @@ export function hasSendMedia(
   return "sendMedia" in transport && typeof transport.sendMedia === "function"
 }
 
+/** BRIEF 49 (docs/REACT-REPLY.md): a transport that can also react to a
+ *  provider-native message and send a threaded reply. Same optional-method
+ *  pattern as `sendMedia`/`sendAttachment`: callers detect with the guards
+ *  below, and a transport without the concept is never asked to fake one —
+ *  the engine records the honest failure instead of degrading (constraint
+ *  4: refus, jamais dégradation). `sendReaction`'s `emoji: ""` REMOVES a
+ *  reaction (agentpush's own contract, send-reaction.ts). `sendReply`
+ *  resolves to the provider's message id for the reply, same rule as
+ *  `send`. */
+export interface ReactiveTransport extends Transport {
+  sendReaction?(member: Member, providerMessageId: string, emoji: string): Promise<string | void>
+  sendReply?(member: Member, text: string, replyToProviderMessageId: string): Promise<string | void>
+}
+
+export function hasSendReaction(
+  transport: Transport,
+): transport is Transport & { sendReaction(member: Member, providerMessageId: string, emoji: string): Promise<string | void> } {
+  return "sendReaction" in transport && typeof transport.sendReaction === "function"
+}
+
+export function hasSendReply(
+  transport: Transport,
+): transport is Transport & { sendReply(member: Member, text: string, replyToProviderMessageId: string): Promise<string | void> } {
+  return "sendReply" in transport && typeof transport.sendReply === "function"
+}
+
+/** Which channels a REACTION can be delivered on — ground-truthed against
+ *  agentpush's provider capabilities (whatsapp provider.ts:92 and telegram
+ *  provider.ts:36 declare `reactions: true`; twilio declares
+ *  `reactions: false`; gmail declares `reactions: false`; room-web has no
+ *  provider at all). A mail handle RESOLVES fine — resolution ≠ capability
+ *  — and the react tool refuses on these channels namedly instead of
+ *  degrading the emoji into a text message. Keep in step with the
+ *  `ReactiveTransport` implementations. */
+export function canReact(provider: string): boolean {
+  return provider === "whatsapp" || provider === "telegram"
+}
+
+/** Which channels a THREADED REPLY can be delivered on — same ground truth:
+ *  whatsapp/telegram quote natively (provider.ts `replies: true`), gmail
+ *  threads via `resolveThreading`; twilio declares `replies: false`;
+ *  room-web has no reply concept. Mail's threading truth is the provider's
+ *  own (non-Gmail sends go out unthreaded and say so) — the send is still
+ *  real, and the tool result claims only `accepted`. */
+export function canReply(provider: string): boolean {
+  return provider === "whatsapp" || provider === "telegram" || provider === "email"
+}
+
 export class ConsoleTransport implements Transport {
   async send(member: Member, message: OutboundMessage): Promise<string | undefined> {
     console.log(`→ [${member.displayName}/${member.tier}] ${message.text}`)

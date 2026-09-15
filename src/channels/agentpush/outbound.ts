@@ -46,7 +46,7 @@ import type { OutboundMessage, Transport } from "../../fanout/types.ts"
 import { SendBlockedError } from "../../fanout/types.ts"
 import { deliveryModeOf, type Member } from "../../rooms/types.ts"
 import { attachmentFallbackText, type OutboundAttachment } from "../../service/transports.ts"
-import { AgentpushToolClient, type AgentpushToolClientOptions, isSendMessageResult, isUploadMediaResult } from "./tools-client.ts"
+import { AgentpushToolClient, type AgentpushToolClientOptions, isSendMessageResult, isSendReactionResult, isUploadMediaResult } from "./tools-client.ts"
 
 type MessengerProvider = "whatsapp" | "telegram" | "sms"
 
@@ -173,6 +173,48 @@ export class AgentpushTransport implements Transport {
           ...(attachment.caption !== undefined ? { caption: attachment.caption } : {}),
         },
       ],
+    })
+  }
+
+  /** BRIEF 49 (docs/REACT-REPLY.md §3): the reaction hand — agentpush's
+   *  `POST /tools/send_reaction`, `message_id` being the PROVIDER-NATIVE
+   *  id the room's resolver handed up (`wamid.*`, Telegram int), `emoji:
+   *  ""` removing (agentpush's own contract, send-reaction.ts). A
+   *  `blocked`/`failed` result throws exactly like `checkedSend` — the
+   *  engine's failure path owns the record, and the emoji is never
+   *  degraded into a text message. */
+  async sendReaction(member: Member, providerMessageId: string, emoji: string): Promise<string | undefined> {
+    const provider = this.providerFor(member)
+    if (provider === undefined) return undefined
+    const result = await this.client.call(`member ${member.id}`, "send_reaction", {
+      to: { channel: provider, address: member.address.contactRef },
+      message_id: providerMessageId,
+      emoji,
+    })
+    if (result === undefined) {
+      throw new Error(`agentpush send_reaction returned no result for member ${member.id}`)
+    }
+    if (isSendMessageResult(result) && result.status === "blocked") {
+      throw new SendBlockedError(result.blocked_reason)
+    }
+    if (isSendMessageResult(result) && result.status === "failed") {
+      throw new Error(result.error)
+    }
+    if (isSendReactionResult(result)) return result.message_id
+    return undefined
+  }
+
+  /** BRIEF 49: the threaded reply hand — a `send_message` whose
+   *  `content.reply_to_message_id` is the provider-native id the handle
+   *  resolved to (push.ts maps it to the driver's quoted-reply param;
+   *  WhatsApp/Telegram quote natively). Same `checkedSend` contract as
+   *  `send`. */
+  async sendReply(member: Member, text: string, replyToProviderMessageId: string): Promise<string | undefined> {
+    const provider = this.providerFor(member)
+    if (provider === undefined) return undefined
+    return await this.checkedSend(member.id, provider, member.address.contactRef, {
+      text,
+      reply_to_message_id: replyToProviderMessageId,
     })
   }
 

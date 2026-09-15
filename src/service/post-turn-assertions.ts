@@ -55,7 +55,12 @@ export function turnAnsweredNobody(
       (delivery.kind === "say" ||
         delivery.kind === "whisper" ||
         delivery.kind === "system" ||
-        delivery.kind === "attachment") &&
+        delivery.kind === "attachment" ||
+        // BRIEF 49: a reply IS the answer, and so is a reaction placed on
+        // the member's own message — "your message did not get a reply"
+        // would be false after either landed.
+        delivery.kind === "reply" ||
+        delivery.kind === "reaction") &&
       delivery.memberId === triggerMemberId,
   )
 }

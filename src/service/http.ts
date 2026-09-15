@@ -1550,6 +1550,12 @@ export function roomMcpDeps(
     // same `MemberSender.sendAttachment` → `DeliveryEngine.attempt`
     // machinery, URL probe and honest-failure arms included.
     sendFile: (code, memberId, attachment) => service.deliverAttachment(code, memberId, attachment),
+    // BRIEF 49: the sinks behind `react`/`reply` — each resolves the
+    // handle server-side and refuses namedly before anything is minted,
+    // so a capable act crosses the same `DeliveryEngine.attempt` a file
+    // crosses here.
+    reactMessage: (code, handle, emoji) => service.reactToMessage(code, handle, emoji),
+    replyToMessage: (code, handle, text) => service.replyToMessage(code, handle, text),
     // BRIEF-10 step 2: `room_view` announces itself on the SAME engine
     // `say`/`whisper` go through — one outbox, one cursor, no second channel
     // re-deriving them (docs/OUTBOX.md §2.1).

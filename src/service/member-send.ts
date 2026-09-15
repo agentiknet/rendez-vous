@@ -1,8 +1,30 @@
 import type { OutboundMessage, Transport } from "../fanout/types.ts"
-import { deliveryModeOf, type Member } from "../rooms/types.ts"
+import { deliveryModeOf, type Member, type MessageRef } from "../rooms/types.ts"
 import type { RoomStore } from "../rooms/store.ts"
 import type { DeliveryEngine } from "./delivery.ts"
-import { attachmentFallbackText, hasSendMedia, type OutboundAttachment } from "./transports.ts"
+import { attachmentFallbackText, canReact, canReply, hasSendMedia, type OutboundAttachment } from "./transports.ts"
+
+/** BRIEF 49 (docs/REACT-REPLY.md §3): the outcome of a `react`/`reply`
+ *  act, resolved BEFORE anything is minted. Four named arms, never a
+ *  throw at the agent:
+ *  - `accepted` — the act was minted as a record through the engine and
+ *    crossed `attempt`; NOT a delivery claim.
+ *  - `unknown-handle` — the handle does not resolve (unknown, malformed,
+ *    pruned, expired, foreign room). NOTHING is minted and NOTHING is
+ *    sent: never a send to a guessed message.
+ *  - `channel-cannot-react` — the handle RESOLVED, but the member's
+ *    channel cannot do the act (mail/sms cannot react; sms cannot reply;
+ *    room-web has no provider at all). Distinct from `unknown-handle` on
+ *    purpose: one says "retrying differently is pointless", the other
+ *    says "cite the right message". Nothing minted, nothing sent, no text
+ *    degrade.
+ *  - `member-not-in-room` — the handle resolved but its author has
+ *    left; the act has no surface to land on. */
+export type MessageActionOutcome =
+  | { readonly kind: "accepted"; readonly ref: MessageRef }
+  | { readonly kind: "unknown-handle" }
+  | { readonly kind: "channel-cannot-react"; readonly channel: string }
+  | { readonly kind: "member-not-in-room" }
 
 /** R6/BRIEF-20: every outbound push message carries its room's SLUG — the
  *  one affordance that makes the active room legible on a surface (Telegram,
@@ -130,8 +152,58 @@ export class MemberSender {
     await this.transport.send(member, { text: caption, artifactUrl: undefined })
   }
 
-  private isPull(member: Member): boolean {
-    try {
+  /** BRIEF 49: react to a message cited by its handle, or (with `emoji: ""`)
+   *  remove a reaction previously placed. `canReact` draws the capability
+   *  line from the member's own provider — the channel the reaction would
+   *  be delivered on — never from a guess about the handle. */
+  async react(code: string, handle: string, emoji: string): Promise<MessageActionOutcome> {
+    return await this.messageAction(code, handle, "reaction", emoji)
+  }
+
+  /** Reply to a message cited by its handle, threaded: the record carries
+   *  the resolved provider id, and the drain hands it to the transport's
+   *  `sendReply` (agentpush `content.reply_to_message_id`, Gmail
+   *  `resolveThreading`) — threading decided by the provider, never
+   *  re-derived here. */
+  async reply(code: string, handle: string, text: string): Promise<MessageActionOutcome> {
+    return await this.messageAction(code, handle, "reply", text)
+  }
+
+  private async messageAction(
+    code: string,
+    handle: string,
+    kind: "reaction" | "reply",
+    payload: string,
+  ): Promise<MessageActionOutcome> {
+    const ref = await this.store.resolveMessageRef(code, handle)
+    if (ref === undefined) return { kind: "unknown-handle" }
+    const room = this.store.get(code)
+    const member = room?.members.find((candidate) => candidate.id === ref.memberId)
+    if (room === undefined || member === undefined) return { kind: "member-not-in-room" }
+    const capable = kind === "reaction" ? canReact(member.address.provider) : canReply(member.address.provider)
+    if (!capable) return { kind: "channel-cannot-react", channel: member.address.provider }
+    const outcome = await this.engine.accept(
+      code,
+      kind,
+      payload,
+      [member.id],
+      kind === "reaction" ? "react" : "reply",
+      undefined,
+      kind === "reaction"
+        ? { reactsTo: ref.providerId, emoji: payload }
+        : { reactsTo: ref.providerId },
+    )
+    if (outcome.unknown.includes(member.id)) {
+      console.warn(
+        `member-send: ${kind} for member ${member.id} in room ${code} minted nothing (roster mismatch) — nothing was sent`,
+      )
+      return { kind: "member-not-in-room" }
+    }
+    await this.engine.drain(code)
+    return { kind: "accepted", ref }
+  }
+
+  private isPull(member: Member): boolean {    try {
       return deliveryModeOf(member) === "pull"
     } catch {
       // An unroutable address stays push-shaped here: the transport arm

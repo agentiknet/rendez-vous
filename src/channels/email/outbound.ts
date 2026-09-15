@@ -38,17 +38,28 @@ export class EmailTransport implements Transport {
 
   async send(member: Member, message: OutboundMessage): Promise<string | undefined> {
     if (member.address.provider !== "email") return undefined
-
     const artifactLine =
       message.artifactUrl !== undefined && !message.text.includes(message.artifactUrl)
         ? `\n\n${message.artifactUrl}`
         : ""
-    const text = message.text + artifactLine
+    return await this.sendWith(member, message.text + artifactLine, this.threadRefByMember.get(member.id))
+  }
 
+  /** BRIEF 49 (docs/REACT-REPLY.md §3): the threaded reply hand. The
+   *  `replyToMessageId` is the provider-native id the room's resolver
+   *  handed up — Gmail turns it into real `In-Reply-To`/`References`
+   *  headers server-side; a non-Gmail mail provider sends it unthreaded
+   *  and says so on its own result. One send body shared with `send`, so
+   *  the tool path and the ordinary path cannot drift. */
+  async sendReply(member: Member, text: string, replyToMessageId: string): Promise<string | undefined> {
+    if (member.address.provider !== "email") return undefined
+    return await this.sendWith(member, text, replyToMessageId)
+  }
+
+  private async sendWith(member: Member, text: string, replyToMessageId: string | undefined): Promise<string | undefined> {
     const content: Record<string, unknown> = { subject: this.subjectFor(member), text }
-    const threadRef = this.threadRefByMember.get(member.id)
-    if (threadRef !== undefined) {
-      content.reply_to_message_id = threadRef
+    if (replyToMessageId !== undefined) {
+      content.reply_to_message_id = replyToMessageId
     }
 
     const result = await this.client.call(`member ${member.id}`, "send_message", {

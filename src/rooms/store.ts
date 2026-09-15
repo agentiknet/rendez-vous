@@ -248,6 +248,11 @@ function isDelivery(value: unknown): value is Delivery {
   // BRIEF-48: optional, present on delivered push records only. Same
   // optional-key JSON round-trip rule as `toolName`.
   const providerMessageId = "providerMessageId" in value ? value.providerMessageId : undefined
+  // BRIEF 49: optional, on `kind: "reaction"`/`kind: "reply"` records only —
+  // the resolved provider id the record acts on, and the reaction's emoji.
+  // Same optional-key JSON round-trip rule as `toolName`.
+  const reactsTo = "reactsTo" in value ? value.reactsTo : undefined
+  const emoji = "emoji" in value ? value.emoji : undefined
   return (
     isString(value.id) &&
     isString(value.memberId) &&
@@ -255,9 +260,13 @@ function isDelivery(value: unknown): value is Delivery {
       value.kind === "whisper" ||
       value.kind === "system" ||
       value.kind === "tool" ||
-      value.kind === "attachment") &&
+      value.kind === "attachment" ||
+      value.kind === "reaction" ||
+      value.kind === "reply") &&
     isStringOrUndefined(toolName) &&
     (attachment === undefined || isDeliveryAttachment(attachment)) &&
+    isStringOrUndefined(reactsTo) &&
+    isStringOrUndefined(emoji) &&
     isString(value.text) &&
     isDeliveryStatus(value.status) &&
     ((typeof failures === "number" && failures >= 0) ||

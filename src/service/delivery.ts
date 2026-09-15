@@ -21,7 +21,7 @@ import type { OutboundMessage, Transport } from "../fanout/types.ts"
 import { SendBlockedError } from "../fanout/types.ts"
 import { whisperNoticeOf } from "../audience/contract.ts"
 import type { RoomStore } from "../rooms/store.ts"
-import { hasSendAttachment } from "./transports.ts"
+import { hasSendAttachment, hasSendReaction, hasSendReply } from "./transports.ts"
 import {
   MAX_DELIVERY_ATTEMPTS,
   type Delivery,
@@ -109,6 +109,14 @@ function spokenSeqFor(kind: Delivery["kind"], seq: number): number | undefined {
     // member did not say nothing. The counter moves for the attachment
     // record itself, on both paths alike.
     case "attachment":
+      return seq
+    // BRIEF 49: a reaction is not speech — an emoji on an existing message
+    // moves no counter. A reply IS a reply: the turn that answered a member
+    // through it must not read as silence, exactly like the attachment
+    // above.
+    case "reaction":
+      return undefined
+    case "reply":
       return seq
   }
 }
@@ -351,6 +359,12 @@ export class DeliveryEngine {
     /** BRIEF-44: the file a `kind: "attachment"` mint carries. Present on
      *  attachment records only, like `toolName` on tool records. */
     attachment?: DeliveryAttachment,
+    /** BRIEF 49: the resolved target a `kind: "reaction"`/`"reply"` mint
+     *  acts on — the provider-native id the handle resolved to, and the
+     *  reaction's emoji ("" = removal). Present on reaction/reply records
+     *  only. A mint WITHOUT one is never made: nothing is sent to a guessed
+     *  message (docs/REACT-REPLY.md §1's fault, wearing a mint). */
+    reactive?: { readonly reactsTo: string; readonly emoji?: string },
   ): Promise<AcceptOutcome> {
     const room = this.store.get(code)
     if (room === undefined) throw new Error(`unknown room: ${code}`)
@@ -364,7 +378,7 @@ export class DeliveryEngine {
     }
 
     if (accepted.length > 0) {
-      await this.mintRecords(code, kind, text, accepted, toolName, true, attachment)
+      await this.mintRecords(code, kind, text, accepted, toolName, true, attachment, reactive)
     }
 
     return { accepted, unknown }
@@ -383,6 +397,7 @@ export class DeliveryEngine {
     toolName: string | undefined,
     discharge: boolean,
     attachment?: DeliveryAttachment,
+    reactive?: { readonly reactsTo: string; readonly emoji?: string },
   ): Promise<void> {
     const room = this.store.get(code)
     if (room === undefined) return
@@ -404,6 +419,9 @@ export class DeliveryEngine {
       // BRIEF-44: written only when supplied — a text record round-trips with
       // the key genuinely absent, same rule as `toolName`.
       ...(attachment !== undefined ? { attachment } : {}),
+      ...(reactive !== undefined
+        ? { reactsTo: reactive.reactsTo, ...(reactive.emoji !== undefined ? { emoji: reactive.emoji } : {}) }
+        : {}),
       status: "pending",
       failures: 0,
       lastError: undefined,
@@ -617,7 +635,12 @@ export class DeliveryEngine {
       lastError = `member ${delivery.memberId} is no longer in the room`
     } else {
       const message = this.renderFor(code, delivery, member)
-      if (message === undefined && deliveryModeOf(member) === "pull") {
+      // BRIEF 49: a reaction/reply record never lands in a pull member's
+      // outbox — it is not text their tab renders, and the capability gate
+      // at the mint means it can only ever name a provider-backed member.
+      // If one ever reaches here anyway, it must fail honestly below, not
+      // read as delivered.
+      if (message === undefined && deliveryModeOf(member) === "pull" && delivery.kind !== "reaction" && delivery.kind !== "reply") {
         // The pull tier gets nothing over the transport (render.ts) — the
         // record sits in the outbox where the member drains it. Confirmed by
         // the transport it is not: either the recipient's cursor already
@@ -639,6 +662,45 @@ export class DeliveryEngine {
           await this.announceWhisper(code, member, delivery)
         }
         return
+      }
+      // BRIEF 49 (docs/REACT-REPLY.md): the reaction/reply arm — the ONE
+      // passage a `react`/`reply` tool's act crosses, exactly as an
+      // attachment's file crosses `attempt`. The provider id was RESOLVED
+      // before the record was minted (nothing is ever sent to a guessed
+      // message); a transport without the hand fails honestly rather than
+      // degrading the act into text (constraint 4). A `SendBlockedError`
+      // here is the provider's own refusal, permanent, never retried.
+      if (delivery.kind === "reaction" || delivery.kind === "reply") {
+        try {
+          const providerMessageId = await withTimeout(this.sendReactiveTo(member, delivery), this.sendTimeoutMs)
+          await this.mark(code, delivery.id, {
+            status: "delivered",
+            deliveredAt: this.now(),
+            confirmedBy: "transport",
+            // A REACTION returns no new id worth capturing — agentpush's
+            // send_reaction echoes the id that was reacted to, and a second
+            // citable ref for the same message would be a lie by
+            // duplication. Only a REPLY is a new provider message with an
+            // id of its own, captured like any send.
+            ...(delivery.kind === "reply" && typeof providerMessageId === "string" ? { providerMessageId } : {}),
+          })
+          if (delivery.kind === "reply" && typeof providerMessageId === "string") {
+            await this.recordOutboundRef(code, member, providerMessageId)
+          }
+          return
+        } catch (error: unknown) {
+          if (error instanceof SendBlockedError) {
+            const failures = MAX_DELIVERY_ATTEMPTS
+            await this.mark(code, delivery.id, {
+              failures,
+              status: "failed",
+              lastError: error.blockedReason,
+            })
+            await this.reportFinalFailure(code, delivery, failures, error.blockedReason)
+            return
+          }
+          lastError = messageOf(error)
+        }
       }
       if (delivery.attachment !== undefined) {
         // BRIEF 46: nothing is handed to a provider before the URL is
@@ -800,6 +862,28 @@ if (failed) {
     }
   }
 
+  /** BRIEF 49: the reaction/reply hand, shared by every such attempt — the
+   *  transport's `sendReaction`/`sendReply` when it has one, otherwise a
+   *  LOUD failure (never a text degrade: an emoji rendered as a message is
+   *  the member reading something the agent did not mean). A record whose
+   *  resolved id is missing is a caller bug and fails the same way. */
+  private async sendReactiveTo(member: Member, delivery: Delivery): Promise<string | void> {
+    const reactsTo = delivery.reactsTo
+    if (reactsTo === undefined) {
+      throw new Error(`${delivery.kind} record ${delivery.id} carries no resolved provider message id`)
+    }
+    if (delivery.kind === "reaction") {
+      if (hasSendReaction(this.transport)) {
+        return await this.transport.sendReaction(member, reactsTo, delivery.emoji ?? "")
+      }
+      throw new Error(`transport cannot react for member ${member.id}`)
+    }
+    if (hasSendReply(this.transport)) {
+      return await this.transport.sendReply(member, delivery.text, reactsTo)
+    }
+    throw new Error(`transport cannot send a threaded reply for member ${member.id}`)
+  }
+
   /** The attachment probe, made total here: no probe wired (bare engine
    *  harnesses) means the gate is open; a probe that throws is a failure —
    *  never a pass. */
@@ -931,6 +1015,13 @@ if (failed) {
     // delivered-outbox arm — their record's `text` already carries the URL
     // spelled out.
     if (delivery.kind === "attachment") return undefined
+    // A reaction/reply never travels as `renderForTier` prose (BRIEF 49):
+    // the reaction is an emoji hand on a specific provider id and the reply
+    // is a THREADED send (`sendReply`), both routed by `attempt`'s own arm.
+    // Returning `undefined` here also keeps them out of a pull member's
+    // outbox — the kind guard in `attempt` turns that into an honest
+    // failure instead.
+    if (delivery.kind === "reaction" || delivery.kind === "reply") return undefined
     let text: string
     if (delivery.kind === "whisper") {
       if (delivery.memberId === member.id) {

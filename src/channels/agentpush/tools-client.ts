@@ -42,6 +42,18 @@ export function isUploadMediaResult(value: unknown): value is UploadMediaResult 
   return isRecord(value) && typeof value.media_id === "string"
 }
 
+/** BRIEF 49: the `send_reaction` success shape — agentpush answers
+ *  `{status: "reacted", message_id}` where `message_id` echoes the id that
+ *  was reacted to (packages/tools/src/tools/send-reaction.ts). */
+export interface SendReactionResult {
+  status: "reacted"
+  message_id: string
+}
+
+export function isSendReactionResult(value: unknown): value is SendReactionResult {
+  return isRecord(value) && value.status === "reacted" && typeof value.message_id === "string"
+}
+
 export interface AgentpushToolClientOptions {
   /** `RDV_AGENTPUSH_URL`, no trailing slash. */
   baseUrl: string

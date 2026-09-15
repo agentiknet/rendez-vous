@@ -287,8 +287,17 @@ export interface Delivery {
  *  comment there about `system` staying out of the agent's vocabulary
  *  applies to this one too: the agent says words with say/whisper; an
  *  attachment is minted by the delivery layer that already parsed the
- *  marker. It rides the same queue for the same reason `"tool"` does. */
-  readonly kind: "say" | "whisper" | "system" | "tool" | "attachment"
+ *  marker. It rides the same queue for the same reason `"tool"` does.
+ *
+ *  `"reaction"` and `"reply"` (BRIEF 49, docs/REACT-REPLY.md §3) are the
+ *  two agent-called acts that target a CITED message (`react`/`reply`
+ *  tools): a reaction carries `emoji` and `reactsTo`, a reply carries its
+ *  text and `reactsTo` — the provider-native id resolved from the handle.
+ *  Like `"attachment"`, they are minted by the delivery layer (the tool
+ *  resolves the handle and the capability first; a refused act is never
+ *  minted), and they ride the same queue so `attempt` stays the one
+ *  passage out. */
+  readonly kind: "say" | "whisper" | "system" | "tool" | "attachment" | "reaction" | "reply"
   /** For every kind but `"tool"`, the text a human reads. For `"tool"` it is
    *  the call's arguments as JSON — which is exactly what AG-UI's
    *  `TOOL_CALL_ARGS.delta` carries, so the translation is a copy, not a
@@ -311,6 +320,19 @@ export interface Delivery {
    *  concept degrades to. Same reason it is optional rather than a separate
    *  `Delivery` arm as `toolName`'s doc gives. */
   readonly attachment?: DeliveryAttachment
+  /** BRIEF 49: on `kind: "reaction"` and `kind: "reply"` records only — the
+   *  provider-native id of the message being reacted to or replied to,
+   *  resolved from the handle by the resolver BEFORE the record exists (a
+   *  record without a resolved id is never minted: nothing is ever sent to
+   *  a guessed message). NOT `providerMessageId`, which keeps its own
+   *  meaning: the id the provider returned for THIS record's send. Same
+   *  optional-key JSON round-trip rule as `toolName`. */
+  readonly reactsTo?: string
+  /** BRIEF 49: on `kind: "reaction"` records only — the emoji, or `""` for
+   *  a removal (agentpush send-reaction's own contract). Kept on the record
+   *  so the drain can send exactly what the agent asked, and a failed
+   *  reaction names what never landed. */
+  readonly emoji?: string
   /** BRIEF-48: the provider-native message id of the send this record
    *  delivered (agentpush `send_message` → `message_id`), captured by the
    *  drain the moment the transport accepted the hand-off. Present only on
