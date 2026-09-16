@@ -228,9 +228,10 @@ export function resumePrompt(room: Room, opts?: { appDir?: string; recap?: strin
 
   if (recap === undefined) {
     lines.push(
-      // BRIEF-20: same posture as `openingPrompt` — a default broadcast, so
-      // it names the room's slug, not its code.
-      `Deliver this by calling \`say\` with no \`to\` — a broadcast, because the room coming back concerns everyone — with exactly one short line and nothing else: "Room ${room.slug} is back, on a fresh session — I've lost the earlier thread. Catch me up in a line?"`,
+      resumeDeliveryInstruction(
+        room,
+        `Room ${room.slug} is back, on a fresh session — I've lost the earlier thread. Catch me up in a line?`,
+      ),
     )
     return lines.join(" ")
   }
@@ -246,8 +247,38 @@ export function resumePrompt(room: Room, opts?: { appDir?: string; recap?: strin
     recap,
     "--- end of transcript ---",
     "",
-    `Deliver this by calling \`say\` with no \`to\` — a broadcast, because the room coming back concerns everyone — with exactly one short line and nothing else, picking up where the transcript leaves off: "Room ${room.slug} is back — I still have us at: <one clause naming the last thing in the transcript>."`,
+    resumeDeliveryInstruction(
+      room,
+      `Room ${room.slug} is back — I still have us at: <one clause naming the last thing in the transcript>.`,
+      { pickingUp: true },
+    ),
   ].join("\n")
+}
+
+/** How to deliver the resume notice above (BRIEF-20: same posture as
+ *  `openingPrompt` — a default broadcast, so the line above names the
+ *  room's slug, not its code).
+ *
+ *  A room with no `email`-tier member gets the plain broadcast, unchanged.
+ *  A room WITH one gets addressed to every OTHER member instead: this
+ *  notice exists so a context-free agent never pretends to remember (see
+ *  the file doc comment) — that only matters on a channel where someone
+ *  might ask it something next. Email is one-way and asynchronous; "catch
+ *  me up in a line?" landing as a fresh inbox message every time this
+ *  service's session dies and a new one resumes is not a request anyone
+ *  answers, only a notification that fires again the next resume. Skipping
+ *  it is not the silent-absence fault the rest of this codebase guards
+ *  against (docs/OUTBOX.md §1): nothing was asked of the email member, so
+ *  nothing is owed back to them. Falls back to the plain broadcast if the
+ *  room's only members ARE email-tier — there is nobody else to address,
+ *  and staying silent entirely would be the real fault. */
+function resumeDeliveryInstruction(room: Room, line: string, opts?: { pickingUp: boolean }): string {
+  const tail = opts?.pickingUp === true ? ", picking up where the transcript leaves off" : ""
+  const others = room.members.filter((member) => member.tier !== "email").map((member) => member.id)
+  if (others.length === 0) {
+    return `Deliver this by calling \`say\` with no \`to\` — a broadcast, because the room coming back concerns everyone — with exactly one short line and nothing else${tail}: "${line}"`
+  }
+  return `Deliver this by calling \`say\` addressed to exactly these member ids: ${JSON.stringify(others)} — every member except the email-tier one(s): a "catch me up" notice has no reply value landing cold in an inbox, so it goes to everyone who can actually pick the thread back up${tail} — with exactly one short line and nothing else: "${line}"`
 }
 
 /** No sandbox: the box-less fallback of R9. `sandboxId`/`artifactUrl` stay
