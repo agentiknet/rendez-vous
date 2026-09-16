@@ -41,6 +41,11 @@ const parseTable: Array<[string, unknown]> = [
   ["new", { kind: "new" }],
   ["NEW", { kind: "new" }],
   ["  new  ", { kind: "new" }],
+  ["new sb", { kind: "new", booter: "e2b" }],
+  ["new sandbox", { kind: "new", booter: "e2b" }],
+  ["NEW SB", { kind: "new", booter: "e2b" }],
+  ["new local", { kind: "new", booter: "local" }],
+  ["new bogus", undefined],
   ["join RDV-7F3K", { kind: "join", code: "RDV-7F3K" }],
   ["JOIN rdv-7f3k", { kind: "join", code: "RDV-7F3K" }],
   ["join 7f3k", { kind: "join", code: "RDV-7F3K" }],
@@ -76,6 +81,21 @@ test("handleCommand new creates a room and adds the sender as first member", asy
   assert.equal(result.member.displayName, "Alice")
   assert.equal(result.room.members[0]?.id, result.member.id)
   assert.match(result.room.code, /^RDV-[A-Z0-9]{4}$/)
+})
+
+test("handleCommand new records the room's booter — local by default, e2b when asked", async () => {
+  const dir = trackDir(await freshDir())
+  const store = await RoomStore.open(dir)
+
+  const local = await handleCommand(store, { kind: "new" }, alice())
+  assert.ok(local.ok)
+  if (!local.ok) return
+  assert.equal(local.room.booter, "local", "plain new is the caller's own harness")
+
+  const sandbox = await handleCommand(store, { kind: "new", booter: "e2b" }, bob())
+  assert.ok(sandbox.ok)
+  if (!sandbox.ok) return
+  assert.equal(sandbox.room.booter, "e2b", "new sb is always an explicit sandbox ask")
 })
 
 test("handleCommand join adds a second member to an existing room", async () => {

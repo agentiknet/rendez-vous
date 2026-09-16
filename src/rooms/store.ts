@@ -569,7 +569,7 @@ export class RoomStore {
     await this.writeChain
   }
 
-  async create(): Promise<Room> {
+  async create(booter?: "local" | "e2b"): Promise<Room> {
     let code = generateCode()
     while (this.rooms.has(code)) {
       code = generateCode()
@@ -580,6 +580,9 @@ export class RoomStore {
     }
     const now = new Date().toISOString()
     const room: Room = {
+      // Absent on a legacy (pre-field) room — the booter fallback reads the
+      // absence as `RDV_BOOTER`; never default this field at creation.
+      ...(booter !== undefined ? { booter } : {}),
       code,
       slug,
       sessionId: undefined,

@@ -1144,7 +1144,7 @@ export class RoomService {
     if (command !== undefined) {
       switch (command.kind) {
         case "new":
-          return this.handleNew(sender)
+          return this.handleNew(sender, command.booter)
         case "join":
           return this.handleJoin(command.code, sender, input)
         case "join-by-slug":
@@ -1163,8 +1163,11 @@ export class RoomService {
     return this.handleMessage(input)
   }
 
-  private async handleNew(sender: Omit<Member, "id" | "joinedAt">): Promise<InboundOutcome> {
-    const result = await handleCommand(this.store, { kind: "new" }, sender)
+  private async handleNew(
+    sender: Omit<Member, "id" | "joinedAt">,
+    booter?: "local" | "e2b",
+  ): Promise<InboundOutcome> {
+    const result = await handleCommand(this.store, { kind: "new", ...(booter !== undefined ? { booter } : {}) }, sender)
     if (!result.ok) {
       // "new" never fails at the command layer; this branch only exists for exhaustiveness.
       return { kind: "unknown-code" }

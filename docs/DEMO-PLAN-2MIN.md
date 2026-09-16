@@ -42,8 +42,10 @@ Deux salles jumelles, chacune créée PAR un assistant différent (ça prouve le
 MCP des deux côtés) :
 
 - **Salle A — côté Claude Desktop.** Prompt à donner à l'assistant Desktop :
-  « Crée une room rendez-vous » (→ `rendezvous_new`), puis « donne-moi les
-  liens d'invitation de <slug> » (→ `rendezvous_invite`).
+  « Crée une room rendez-vous **en sandbox** » (→ `rendezvous_new` avec
+  `sandbox: true` — depuis 2026-09-16, `new` sans flag crée une salle
+  LOCALE, sans artifact), puis « donne-moi les liens d'invitation de
+  <slug> » (→ `rendezvous_invite`).
 - **Salle B — côté Codex.** Même chose, même wording, dans codex.
 
 Chaque réponse rend `{roomSlug, ready}` + les 3 liens (web / t.me / wa.me).
@@ -111,7 +113,7 @@ rejoint avec « join <CODE-B> ».
 ## 8. Fiches prompts assistants (copier-coller)
 
 Claude Desktop / Codex — les quatre phrases utiles :
-1. « Crée une room rendez-vous »
+1. « Crée une room rendez-vous en sandbox » (`sandbox: true`)
 2. « Donne-moi les liens d'invitation pour <slug> »
 3. « Dis dans la salle <slug> : <texte> »
 4. « Liste mes rooms »

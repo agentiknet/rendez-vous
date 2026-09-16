@@ -6,29 +6,28 @@ même service. **Aucun code à écrire** — le mode local existe
 (salle scratch RDV-C2Y3 : session codex `gpt-5.6-terra`, cwd = ce repo,
 `roster` + `say` via MCP room en loopback, zéro sandbox).
 
-## La bascule (l'unique différence d'exploitation)
+## Le mode, choisi PAR SALLE à la création (2026-09-16)
 
-Le booter est global au service (`RDV_BOOTER`), choisi au démarrage :
+`RDV_BOOTER` ne choisit plus : chaque salle enregistre son mode à la
+création et le garde pour tous ses resumes (`Room.booter`,
+`ResolvingBooter`) :
 
-- **Démo A** — `RDV_BOOTER=local` : pas de box, pas d'artifact ; la session
-  de salle est une session agentproto ordinaire SUR CE MAC (cwd = ce repo,
-  credentials locaux, codex lit `~/.codex/auth.json` nativement).
-- **Démo B** — `RDV_BOOTER=e2b` : la config en place — box, artifact live,
+- **`new`** (ou `new local`, ou MCP `rendezvous_new` sans flag) — la salle
+  tourne sur le harness LOCAL : pas de box, pas d'artifact ; l'agent est une
+  session agentproto ordinaire SUR CE MAC (cwd = ce repo, credentials
+  locaux, codex lit `~/.codex/auth.json` nativement).
+- **`new sb`** (ou `new sandbox`, ou MCP `rendezvous_new` avec
+  `sandbox: true`) — la salle tourne dans une box e2b : artifact live,
   canvakit, pause/destroy possibles.
 
-Les salles persistent à travers la relance. Relance dans la session
-agentproto qui survit (jamais `&`) :
+Une SEULE relance du service (pour charger ce build) suffit aux deux démos —
+plus aucune bascule entre les prises. Les salles créées avant ce changement
+n'ont pas de mode enregistré : elles retombent sur `RDV_BOOTER` (e2b ici),
+comportement inchangé.
 
 ```bash
-cd /Volumes/SSDExternalMacStudio/Code/experiments/hackatons/rendez-vous && set -a && source .env.local && set +a && RDV_BOOTER=local node src/cli.ts serve
+cd /Volumes/SSDExternalMacStudio/Code/experiments/hackatons/rendez-vous && set -a && source .env.local && set +a && node src/cli.ts serve
 ```
-
-```bash
-cd /Volumes/SSDExternalMacStudio/Code/experiments/hackatons/rendez-vous && set -a && source .env.local && set +a && RDV_BOOTER=e2b node src/cli.ts serve
-```
-
-Ordre conseillé : **B d'abord** (config actuelle, zéro relance), puis la
-bascule en local pour **A**. Ou l'inverse si A se joue près du Mac.
 
 ---
 
@@ -40,8 +39,9 @@ Pitch (dit à l'écran, 10 s) :
 > CETTE machine, avec ses fichiers et ses droits. Mon téléphone le pilote.
 > Regardez. »
 
-Pré-prise : salle créée via l'assistant MCP (« Crée une room rendez-vous »),
-TG + WA rejoignent (`join <CODE>`), host web ouvert sur
+Pré-prise : salle créée PAR LE TÉLÉPHONE — TG envoie **`new`** (c'est le
+beat d'ouverture : la salle naît sur le harness local), WA rejoint
+(`join <CODE>`), host web ouvert sur
 `http://localhost:3000/?room=<CODE>&name=Jeremy`, ping de chauffe (premier
 boot local ~40-90 s).
 
@@ -72,8 +72,9 @@ Pitch :
 > de route par un simple lien. Tout le monde voit le même document se
 > construire. »
 
-Pré-prise : config e2b (actuelle), salle créée via MCP, puis à
-l'assistant : « Donne-moi les liens d'invitation pour <slug> »
+Pré-prise : salle SANDBOX créée via MCP — à l'assistant :
+« Crée une room rendez-vous **en sandbox** » (`rendezvous_new` avec
+`sandbox: true`), puis « Donne-moi les liens d'invitation pour <slug> »
 (`rendezvous_invite`) — les 3 liens web / t.me / wa.me. **Le contact rejoint
 par le lien, pas en tapant `join`** — c'est le beat. Contact : un vrai
 humain (Mathilde a déjà prouvé la jointure sur RDV-8TGC) ou le deuxième

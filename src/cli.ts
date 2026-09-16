@@ -4,7 +4,7 @@ import { defaultRuntimeCandidatePaths, portFromDaemonUrl, resolveDaemonToken } f
 import { env } from "./env.ts"
 import type { Transport } from "./fanout/types.ts"
 import { RoomStore } from "./rooms/store.ts"
-import { E2bBooter, LocalBooter, type SessionBooter } from "./service/booter.ts"
+import { E2bBooter, LocalBooter, ResolvingBooter, type SessionBooter } from "./service/booter.ts"
 import { startHttpServer } from "./service/http.ts"
 import { principalToken } from "./service/mcp-personal.ts"
 import { RoomService } from "./service/room-service.ts"
@@ -24,10 +24,10 @@ function buildTransport(): { transport: Transport; description: string } {
 
 function buildBooter(client: DaemonClient, store: RoomStore, token: string | undefined): { booter: SessionBooter; description: string } {
   const daemonOpts = { baseUrl: env.daemonUrl, token }
-  if (env.booter === "e2b") {
-    return { booter: new E2bBooter(client, daemonOpts, store), description: "e2b (sandbox + artifact)" }
+  return {
+    booter: new ResolvingBooter(new LocalBooter(client, daemonOpts), new E2bBooter(client, daemonOpts, store), env.booter),
+    description: `per-room (new = local, new sb = e2b; RDV_BOOTER=${env.booter} fallback)`,
   }
-  return { booter: new LocalBooter(client, daemonOpts), description: "local (no sandbox, no artifact)" }
 }
 
 /** `RDV_DAEMON_TOKEN` is an override, not the source (BRIEF-22): the real

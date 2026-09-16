@@ -570,6 +570,16 @@ export interface Room {
    *  src/sandbox/boot.ts). Undefined when no boot has ever reported it —
    *  e.g. a room with no artifact concept at all (`LocalBooter`). */
   artifactReady: boolean | undefined
+  /** Which mode runs this room's agent session: `"local"` (this host, no
+   *  box, no artifact) or `"e2b"` (sandbox + live artifact). Chosen by the
+   *  CREATE command — `new` is local, `new sb` is e2b, MCP
+   *  `rendezvous_new`'s `sandbox` flag maps onto the same pair — and
+   *  persisted, so every resume of the room re-enters the mode the room was
+   *  born in. Optional key, absent on rooms that predate the field (same
+   *  JSON round-trip rule as `pendingDeliveries` and `asks`); those fall
+   *  back to `RDV_BOOTER` at boot (`ResolvingBooter`), the pre-feature
+   *  behaviour, unchanged. */
+  booter?: "local" | "e2b"
   members: Member[]
   createdAt: string
   updatedAt: string

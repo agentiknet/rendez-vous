@@ -61,6 +61,36 @@ export interface SessionBooter {
   resume(room: Room, opts?: ResumeOptions): Promise<BootedSession>
 }
 
+/** One service, both modes: the room's own `booter` field decides (`new`
+ *  created it local, `new sb` in a box), delegation is wholesale — each
+ *  booter builds its own prompt (the artifact lines only exist in the e2b
+ *  one) and its own MCP mounts, so no mode-specific knowledge leaks here.
+ *  A room persisted before the field existed carries no `booter` and falls
+ *  back to `fallback` (`RDV_BOOTER`) — the pre-feature behaviour. */
+export class ResolvingBooter implements SessionBooter {
+  private readonly local: SessionBooter
+  private readonly e2b: SessionBooter
+  private readonly fallback: "local" | "e2b"
+
+  constructor(local: SessionBooter, e2b: SessionBooter, fallback: "local" | "e2b") {
+    this.local = local
+    this.e2b = e2b
+    this.fallback = fallback
+  }
+
+  private forRoom(room: Room): SessionBooter {
+    return (room.booter ?? this.fallback) === "e2b" ? this.e2b : this.local
+  }
+
+  async boot(room: Room, opts: { label: string }): Promise<BootedSession> {
+    return this.forRoom(room).boot(room, opts)
+  }
+
+  async resume(room: Room, opts?: ResumeOptions): Promise<BootedSession> {
+    return this.forRoom(room).resume(room, opts)
+  }
+}
+
 /** The capability half of both prompts — how attribution arrives, how to
  *  whisper, how the artifact gets rendered and served.
  *

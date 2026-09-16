@@ -161,6 +161,20 @@ test("new boots a session via the booter and replies to the sender with the code
   assert.ok(transport.sends[0]?.message.text.includes(outcome.room.code))
 })
 
+test("new sb records the e2b booter on the room; plain new records local", async () => {
+  const { service, store } = await buildHarness()
+
+  const sandboxOutcome = await service.handleInbound(alice("new sb"))
+  assert.equal(sandboxOutcome.kind, "created")
+  if (sandboxOutcome.kind !== "created") return
+  assert.equal(store.get(sandboxOutcome.room.code)?.booter, "e2b")
+
+  const localOutcome = await service.handleInbound(bob("new"))
+  assert.equal(localOutcome.kind, "created")
+  if (localOutcome.kind !== "created") return
+  assert.equal(store.get(localOutcome.room.code)?.booter, "local")
+})
+
 test("new includes the web join link in the reply and sends a QR when the transport supports media", async () => {
   const { service, transport } = await buildHarness()
 

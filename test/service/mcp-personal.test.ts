@@ -1110,6 +1110,23 @@ test("rendezvous_new creates a room, moves the caller's pointer off the room the
   }
 })
 
+test("rendezvous_new with sandbox:true records the e2b booter on the room it creates", async () => {
+  const { service, store, handler } = await buildSendHarness()
+  const firstRoom = await service.handleInbound(inboundFromAlice("new"))
+  assert.equal(firstRoom.kind, "created")
+  if (firstRoom.kind !== "created") return
+
+  const res = await handler(
+    { jsonrpc: "2.0", id: 17, method: "tools/call", params: { name: "rendezvous_new", arguments: { sandbox: true } } },
+    sendBearerFor(ALICE),
+  )
+  const payload = newPayload(res)
+  assert.notEqual(payload.roomSlug, firstRoom.room.slug, "the pointer must move onto a brand-new room")
+  const newRoom = store.getBySlug(payload.roomSlug)
+  assert.ok(newRoom !== undefined)
+  assert.equal(newRoom.booter, "e2b", "sandbox:true must create a sandbox room, recorded for every later resume")
+})
+
 test("rendezvous_new carries the caller's own displayName and tier over into the new room", async () => {
   const { service, store, handler } = await buildSendHarness()
   const created = await service.handleInbound(inboundFromAlice("new"))

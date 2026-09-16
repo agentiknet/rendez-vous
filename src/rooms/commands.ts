@@ -3,7 +3,7 @@ import type { RoomStore } from "./store.ts"
 import type { Member, Room } from "./types.ts"
 
 export type Command =
-  | { kind: "new" }
+  | { kind: "new"; booter?: "local" | "e2b" }
   | { kind: "join"; code: string }
   /** BRIEF-20 §3: naming a room by its SLUG never admits — it only resolves
    *  for someone the store already lists as a member of that exact room. A
@@ -23,7 +23,11 @@ export type CommandResult =
    *  is not unknown at all) and never a silent admission. */
   | { ok: false; reason: "unknown-code" | "not-in-room" | "not-a-member" }
 
-const NEW_PATTERN = /^new$/i
+/** `new` alone creates the room on the LOCAL host harness; `new sb` (or
+ *  `new sandbox`) boots it in an e2b sandbox instead; `new local` says the
+ *  default out loud. The mode is recorded on the room, so every later
+ *  resume re-enters the same one. */
+const NEW_PATTERN = /^new(?:[ \t]+(sb|sandbox|local))?$/i
 const JOIN_PATTERN = /^join\s+(.+)$/i
 const RESUME_PATTERN = /^resume\s+(.+)$/i
 const LEAVE_PATTERN = /^leave(?:[ \t]+(.+))?$/i
@@ -37,6 +41,9 @@ export function parseCommand(text: string): Command | undefined {
   const trimmed = text.trim()
 
   if (NEW_PATTERN.test(trimmed)) {
+    const variant = NEW_PATTERN.exec(trimmed)?.[1]?.toLowerCase()
+    if (variant === "sb" || variant === "sandbox") return { kind: "new", booter: "e2b" }
+    if (variant === "local") return { kind: "new", booter: "local" }
     return { kind: "new" }
   }
 
@@ -246,7 +253,9 @@ export async function handleCommand(
 ): Promise<CommandResult> {
   switch (command.kind) {
     case "new": {
-      const room = await store.create()
+      // The default is LOCAL (the caller's own harness); a sandbox is always
+      // an explicit ask (`new sb` / the MCP flag) — a box costs real money.
+      const room = await store.create(command.booter ?? "local")
       // R1/R2: `new` is an explicit act by the member too — it moves the
       // pointer off whatever room they were in exactly like `join`/`resume`
       // do, through the one shared mechanism, not a bypassing `addMember`.

@@ -242,17 +242,27 @@ const RENDEZVOUS_SEND_TOOL = {
  *  caller must treat the room as PENDING, not render it as an already-usable,
  *  frozen row.
  *
- *  No arguments, same reasoning as `RENDEZVOUS_LIST_TOOL`: the principal is
- *  fixed by the bearer, and "which room" is not a question this tool answers
- *  — it always means a brand new one. BRIEF-24's rule applies here exactly as
+ *  One optional flag, `sandbox` (default false): the principal is fixed by
+ *  the bearer, and "which room" is not a question this tool answers — it
+ *  always means a brand new one. The flag is the MCP door onto the same
+ *  channel-level pair `new` (local) / `new sb` (sandbox) already spell: the
+ *  mode is the ROOM's, recorded at creation, so every resume re-enters it. BRIEF-24's rule applies here exactly as
  *  it does to `rendezvous_invite`: the new room's join CODE never reaches
  *  `content[0].text`; it rides in `_meta.rooms`, the same shape
  *  `rendezvous_list` already uses, so it merges the same way. */
 const RENDEZVOUS_NEW_TOOL = {
   name: "rendezvous_new",
   description:
-    "Create a brand-new room and move YOUR principal's pointer into it — off whatever room you were in before, exactly like join/resume do (rendezvous_list will show you moved). This BOOTS AN AGENT: a sandbox has to start, which costs a box and takes real time, so the room may come back not yet ready — treat it as PENDING, never render it as an already-usable, frozen row. Returns {roomSlug, ready}; the room's join code never appears here (invite others with rendezvous_invite once it exists). Requires a send-capable credential; a read-only one is refused.",
-  inputSchema: { type: "object", properties: {} },
+    "Create a brand-new room and move YOUR principal's pointer into it — off whatever room you were in before, exactly like join/resume do (rendezvous_list will show you moved). This BOOTS AN AGENT. Default: the agent runs on the LOCAL host harness (no box, no artifact). sandbox=true: the agent runs in an e2b SANDBOX instead — the live artifact app, at the cost of a box and a slower boot. Either way the room may come back not yet ready — treat it as PENDING, never render it as an already-usable, frozen row. Returns {roomSlug, ready}; the room's join code never appears here (invite others with rendezvous_invite once it exists). Requires a send-capable credential; a read-only one is refused.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      sandbox: {
+        type: "boolean",
+        description: "true = boot the room's agent in an e2b sandbox (live artifact, costs a box). Omit or false = run on the local host harness (no box, no artifact).",
+      },
+    },
+  },
 } as const
 
 /** `rendezvous_leave` (BRIEF-13 step 4). The `leave` command already exists
@@ -706,6 +716,7 @@ async function callNewTool(
   deps: McpPersonalDeps,
   principal: ResolvedPrincipal,
   id: string | number | null,
+  sandbox: boolean,
 ): Promise<McpResponse> {
   const sendInbound = deps.sendInbound
   if (sendInbound === undefined) {
@@ -717,7 +728,14 @@ async function callNewTool(
   const displayName = principalDisplayName(before) ?? principal.address.contactRef
   const tier = before[0]?.member.tier ?? "messenger"
 
-  const outcome = await sendInbound({ address: principal.address, displayName, tier, text: "new" })
+  // The flag spells the channel-level command pair verbatim — one creation
+  // mechanism, two spellings (`new` local, `new sb` sandbox).
+  const outcome = await sendInbound({
+    address: principal.address,
+    displayName,
+    tier,
+    text: sandbox ? "new sb" : "new",
+  })
   if (outcome.kind !== "created") {
     return fail(id, INVALID_PARAMS, `rendezvous_new: could not create a room (${outcome.kind})`)
   }
@@ -1105,7 +1123,8 @@ export function createMcpPersonalHandler(
       }
 
       if (params.name === RENDEZVOUS_NEW_TOOL.name) {
-        return callNewTool(deps, principal, id)
+        const newArgs = isRecord(params.arguments) ? params.arguments : {}
+        return callNewTool(deps, principal, id, newArgs.sandbox === true)
       }
 
       if (params.name === RENDEZVOUS_LEAVE_TOOL.name) {
