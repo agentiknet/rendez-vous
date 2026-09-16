@@ -19,6 +19,10 @@ resume RDV-7F3K   come back tomorrow, with state intact
 leave             move on
 ```
 
+## Watch it in 2 minutes
+
+[![Rendez-vous demo](https://img.youtube.com/vi/F7HrLF0r80U/hqdefault.jpg)](https://www.youtube.com/watch?v=F7HrLF0r80U)
+
 The room is the product. One agent seeing every thread at once can do what a
 chatbot in one person's pocket cannot: spot the conflict between two people
 who never talk to each other, name it in front of both, and arbitrate until
